@@ -64,6 +64,31 @@ class ThreadNavigationTest {
     }
 
     @Test
+    fun waitingOnATeammateIsAWaitNotWorkAndKeepsTheThreadVisible() {
+        val wait = task("dispatch").copy(busy = false, activity = "idle", waitingOnTeammate = true)
+        assertTrue(wait.isWaitingOnTeammate)
+        assertFalse(wait.isWorking)
+        assertTrue(wait.demandsAttention)
+
+        // Work always wins over the wait flag: a working thread under
+        // coordination is genuinely working.
+        val working = wait.copy(busy = true, activity = "working")
+        assertTrue(working.isWorking)
+        assertFalse(working.isWaitingOnTeammate)
+
+        // The wire flag decodes, and a legacy bot-level wait reaches its
+        // single synthesized thread.
+        val decoded = CompanionJson.decodeFromString<BotTask>(
+            """{"threadId":"dispatch","title":"Dispatch","createdAt":0,"waitingOnTeammate":true}"""
+        )
+        assertTrue(decoded.waitingOnTeammate == true)
+        val legacy = bot.copy(busy = false, activity = "idle", waitingOnTeammate = true)
+        val thread = legacy.threadGroups().single().tasks.single()
+        assertEquals("current", thread.threadId)
+        assertTrue(thread.isWaitingOnTeammate)
+    }
+
+    @Test
     fun missingTaskMetadataHasALegacyConversationButAnExplicitEmptyListDoesNot() {
         val legacy = bot.copy(unread = true, busy = true)
         val thread = legacy.threadGroups().single().tasks.single()

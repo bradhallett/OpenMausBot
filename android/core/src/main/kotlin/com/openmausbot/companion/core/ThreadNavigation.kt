@@ -8,8 +8,17 @@ data class BotThreadGroup(val project: BotProject?, val tasks: List<BotTask>) {
 val BotTask.displayTitle: String
     get() = title.trim().ifEmpty { "Untitled thread" }
 
+/** The thread's own turn is running — the desktop's isWorking exactly. */
+val BotTask.isWorking: Boolean
+    get() = activity == "working" || busy == true
+
+/** Waiting on a dispatched teammate: this thread's own turn is done and the
+ * teammate has not settled (#1223). A quiet wait, never the work spinner. */
+val BotTask.isWaitingOnTeammate: Boolean
+    get() = waitingOnTeammate == true && !isWorking
+
 val BotTask.demandsAttention: Boolean
-    get() = busy == true || unread == true || activity in setOf(
+    get() = isWaitingOnTeammate || busy == true || unread == true || activity in setOf(
         "waiting-on-you", "waiting", "working", "running", "queued",
     )
 
@@ -27,6 +36,7 @@ fun Bot.threadGroups(matching: String = "", includingClosed: Boolean = false): L
         tasks == null -> listOf(BotTask(
             threadId = threadId, title = "", createdAt = createdAt,
             modelSelection = modelSelection, busy = busy, activity = activity, unread = unread,
+            waitingOnTeammate = waitingOnTeammate,
             approvalMode = approvalMode, autoApprove = autoApprove, alwaysAllow = alwaysAllow,
         ))
         includingClosed || search.isNotEmpty() -> visibleTasks
