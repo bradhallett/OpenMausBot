@@ -36,6 +36,58 @@ final class ThreadNavigationTests: XCTestCase {
         XCTAssertNil(groups.last?.project)
     }
 
+    func testAttentionFloatsAboveIdleThreadsAndIdleThreadsKeepStoredOrder() {
+        var unread = task("unread")
+        unread.unread = true
+        var working = task("working")
+        working.busy = true
+        let bot = makeBot(tasks: [task("idle-a"), unread, task("idle-b"), working, task("idle-c")])
+
+        XCTAssertEqual(
+            bot.threadGroups().flatMap(\.tasks).map(\.threadId),
+            ["working", "unread", "idle-a", "idle-b", "idle-c"]
+        )
+    }
+
+    func testAttentionRanksWaitingOnYouAboveWorkingAndQueuedAboveUnread() {
+        var unread = task("unread")
+        unread.unread = true
+        var queued = task("queued")
+        queued.activity = "queued"
+        var working = task("working")
+        working.activity = "working"
+        working.busy = false
+        var waiting = task("waiting")
+        waiting.activity = "waiting-on-you"
+        let bot = makeBot(tasks: [unread, queued, working, waiting])
+
+        XCTAssertEqual(
+            bot.threadGroups().flatMap(\.tasks).map(\.threadId),
+            ["waiting", "working", "queued", "unread"]
+        )
+    }
+
+    func testTheThreadOpenHereRidesAboveIdleButBelowAttentionTiers() {
+        var waiting = task("waiting")
+        waiting.activity = "waiting-on-you"
+        let bot = makeBot(tasks: [task("idle"), task("current"), waiting])
+
+        XCTAssertEqual(
+            bot.threadGroups().flatMap(\.tasks).map(\.threadId),
+            ["waiting", "current", "idle"]
+        )
+    }
+
+    func testAttentionOrderingIsStableWithinATier() {
+        var unreadB = task("unread-b")
+        unreadB.unread = true
+        var unreadA = task("unread-a")
+        unreadA.unread = true
+        let bot = makeBot(tasks: [unreadB, unreadA])
+
+        XCTAssertEqual(bot.threadGroups().flatMap(\.tasks).map(\.threadId), ["unread-b", "unread-a"])
+    }
+
     func testOrphansStayUnfiledAndEmptyOrDuplicateFoldersDoNotDuplicateRows() {
         var bot = makeBot(tasks: [task("orphan", project: "deleted"), task("filed", project: "a"), task("loose")])
         bot.projects = [project("empty"), project("a"), project("a")]
