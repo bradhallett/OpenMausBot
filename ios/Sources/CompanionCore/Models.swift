@@ -276,6 +276,11 @@ public struct BotTask: Codable, Hashable, Sendable {
     /// Runtime state from newer computers; used to recover approvals in
     /// background threads without downloading every conversation.
     public var activity: String?
+    /// This thread's own turn is done and a dispatched teammate has not
+    /// settled yet (#1223): a wait, not work. Newer computers send it while
+    /// leaving busy/activity idle, so older builds simply see the thread
+    /// idle instead of spinning a work glyph for the whole teammate run.
+    public var waitingOnTeammate: Bool?
     public var unread: Bool?
     public var approvalMode: String?
     public var autoApprove: Bool?
@@ -301,12 +306,22 @@ public struct BotTask: Codable, Hashable, Sendable {
         closedBy.map { "closed by \($0.name)" } ?? openedByLabel
     }
 
+    /// Working is activity or flag: the wire can carry either alone, so
+    /// the visibility fold, the Working status, and busy-gated actions must
+    /// all ask the same question. Mirrors the desktop's isWorking.
+    public var isWorking: Bool { activity == "working" || busy == true }
+
+    /// Waiting on a dispatched teammate: the thread's own turn is done and
+    /// a teammate has not settled. A quiet wait, never the work spinner;
+    /// real work outranks the flag when the wire carries both (#1223).
+    public var isWaitingOnTeammate: Bool { waitingOnTeammate == true && !isWorking }
+
     /// Whether the row must stay in the list regardless of closed state:
-    /// it is running, needs the person, or has something they have not read.
+    /// it is working, waiting on someone, or has something they have not read.
     public var demandsAttention: Bool {
-        if busy == true || unread == true { return true }
+        if isWorking || isWaitingOnTeammate || unread == true { return true }
         switch activity {
-        case "waiting-on-you", "waiting", "working", "running", "queued": return true
+        case "waiting-on-you", "queued": return true
         default: return false
         }
     }
@@ -331,6 +346,10 @@ public struct Bot: Codable, Hashable, Identifiable, Sendable {
     public var modelSelection: ModelSelection
     public var createdAt: Double
     public var busy: Bool?
+    /// A dispatched teammate has not settled yet; the bot itself is waiting
+    /// on it rather than working (#1223). Carries the active thread's wait;
+    /// per-thread waits live on the task.
+    public var waitingOnTeammate: Bool?
     public var pinned: Bool?
     public var hidden: Bool?
     /// Desktop sidebar section. Missing or blank means the built-in Bots area.
@@ -383,6 +402,7 @@ public struct Bot: Codable, Hashable, Identifiable, Sendable {
         view.threadId = selectedThreadId
         view.modelSelection = task?.modelSelection ?? modelSelection
         view.busy = task?.busy ?? (selectedThreadId == threadId ? busy : false)
+        view.waitingOnTeammate = task?.waitingOnTeammate ?? (selectedThreadId == threadId ? waitingOnTeammate : false)
         view.unread = task?.unread ?? (selectedThreadId == threadId ? unread : false)
         view.approvalMode = task?.approvalMode ?? task?.autoApprove.map { $0 ? "auto" : "ask" } ?? approvalMode
         view.autoApprove = task?.autoApprove ?? autoApprove
