@@ -17840,7 +17840,13 @@ try {
 }
 // A days-scale window needs no tighter cadence; unref so the timer never
 // holds the process open.
-setInterval(autoArchiveClosedThreadsNow, THREAD_AUTO_ARCHIVE_SWEEP_MS).unref();
+setInterval(() => {
+  try {
+    autoArchiveClosedThreadsNow();
+  } catch (error) {
+    console.warn(`thread auto-archive sweep failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}, THREAD_AUTO_ARCHIVE_SWEEP_MS).unref();
 
 // A dispatch claim is deliberately committed before transcript/provider work.
 // If we died after that point, its outcome is unknown: recover the user's words
