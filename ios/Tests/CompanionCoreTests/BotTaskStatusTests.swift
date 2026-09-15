@@ -29,7 +29,7 @@ final class BotTaskStatusTests: XCTestCase {
 
         var working = wait
         working.busy = true
-        XCTAssertFalse(working.isWaitingOnTeammate, "Work outranks the wait when the wire carries both.")
+        XCTAssertTrue(working.isWaitingOnTeammate, "The live #1228 wire paints busy, working, and the wait flag together during a coordination wait; the flag alone decides.")
         XCTAssertTrue(working.isWorking)
     }
 

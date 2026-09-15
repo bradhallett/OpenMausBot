@@ -312,9 +312,11 @@ public struct BotTask: Codable, Hashable, Sendable {
     public var isWorking: Bool { activity == "working" || busy == true }
 
     /// Waiting on a dispatched teammate: the thread's own turn is done and
-    /// a teammate has not settled. A quiet wait, never the work spinner;
-    /// real work outranks the flag when the wire carries both (#1223).
-    public var isWaitingOnTeammate: Bool { waitingOnTeammate == true && !isWorking }
+    /// a teammate has not settled. Flag-only, matching Android: the live
+    /// #1228 wire paints busy, working, and this flag together during a
+    /// coordination wait, so the flag alone decides — a quiet wait, never
+    /// the work spinner.
+    public var isWaitingOnTeammate: Bool { waitingOnTeammate == true }
 
     /// Whether the row must stay in the list regardless of closed state:
     /// it is working, waiting on someone, or has something they have not read.
