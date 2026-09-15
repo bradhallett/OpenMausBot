@@ -53,12 +53,16 @@ export function QueuedComposerMessages({
   onSteer,
   steerMode = "all",
   steering = false,
+  steerInterrupts = false,
   onCancel,
 }: {
   items: Array<{ queueId: string; text: string; reason?: "capacity" }>;
   onSteer?: () => void;
   steerMode?: "all" | "next";
   steering?: boolean;
+  /** True when Steer is backed by an interrupt (engine without live steer):
+   * the hint must say what the click really does. */
+  steerInterrupts?: boolean;
   onCancel: (queueId: string) => void;
 }) {
   if (!items.length) return null;
@@ -71,11 +75,17 @@ export function QueuedComposerMessages({
         ? t("composer.queued.steerAll")
         : t("composer.queued.steerNext")
       : t("composer.queued.steer");
-  const steerDescription = multiple
-    ? steerMode === "all"
-      ? t("composer.queued.steerAllHint", { count: items.length })
-      : t("composer.queued.steerNextHint")
-    : t("composer.queued.steerHint");
+  const steerDescription = steerInterrupts
+    ? multiple
+      ? steerMode === "all"
+        ? t("composer.queued.steerAllInterruptHint", { count: items.length })
+        : t("composer.queued.steerNextInterruptHint")
+      : t("composer.queued.steerInterruptHint")
+    : multiple
+      ? steerMode === "all"
+        ? t("composer.queued.steerAllHint", { count: items.length })
+        : t("composer.queued.steerNextHint")
+      : t("composer.queued.steerHint");
 
   return (
     <div

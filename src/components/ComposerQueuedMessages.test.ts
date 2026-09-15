@@ -71,6 +71,17 @@ describe("QueuedComposerMessages", () => {
     expect(markup).toContain('aria-label="Delete queued message 1 of 1"');
   });
 
+  it("says the fallback Steer stops the running turn when the engine cannot steer live", () => {
+    const base = { items: oneItem, onSteer: () => undefined, onCancel: () => undefined } as const;
+    const liveMarkup = renderToStaticMarkup(createElement(QueuedComposerMessages, base));
+    expect(liveMarkup).toContain("aria-label=\"Steer queued message now\"");
+    const interruptMarkup = renderToStaticMarkup(
+      createElement(QueuedComposerMessages, { ...base, steerInterrupts: true }),
+    );
+    expect(interruptMarkup).toContain("aria-label=\"Stop the running turn and send this message now\"");
+    expect(interruptMarkup).not.toContain("aria-label=\"Steer queued message now\"");
+  });
+
   it("puts the queue-level Steer action on the head only and keeps every delete distinct", () => {
     const markup = renderToStaticMarkup(
       createElement(QueuedComposerMessages, {
