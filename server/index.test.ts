@@ -1615,7 +1615,12 @@ describe("harness HTTP API", () => {
 
   it("replaces a channel task's first-message snippet with a generated title", async () => {
     writeFileSync(oneShotTextFile, "Fix login timeout\n");
-    const member = (await api("GET", "/api/bots?messages=0")).body.bots[0];
+    const created = await api("POST", "/api/bots", {
+      modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
+      requireAvailableModel: true,
+    });
+    expect(created.status).toBe(201);
+    const member = created.body.bot;
     const room = (await api("POST", "/api/groups", {
       name: "Titled channel",
       memberIds: [member.id],
@@ -1637,13 +1642,19 @@ describe("harness HTTP API", () => {
     } finally {
       await api("POST", `/api/groups/${room.id}/interrupt`, {}).catch(() => undefined);
       await api("DELETE", `/api/groups/${room.id}`);
+      await api("DELETE", `/api/bots/${member.id}`);
       rmSync(oneShotTextFile, { force: true });
     }
   });
 
   it("keeps a channel task's snippet title when the one-shot fails", async () => {
     rmSync(oneShotTextFile, { force: true });
-    const member = (await api("GET", "/api/bots?messages=0")).body.bots[0];
+    const created = await api("POST", "/api/bots", {
+      modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
+      requireAvailableModel: true,
+    });
+    expect(created.status).toBe(201);
+    const member = created.body.bot;
     const room = (await api("POST", "/api/groups", {
       name: "Failing one-shot channel",
       memberIds: [member.id],
@@ -1651,11 +1662,27 @@ describe("harness HTTP API", () => {
     })).body.group;
     try {
       const firstMessage = "summarize the deploy notes";
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        "base64",
+      );
+      const uploaded = await fetch(`${BASE}/api/attachments`, {
+        method: "POST",
+        headers: { "content-type": "image/png" },
+        body: new Uint8Array(png),
+      });
+      expect(uploaded.status).toBe(201);
+      const { path: imagePath } = await uploaded.json() as { path: string };
+      const text = `${firstMessage}\n\n<attached-image path="${imagePath}" name="tiny.png" />`;
       rmSync(oneShotTextDump, { force: true });
-      const sent = await api("POST", `/api/groups/${room.id}/messages`, { text: firstMessage });
+      const sent = await api("POST", `/api/groups/${room.id}/messages`, { text });
       expect(sent.status).toBe(202);
       // the member's one-shot ran and failed; the snippet stays
       await expect.poll(() => existsSync(oneShotTextDump), { timeout: 5_000 }).toBe(true);
+      const seen = JSON.parse(readFileSync(oneShotTextDump, "utf8"));
+      // the title prompt carries the message, never the attachment tag
+      expect(seen.prompt).toContain(firstMessage);
+      expect(seen.prompt).not.toContain("attached-image");
       await new Promise((resolve) => setTimeout(resolve, 150));
       const state = (await api("GET", "/api/bots?messages=0")).body.groups.find(
         (candidate: { id: string }) => candidate.id === room.id,
@@ -1665,6 +1692,7 @@ describe("harness HTTP API", () => {
     } finally {
       await api("POST", `/api/groups/${room.id}/interrupt`, {}).catch(() => undefined);
       await api("DELETE", `/api/groups/${room.id}`);
+      await api("DELETE", `/api/bots/${member.id}`);
     }
   });
 

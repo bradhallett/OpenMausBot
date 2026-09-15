@@ -307,6 +307,9 @@ export function titleFromLlm(raw: string): string | null {
     .replace(/^[#*\-\u2022]+/, "")
     .replace(/^["'\u201C\u201D\u2018\u2019\u0060]+/, "")
     .replace(/["'\u201C\u201D\u2018\u2019\u0060]+$/, "")
+    // decoration the quotes were hiding: "## Deploy app" keeps its
+    // markers through the strips above, which never reach past a quote
+    .replace(/^[#*\-\u2022]+/, "")
     .replace(/[#*]+$/, "")
     .replace(/[.\u3002]+$/, "")
     .replace(/\s+/g, " ")
