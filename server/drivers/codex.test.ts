@@ -43,6 +43,17 @@ describe("CodexDriver.decodeConfig", () => {
     // anything non-true is off — a truthy string must not enable full auto
     expect(CodexDriver.decodeConfig({ fullAuto: "yes" }).fullAuto).toBe(false);
   });
+
+  it("allows Company endpoints over HTTPS, and over HTTP only on loopback", () => {
+    expect(CodexDriver.decodeConfig({ managed: { url: "https://company.example/v1", models: ["m"] } }))
+      .toMatchObject({ managed: { url: "https://company.example/v1", models: ["m"] } });
+    expect(CodexDriver.decodeConfig({ managed: { url: "http://127.0.0.1:1/v1", models: ["m"] } }))
+      .toMatchObject({ managed: { url: "http://127.0.0.1:1/v1" } });
+    expect(CodexDriver.decodeConfig({ managed: { url: "http://localhost:1/v1", models: ["m"] } }))
+      .toMatchObject({ managed: { url: "http://localhost:1/v1" } });
+    expect(() => CodexDriver.decodeConfig({ managed: { url: "http://company.example/v1", models: ["m"] } }))
+      .toThrow("Invalid Company Codex endpoint.");
+  });
 });
 
 describe("Codex native diagnostic sanitization", () => {
@@ -795,6 +806,23 @@ describe("CodexDriver turns (fake app-server)", () => {
     expect(JSON.parse(readFileSync(dump, "utf8")).calls.map((call: { method: string }) => call.method)).not.toContain("thread/start");
   });
 
+  it("names the missing Company model prerequisites instead of one blanket refusal", async () => {
+    await create({ managed: true });
+    await expect(instance.adapter.sendTurn({ threadId: "company-no-model", text: "hi" }))
+      .rejects.toThrow("no model is selected");
+    await expect(instance.adapter.sendTurn({ threadId: "company-off-list-model", text: "hi", model: "personal-model" }))
+      .rejects.toThrow("personal-model is not approved for your organization");
+  });
+
+  it("names a missing Company API key or CODEX_HOME instead of one blanket refusal", async () => {
+    await create({ managed: true, environment: { OPENMAUSBOT_COMPANY_API_KEY: "" } });
+    await expect(instance.adapter.sendTurn({ threadId: "company-no-key", text: "hi", model: "company-codex-model" }))
+      .rejects.toThrow("OPENMAUSBOT_COMPANY_API_KEY is missing");
+    await create({ managed: true, environment: { CODEX_HOME: "" } });
+    await expect(instance.adapter.sendTurn({ threadId: "company-no-home", text: "hi", model: "company-codex-model" }))
+      .rejects.toThrow("CODEX_HOME is missing");
+  });
+
   it("rebuilds a missing Company native thread once with its approved model and canonical history", async () => {
     await create({ managed: true });
     const dump = join(scratch, "company-missing-thread.json");
@@ -1078,6 +1106,9 @@ describe("CodexDriver turns (fake app-server)", () => {
       try {
         decision = JSON.parse(readFileSync(dump, "utf8")).decision;
       } catch {
+        // The fake has not written the dump yet.
+      }
+      if (decision === null || decision === undefined) {
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
     }
