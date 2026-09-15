@@ -54,17 +54,33 @@ function trimToTail(file: string, keepBytes: number): void {
       const size = fstatSync(source).size;
       const start = Math.max(0, size - keepBytes);
       const window = Buffer.allocUnsafe(size - start);
-      const read = readSync(source, window, 0, window.length, start);
+      // readSync may hand back fewer bytes than asked for, so fill the
+      // window in a loop. A zero count is an early EOF — the file shrank
+      // under us — and the original is left untouched.
+      let filled = 0;
+      while (filled < window.length) {
+        const count = readSync(source, window, filled, window.length - filled, start + filled);
+        if (count === 0) return;
+        filled += count;
+      }
       // The window starts mid-line unless a record happened to end exactly
       // at `start`; drop everything up to the first newline so the rewritten
       // file opens on a record boundary. A window without a usable newline
       // is a single record bigger than the keep window — leave the file
       // alone rather than corrupt the only copy.
-      const firstNewline = window.subarray(0, read).indexOf(0x0a);
-      if (firstNewline === -1 || firstNewline + 1 >= read) return;
+      const firstNewline = window.indexOf(0x0a);
+      if (firstNewline === -1 || firstNewline + 1 >= window.length) return;
       const target = openSync(staging, "w", 0o600);
       try {
-        writeSync(target, window, firstNewline + 1, read - firstNewline - 1);
+        // writeSync can also stop short of the requested length; keep
+        // going until every remaining byte lands, and treat zero progress
+        // as a failure so the outer catch clears the staging file.
+        let written = firstNewline + 1;
+        while (written < window.length) {
+          const count = writeSync(target, window, written, window.length - written);
+          if (count === 0) throw new Error(`no progress writing ${staging}`);
+          written += count;
+        }
       } finally {
         closeSync(target);
       }
