@@ -5392,7 +5392,7 @@ async function finalScreenFrame(_botId: string, threadId: string): Promise<Frame
  * runs long, or answers with something that is not a plain short title;
  * the caller keeps the snippet it already applied. */
 async function generateThreadTitle(
-  provider: { generateText?: (prompt: string) => Promise<string> },
+  provider: { generateText?: (prompt: string, options?: { signal?: AbortSignal }) => Promise<string> },
   text: string,
 ): Promise<string | null> {
   const prompt = [
@@ -5401,13 +5401,18 @@ async function generateThreadTitle(
     "Message:",
     text.trim().slice(0, 1_500),
   ].join("\n");
+  const expiry = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    // generateText takes no abort signal, so a race is the only cap
+    // the race caps the wait; the signal aborts the provider call itself,
+    // which every generateText driver that can honor it does
     const reply = await Promise.race([
-      provider.generateText!(prompt),
+      provider.generateText!(prompt, { signal: expiry.signal }),
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("thread title timed out")), 10_000);
+        timer = setTimeout(() => {
+          expiry.abort();
+          reject(new Error("thread title timed out"));
+        }, 10_000);
       }),
     ]);
     return titleFromLlm(reply);

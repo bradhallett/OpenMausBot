@@ -26,6 +26,9 @@
 //                      the shape a caller's fallback path has to survive.
 //   FAKE_CLAUDE_TEXT_DUMP like FAKE_CLAUDE_DUMP, but for one-shot text runs,
 //                      so they never overwrite a turn's dump mid-test.
+//   FAKE_CLAUDE_TEXT_HANG when set, the one-shot text mode never replies —
+//                      the caller's abort signal is the only way it ends,
+//                      which is exactly what its tests need to prove.
 //   FAKE_CLAUDE_REPLIES JSON array of strings (or string arrays for multiple
 //                      assistant items) used in order across turns. This makes
 //                      bounded multi-turn orchestration deterministic.
@@ -154,6 +157,11 @@ if (argAfter("--output-format") === "text") {
       oneShotDump,
       JSON.stringify({ pid: process.pid, argv, env: process.env, prompt, mcpConfig: null }, null, 2),
     );
+  }
+  if (process.env.FAKE_CLAUDE_TEXT_HANG) {
+    // a repeating timer keeps the loop alive without settling the
+    // top-level await, which Node would otherwise treat as fatal
+    await new Promise(() => setInterval(() => {}, 1 << 30));
   }
   if (process.env.FAKE_CLAUDE_TEXT_FILE) {
     const file = process.env.FAKE_CLAUDE_TEXT_FILE;
