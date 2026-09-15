@@ -8636,7 +8636,8 @@ function startGroupTurn(
     queueId,
     via: options.via,
   });
-  if (!group.dm) store.titleGroupTaskFromFirstMessage(group.id, text, threadId);
+  const titled = group.dm ? null : store.titleGroupTaskFromFirstMessage(group.id, text, threadId);
+  const snippet = titled?.title;
 
   const archived = members.filter((member) => member.hidden);
   const mentionedArchived = mentionedBots(text, archived.map(({ name }) => ({ name })))[0];
@@ -8680,6 +8681,22 @@ function startGroupTurn(
       });
     }
     return message;
+  }
+
+  // The snippet is only the fallback name here too. The member about to
+  // answer supplies the same cheap one-shot the bot path uses, and the
+  // swap lands only while the row still carries the snippet — a rename by
+  // the person always wins. Channel tasks carry no peer provenance (no
+  // assignment opens them), and a member whose engine offers no text
+  // one-shot simply keeps the snippet.
+  const titleBot = goalCoordinator ?? responders[0]!;
+  const titleInstance = registry.get(titleBot.modelSelection.instanceId);
+  if (titled && snippet && titleInstance?.generateText) {
+    void generateThreadTitle(titleInstance, text)
+      .then((title) => {
+        if (title) store.retitleGroupTask(group.id, threadId, snippet, title);
+      })
+      .catch(() => undefined);
   }
 
   const operation = beginGroupTurnOperation(

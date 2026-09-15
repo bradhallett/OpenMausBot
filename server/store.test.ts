@@ -1170,6 +1170,27 @@ describe("Store change stream", () => {
     expect(store.taskByThread(recipient.id, named.threadId)!.title).toBe("@Clive");
   });
 
+  it("channel first-message titling reports the row it named, and a late retitle cannot undo a rename", () => {
+    const store = new Store(selection);
+    const bot = store.createBot({ name: "Scout" });
+    const group = store.createGroup("Ops", [bot.id])!;
+    const task = store.activeGroupTask(group.id)!;
+    const titled = store.titleGroupTaskFromFirstMessage(group.id, "Audit the payroll", task.threadId);
+    expect(titled?.threadId).toBe(task.threadId);
+    expect(titled?.title).toBe("Audit the payroll");
+    // a person's rename wins over anything generated later
+    store.renameGroupTask(group.id, task.threadId, "Payroll audit");
+    expect(store.retitleGroupTask(group.id, task.threadId, "Audit the payroll", "Payroll checks")).toBeNull();
+    expect(store.activeGroupTask(group.id)!.title).toBe("Payroll audit");
+    // and where nothing intervened, the generated title lands once — a
+    // second answer aimed at the same snippet finds nothing to replace
+    const fresh = store.createGroupTask(group.id)!.threadId;
+    const freshSnippet = store.titleGroupTaskFromFirstMessage(group.id, "Draft the announcement", fresh)!.title;
+    expect(store.retitleGroupTask(group.id, fresh, freshSnippet, "Draft announcement")).toMatchObject({ threadId: fresh });
+    expect(store.retitleGroupTask(group.id, fresh, freshSnippet, "A second opinion")).toBeNull();
+    expect(store.groupTaskByThread(group.id, fresh)!.title).toBe("Draft announcement");
+  });
+
   it("resolvePairConversation reopens a closed pair conversation and gives concurrent work its own thread", () => {
     const store = new Store(selection);
     const recipient = store.createBot({ name: "Scout" });
