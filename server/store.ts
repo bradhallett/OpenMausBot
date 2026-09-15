@@ -235,6 +235,9 @@ export interface GroupTaskRecord {
   threadId: ThreadId;
   title: string;
   createdAt: number;
+  /** Set once the first message named this task, so a rename that puts a
+   * sentinel back cannot re-arm generated titling on a later message. */
+  titleFromFirstMessage?: true;
   pinnedCwd?: string | null;
   pinnedMessageId?: string;
 }
@@ -1434,12 +1437,26 @@ export class Store {
     return task;
   }
 
-  titleGroupTaskFromFirstMessage(groupId: string, text: string, threadId?: string) {
+  /** Name a channel task after its first message, once. Returns the task
+   * it named so a caller can later replace exactly that machine-made
+   * title. */
+  titleGroupTaskFromFirstMessage(groupId: string, text: string, threadId?: string): GroupTaskRecord | null {
     const task = threadId ? this.groupTaskByThread(groupId, threadId) : this.activeGroupTask(groupId);
-    if (!task || task.title !== UNTITLED_TASK) return;
+    if (!task || task.titleFromFirstMessage || task.title !== UNTITLED_TASK) return null;
     task.title = titleFromMessage(text);
+    task.titleFromFirstMessage = true;
     this.saveGroups();
     this.emit({ type: "group", groupId });
+    return task;
+  }
+
+  /** Swap a machine-made first-message channel title for a generated one,
+   * once, on the same snippet-equality contract as bot tasks: any rename
+   * by the person breaks that equality first and always wins. */
+  retitleGroupTask(groupId: string, threadId: string, machineTitle: string, title: string): GroupTaskRecord | null {
+    const task = this.groupTaskByThread(groupId, threadId);
+    if (!task || task.title !== machineTitle) return null;
+    return this.renameGroupTask(groupId, threadId, threadTitleFrom(title));
   }
 
   deleteGroupTask(groupId: string, threadId: string): GroupRecord | null {
