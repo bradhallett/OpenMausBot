@@ -1145,6 +1145,31 @@ describe("Store change stream", () => {
     expect(store.tasks(recipient.id)).toHaveLength(2);
   });
 
+  it("first-message titling reports the peer provenance adoption relies on, and a late retitle cannot undo an adoption rename", () => {
+    const store = new Store(selection);
+    const recipient = store.createBot({ name: "Scout" });
+    const sender = store.createBot({ name: "Clive" });
+    const idle = { working: () => false };
+    const brief = "Verify the export";
+    // a peer-opened row that was still untitled when its assignment landed:
+    // the first message names it, and the record it gets back carries the
+    // provenance that must keep any generated title away from the row
+    const row = store.createTask(recipient.id, undefined, false, undefined, { botId: sender.id, name: "Clive", at: 10 })!;
+    store.appendMessage(row.threadId, { role: "bot", kind: "text", text: `@Scout ${brief}`, at: 1_000 });
+    const titled = store.titleTaskFromFirstMessage(recipient.id, `@Scout ${brief}`, row.threadId);
+    expect(titled?.title).toBe(`@Scout ${brief}`);
+    expect(titled?.openedBy?.botId).toBe(sender.id);
+    // the row a person's assignment named: adoption renames it to the
+    // sender, and a generated title arriving later finds nothing to replace
+    const named = store.createTask(recipient.id, brief, false, undefined, { botId: sender.id, name: "Clive", at: 20 })!;
+    store.appendMessage(named.threadId, { role: "bot", kind: "text", text: `@Scout ${brief}`, at: 2_000 });
+    const adopted = store.resolvePairConversation(sender, recipient.id, idle)!;
+    expect(adopted.created).toBe(false);
+    expect(adopted.task.title).toBe("@Clive");
+    expect(store.retitleTask(recipient.id, named.threadId, `@Scout ${brief}`, "Export verification")).toBeNull();
+    expect(store.taskByThread(recipient.id, named.threadId)!.title).toBe("@Clive");
+  });
+
   it("resolvePairConversation reopens a closed pair conversation and gives concurrent work its own thread", () => {
     const store = new Store(selection);
     const recipient = store.createBot({ name: "Scout" });
