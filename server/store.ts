@@ -293,15 +293,18 @@ export function titleFromMessage(text: string): string {
 }
 
 /** One usable line out of a model's title reply: the first line, no
- * surrounding quotes or code fences, no trailing period, single spaces —
- * or null when what came back is empty, too long to be a title, or
- * otherwise not a plain name. The caller keeps its fallback then. */
+ * surrounding quotes, code fences, or markdown decoration, no trailing
+ * period, single spaces — or null when what came back is empty, too long
+ * to be a title, or otherwise not a plain name. The caller keeps its
+ * fallback then. */
 export function titleFromLlm(raw: string): string | null {
   const line = raw
     .trim()
     .split("\n")[0]!
+    .replace(/^[#*\-\u2022]+/, "")
     .replace(/^["'\u201C\u201D\u2018\u2019\u0060]+/, "")
     .replace(/["'\u201C\u201D\u2018\u2019\u0060]+$/, "")
+    .replace(/[#*]+$/, "")
     .replace(/[.\u3002]+$/, "")
     .replace(/\s+/g, " ")
     .trim();
