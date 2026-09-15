@@ -232,12 +232,12 @@ posixOnly("mid-turn steering e2e", () => {
     ]);
   }, 40_000);
 
-  // TODO(phase-2 quarantine): local run fails at the DELETE below with 503 vs 200
-  // — deleteBotWithLifecycle's only 503s are the VPS/Box cloud-inventory
-  // preflights (server/index.ts ~6735/~6748), hit while the 900KB steer pipe
-  // stays wedged; busy is already false. Needs CI-matrix comparison to
-  // decide product bug vs local inventory-probe environment. Tracked for
-  // phase 3; do not delete this test.
+  // TODO(phase-3 verdict): local run fails at the DELETE below with 503 —
+  // captured body: browser cleanup could not confirm local browser data was
+  // erased (restart-the-desktop-app path), so the refusal is environmental
+  // and unrelated to the steer hold logic: busy is already false and the
+  // wedged 900KB pipe never reaches browser teardown. Watch the first CI
+  // run — unskip if CI passes it, add an environment guard if not.
   it.skip("rejects a delayed steer acknowledgement after the bot is deleted", async () => {
     const created = (await api("POST", "/api/bots")).body.bot;
     await api("PATCH", `/api/bots/${created.id}`, {
