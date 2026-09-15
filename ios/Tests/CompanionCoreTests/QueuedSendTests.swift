@@ -128,6 +128,26 @@ final class QueuedSendTests: XCTestCase {
         XCTAssertEqual(queues["t1"], [held("q1", "good")])
     }
 
+    func testAnUnreadableBotQueuedFrameIsIgnoredNotReadAsAnEmptyQueue() throws {
+        for payload in [
+            "{\"kind\":\"bot.queued\"}",
+            "{\"kind\":\"bot.queued\",\"queues\":\"not a dictionary\"}"
+        ] {
+            let frame = try JSONDecoder().decode(Frame.self, from: Data(payload.utf8))
+            guard case let .unknown(kind) = frame else {
+                return XCTFail("expected an ignored frame, got \(frame)")
+            }
+            XCTAssertEqual(kind, "bot.queued")
+        }
+
+        var state = CompanionState()
+        state.rememberQueued(held("q1"), threadId: "t1")
+        let frame = try JSONDecoder().decode(Frame.self, from: Data("{\"kind\":\"bot.queued\"}".utf8))
+        state.apply(frame)
+        XCTAssertEqual(state.pendingQueued["t1"], [held("q1")],
+                       "an unreadable frame is not the server retiring the queue")
+    }
+
     func testSendReceiptDecodesQueuedAndDirectShapes() throws {
         let queued = try JSONDecoder().decode(SendReceipt.self, from: Data("""
         {"ok":true,"queued":true,"queueId":"q1","threadId":"t1","reason":"capacity"}
