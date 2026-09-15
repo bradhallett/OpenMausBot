@@ -353,7 +353,12 @@ const appConfigSchema = z.object({
    * system language. Unknown tags degrade to English in the renderer. */
   language: optionalText,
   rooms: roomConfigSchema.optional(),
-  threads: z.object({ maxConcurrentPerBot: z.number().int().min(1).max(MAX_CONCURRENT_BOT_THREADS) }).strict().optional(),
+  threads: z.object({
+    maxConcurrentPerBot: z.number().int().min(1).max(MAX_CONCURRENT_BOT_THREADS),
+    /** Days a closed or archived thread's event logs survive (#1280).
+     * Absent keeps them forever. */
+    eventLogRetentionDays: z.number().int().min(1).max(3650).optional(),
+  }).strict().optional(),
   localVm: localVmConfigSchema.optional(),
   features: featureConfigSchema.optional(),
   onboarding: onboardingConfigSchema.optional(),
@@ -397,7 +402,7 @@ export interface AppConfig {
   imageGen?: ImageGenerationConfig;
   profile?: { name?: string; email?: string };
   rooms?: { turnTimeoutMinutes: number };
-  threads?: { maxConcurrentPerBot: number };
+  threads?: { maxConcurrentPerBot: number; eventLogRetentionDays?: number };
   /** Shared preserves the historical singleton. Per-bot gives every bot a
    * separate container, durable workspace, viewer and lease. */
   localVm?: { mode?: "shared" | "per-bot"; maxInstances?: number };
@@ -524,6 +529,13 @@ export function roomTurnTimeoutMinutes(cfg: AppConfig): number {
 
 export function maxConcurrentBotThreads(cfg: AppConfig): number {
   return cfg.threads?.maxConcurrentPerBot ?? DEFAULT_MAX_CONCURRENT_BOT_THREADS;
+}
+
+/** Days a closed or archived bot thread's event logs survive before the
+ * retention sweep removes them (#1280). Null — the default — keeps them
+ * forever. */
+export function threadEventLogRetentionDays(cfg: AppConfig): number | null {
+  return cfg.threads?.eventLogRetentionDays ?? null;
 }
 
 export function localVmMode(cfg: AppConfig): "shared" | "per-bot" {
