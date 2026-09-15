@@ -269,7 +269,7 @@ final class ThreadNavigationTests: XCTestCase {
         held.archivedAt = 5
         held.activity = "waiting"
         XCTAssertFalse(held.isWorking)
-        XCTAssertTrue(held.demandsAttention, "a plain waiting thread still needs the person")
+        XCTAssertTrue(held.demandsAttention(), "a plain waiting thread still needs the person")
         var active = task("current")
         active.archivedAt = 7
         var bot = makeBot(tasks: [putAway, zero, waiting, running, held, active, task("plan")])

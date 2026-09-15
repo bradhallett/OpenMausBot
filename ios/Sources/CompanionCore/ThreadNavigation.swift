@@ -27,10 +27,18 @@ extension Bot {
     /// sidebar folds them: a PM bot that opened ten helper threads and closed
     /// them must not leave ten rows behind. They are never gone — a search
     /// or `includingClosed` (the manage sheet) lists them, and a closed
-    /// thread that is working, unread, or open here stays in the list. A
+    /// thread that is running, unread, or open here stays in the list. A
     /// thread the person archived folds away the same way, with the same
-    /// attention override: a working or waiting archived thread resurfaces.
-    public func threadGroups(matching query: String = "", includingClosed: Bool = false) -> [BotThreadGroup] {
+    /// attention override.
+    /// - Parameter queuedThreadIds: threads holding a queued send, from the
+    ///   client's queue state. A closed or archived thread with a held send
+    ///   stays in the list the way a running one does — activity strings
+    ///   never say this, because the harness reports queues out-of-band.
+    public func threadGroups(
+        matching query: String = "",
+        includingClosed: Bool = false,
+        queuedThreadIds: Set<String> = []
+    ) -> [BotThreadGroup] {
         let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let threads: [BotTask]
         if tasks == nil {
@@ -45,7 +53,9 @@ extension Bot {
             threads = visibleTasks
         } else {
             threads = visibleTasks.filter { task in
-                !(task.isClosed || task.isArchived) || task.demandsAttention || task.threadId == threadId
+                !(task.isClosed || task.isArchived)
+                    || task.demandsAttention(queued: queuedThreadIds.contains(task.threadId))
+                    || task.threadId == threadId
             }
         }
         let ordered = search.isEmpty ? threadsInAttentionOrder(threads) : threads

@@ -915,12 +915,14 @@ final class Session: ObservableObject {
     // is a phone that disagrees with the laptop.
 
     func send(_ text: String, to chat: Chat) async {
+        var receipt: SendReceipt?
         await perform {
             switch chat {
-            case let .bot(bot): try await $0.send(text: text, toBot: bot.id, threadId: bot.threadId)
-            case let .room(room): try await $0.send(text: text, toRoom: room.id)
+            case let .bot(bot): receipt = try await $0.send(text: text, toBot: bot.id, threadId: bot.threadId)
+            case let .room(room): receipt = try await $0.send(text: text, toRoom: room.id)
             }
         }
+        rememberQueuedSend(from: receipt, text: text)
     }
 
     /// Send a composer draft with app-owned attachments. The destination
@@ -1015,7 +1017,8 @@ final class Session: ObservableObject {
                 urls: [],
                 attachments: uploaded
             )
-            try await client.send(text: message, to: destination, sendId: sendID)
+            let receipt = try await client.send(text: message, to: destination, sendId: sendID)
+            rememberQueuedSend(from: receipt, text: text)
             attachmentSendIDs.removeValue(forKey: draftKey)
             actionError = nil
             return true
@@ -1028,6 +1031,41 @@ final class Session: ObservableObject {
         } catch {
             actionError = error.localizedDescription
             return false
+        }
+    }
+
+    /// The harness's answer to a send, when it held the message instead of
+    /// delivering it. This is wire state, not optimism: the row exists
+    /// because the computer said it does, identified by its queueId.
+    private func rememberQueuedSend(from receipt: SendReceipt?, text: String) {
+        guard let receipt, receipt.queued == true,
+              let queueId = receipt.queueId, let threadId = receipt.threadId
+        else { return }
+        state.rememberQueued(
+            QueuedSend(
+                queueId: queueId,
+                text: text,
+                reason: receipt.reason == "capacity" ? "capacity" : nil
+            ),
+            threadId: threadId
+        )
+    }
+
+    /// Take back a held message. The row only goes when the computer agrees;
+    /// an entry that already drained counts as agreement.
+    func cancelQueued(_ send: QueuedSend, threadId: String, in chat: Chat) async {
+        let destination: MessageDestination
+        switch chat {
+        case let .bot(bot): destination = .bot(id: bot.id, threadId: threadId)
+        case let .room(room): destination = .room(id: room.id, threadId: threadId)
+        }
+        var agreed = false
+        await perform {
+            try await $0.cancelQueued(queueId: send.queueId, to: destination)
+            agreed = true
+        }
+        if agreed {
+            state.cancelQueued(queueId: send.queueId, threadId: threadId)
         }
     }
 
