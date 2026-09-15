@@ -404,6 +404,9 @@ beforeAll(async () => {
   writeFileSync(
     join(home, ".openmausbot", "config.json"),
     JSON.stringify({
+      // generated titles are opt-in; this suite turns them on because it
+      // owns the one-shot's reply file (FAKE_CLAUDE_TEXT_FILE below)
+      features: { llmThreadTitles: true },
       instances: {
         ghost: { driver: "not-a-real-driver", displayName: "Ghost" },
         claude: { driver: "claudeAgent", displayName: "Fixture Claude", config: { cli: FAKE_CLAUDE_CLI } },
