@@ -109,6 +109,18 @@ describe("tasks", () => {
     expect(store.titleTaskFromFirstMessage(bot.id, "a second message", task.threadId)).toBeNull();
   });
 
+  it("cannot be re-armed by restoring the sentinel title after the first attempt", async () => {
+    const { store } = await freshStore();
+    const bot = store.createBot();
+    const task = store.createTask(bot.id)!;
+    store.titleTaskFromFirstMessage(bot.id, "Audit the payroll", task.threadId);
+    // a person renames the row back to a sentinel: the first message
+    // already had its naming attempt, so a later message cannot retitle it
+    store.renameTask(bot.id, task.threadId, "New thread");
+    expect(store.titleTaskFromFirstMessage(bot.id, "a follow-up message", task.threadId)).toBeNull();
+    expect(store.activeTask(bot.id)!.title).toBe("New thread");
+  });
+
   it("swaps a machine-made title for a generated one, exactly once", async () => {
     const { store } = await freshStore();
     const bot = store.createBot();

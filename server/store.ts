@@ -341,6 +341,9 @@ export interface TaskRecord {
   threadId: ThreadId;
   title: string;
   createdAt: number;
+  /** Set once the first message named this task, so a rename that puts a
+   * sentinel back cannot re-arm generated titling on a later message. */
+  titleFromFirstMessage?: true;
   /** Organizational grouping only; never a directory or provider context. */
   projectId?: string;
   /** Detached routine execution, reachable through its visible results card. */
@@ -2503,8 +2506,9 @@ export class Store {
    * can see the peer provenance it must leave alone. */
   titleTaskFromFirstMessage(botId: string, text: string, threadId?: string): TaskRecord | null {
     const task = threadId ? this.taskByThread(botId, threadId) : this.activeTask(botId);
-    if (!task || (task.title !== UNTITLED_TASK && task.title !== UNTITLED_THREAD)) return null;
+    if (!task || task.titleFromFirstMessage || (task.title !== UNTITLED_TASK && task.title !== UNTITLED_THREAD)) return null;
     task.title = titleFromMessage(text);
+    task.titleFromFirstMessage = true;
     this.saveBots();
     this.emit({ type: "bot", botId });
     return task;
