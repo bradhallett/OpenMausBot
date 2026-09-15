@@ -5466,6 +5466,69 @@ describe("harness HTTP API", () => {
     expect(nothing.status).toBe(400);
   });
 
+  it("clears incompatible default and per-agent voices when the provider changes", async () => {
+    let botId = "";
+    try {
+      expect((await api("PUT", "/api/config", {
+        tts: { provider: "elevenlabs", voice: "eleven-default" },
+      })).status).toBe(200);
+      const created = await api("POST", "/api/bots");
+      botId = created.body.bot.id;
+      expect((await api("PATCH", `/api/bots/${botId}/profile`, {
+        voice: "eleven-agent",
+      })).status).toBe(200);
+
+      const changed = await api("PUT", "/api/config", { tts: { provider: "fish" } });
+      expect(changed.status).toBe(200);
+      expect(changed.body.tts).toMatchObject({ provider: "fish", voice: "", ready: false });
+      const bot = (await api("GET", "/api/bots?messages=0")).body.bots.find(
+        (candidate: { id: string }) => candidate.id === botId,
+      );
+      expect(bot).not.toHaveProperty("voice");
+      const disk = JSON.parse(readFileSync(join(home, ".openmausbot", "config.json"), "utf8"));
+      expect(disk.tts).toMatchObject({ provider: "fish", voice: "" });
+    } finally {
+      if (botId) await api("DELETE", `/api/bots/${botId}`).catch(() => undefined);
+      await api("PUT", "/api/config", { tts: { provider: "elevenlabs", voice: "" } }).catch(() => undefined);
+    }
+  });
+
+  it("does not switch voice providers when per-agent voices cannot be cleared", async () => {
+    let botId = "";
+    const botsPath = join(home, ".openmausbot", "bots.json");
+    const backupPath = `${botsPath}.voice-switch-test`;
+    let blocked = false;
+    try {
+      expect((await api("PUT", "/api/config", {
+        tts: { provider: "elevenlabs", voice: "eleven-default" },
+      })).status).toBe(200);
+      const created = await api("POST", "/api/bots");
+      botId = created.body.bot.id;
+      expect((await api("PATCH", `/api/bots/${botId}/profile`, {
+        voice: "eleven-agent",
+      })).status).toBe(200);
+
+      renameSync(botsPath, backupPath);
+      mkdirSync(botsPath);
+      blocked = true;
+      const changed = await api("PUT", "/api/config", { tts: { provider: "fish" } });
+      expect(changed.status).toBe(500);
+      const config = await api("GET", "/api/config");
+      expect(config.body.tts).toMatchObject({ provider: "elevenlabs", voice: "eleven-default" });
+      const bot = (await api("GET", "/api/bots?messages=0")).body.bots.find(
+        (candidate: { id: string }) => candidate.id === botId,
+      );
+      expect(bot).toMatchObject({ voice: "eleven-agent" });
+    } finally {
+      if (blocked) {
+        rmSync(botsPath, { recursive: true, force: true });
+        renameSync(backupPath, botsPath);
+      }
+      if (botId) await api("DELETE", `/api/bots/${botId}`).catch(() => undefined);
+      await api("PUT", "/api/config", { tts: { provider: "elevenlabs", voice: "" } }).catch(() => undefined);
+    }
+  });
+
   it("keeps Box resources attached while allowing a proven same-account token rotation", async () => {
     let botId = "";
     try {
@@ -6167,7 +6230,7 @@ describe("harness HTTP API", () => {
   it("keeps skill authoring on by default and persists an explicit opt-out", async () => {
     const before = await api("GET", "/api/config");
     expect(before.status).toBe(200);
-    expect(before.body.features).toEqual({ browser: false, skillAuthoring: true, showToolCalls: false, sharedComputers: false });
+    expect(before.body.features).toEqual({ browser: false, skillAuthoring: true, showToolCalls: false, sharedComputers: false, claudeUserMcp: false });
     // the default is the absence of the key: nothing is written until the toggle is used
     const untouched = JSON.parse(readFileSync(join(home, ".openmausbot", "config.json"), "utf8"));
     expect(untouched.features?.skillAuthoring).toBeUndefined();
@@ -6179,7 +6242,7 @@ describe("harness HTTP API", () => {
       features: { skillAuthoring: false },
     });
     expect(saved.status).toBe(200);
-    expect(saved.body.features).toEqual({ browser: false, skillAuthoring: false, showToolCalls: false, sharedComputers: false });
+    expect(saved.body.features).toEqual({ browser: false, skillAuthoring: false, showToolCalls: false, sharedComputers: false, claudeUserMcp: false });
 
     const disk = JSON.parse(readFileSync(join(home, ".openmausbot", "config.json"), "utf8"));
     // Earlier browser coverage may have persisted its own toggle. Opting out
@@ -6189,7 +6252,7 @@ describe("harness HTTP API", () => {
     // the opt-out survives patches to sibling flags
     const tools = await api("PATCH", "/api/config", { features: { showToolCalls: true } });
     expect(tools.status).toBe(200);
-    expect(tools.body.features).toEqual({ browser: false, skillAuthoring: false, showToolCalls: true, sharedComputers: false });
+    expect(tools.body.features).toEqual({ browser: false, skillAuthoring: false, showToolCalls: true, sharedComputers: false, claudeUserMcp: false });
 
     // an opted-out workspace refuses the skill routes a turn would otherwise reach
     const bot = (await api("POST", "/api/bots", {})).body.bot;
@@ -8531,6 +8594,101 @@ describe("bot memory API", () => {
     } finally {
       await api("POST", `/api/bots/${bot.id}/interrupt`);
       await api("POST", `/api/bots/${other.id}/interrupt`);
+      await api("DELETE", `/api/bots/${bot.id}`);
+      await api("DELETE", `/api/bots/${other.id}`);
+    }
+  });
+
+  it("tells the desktop whether to hold the computer awake for a routine due within the hour", async () => {
+    const bot = (await api("POST", "/api/bots", {})).body.bot;
+    let routineId: string | null = null;
+    try {
+      const idle = await api("GET", "/api/routines/wake");
+      expect(idle.status).toBe(200);
+      expect(typeof idle.body.hold).toBe("boolean");
+      const at = Date.now() + 10 * 60_000;
+      const created = await api("POST", "/api/routines", {
+        name: "Inbox digest", prompt: "Summarise the inbox", botId: bot.id,
+        schedule: { type: "once", at },
+      });
+      expect(created.status).toBe(201);
+      routineId = created.body.routine.id as string;
+      const soon = await api("GET", "/api/routines/wake");
+      expect(soon.body).toEqual({ hold: true, reason: "due", at });
+    } finally {
+      if (routineId) await api("DELETE", `/api/routines/${routineId}`).catch(() => undefined);
+      await api("DELETE", `/api/bots/${bot.id}`);
+    }
+  });
+
+  it("session_search by time lists the bot's recent messages, its rooms included, and only its own", async () => {
+    const bot = (await api("POST", "/api/bots", {})).body.bot;
+    const other = (await api("POST", "/api/bots", {})).body.bot;
+    let groupId: string | null = null;
+    try {
+      for (const b of [bot, other]) {
+        expect((await api("PATCH", `/api/bots/${b.id}`, {
+          modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
+        })).status).toBe(200);
+      }
+      // something said in a 1:1, something said in another bot's 1:1, and a
+      // room the bot belongs to
+      expect((await api("POST", `/api/bots/${bot.id}/messages`, { text: "Please reconcile the September invoices" })).status).toBe(202);
+      await api("POST", `/api/bots/${bot.id}/interrupt`);
+      expect((await api("POST", `/api/bots/${other.id}/messages`, { text: "Not this bot's business" })).status).toBe(202);
+      await api("POST", `/api/bots/${other.id}/interrupt`);
+      // mentions-only: the room line is stored without starting a turn
+      const created = await api("POST", "/api/groups", {
+        name: "Standup", memberIds: [bot.id, other.id],
+        setup: { bulletin: "", defaultResponder: { kind: "mentions" } },
+      });
+      expect(created.status).toBe(201);
+      groupId = created.body.group.id as string;
+      const roomThreadId = created.body.group.threadId as string;
+      expect((await api("POST", `/api/groups/${groupId}/messages`, { text: "Standup: what did everyone do yesterday?" })).status).toBe(202);
+      await expect.poll(async () => {
+        const state = (await api("GET", "/api/bots?messages=0")).body;
+        return state.bots.some((candidate: { id: string; busy?: boolean }) => [bot.id, other.id].includes(candidate.id) && candidate.busy);
+      }, { timeout: 5_000 }).toBe(false);
+
+      const search = async (params: Record<string, string>, fromBotId = bot.id, fromThreadId = bot.threadId) =>
+        fetch(
+          `${BASE}/api/internal/session-search?${new URLSearchParams({ fromBotId, fromThreadId, ...params })}`,
+          { headers: { authorization: `Bearer ${await mintTestCapability(BASE, fromBotId, fromThreadId)}` } },
+        );
+
+      // no words, a window: newest first, the room and the 1:1 both, the other bot's chat never
+      const recent = await search({ since: "1d" });
+      expect(recent.status).toBe(200);
+      const { hits } = (await recent.json()) as { hits: Array<Record<string, unknown>> };
+      const texts = hits.map((hit) => String(hit.snippet));
+      expect(texts.some((text) => text.includes("Standup: what did everyone do yesterday?"))).toBe(true);
+      expect(texts.some((text) => text.includes("Please reconcile the September invoices"))).toBe(true);
+      expect(texts.some((text) => text.includes("Not this bot's business"))).toBe(false);
+      const roomHit = hits.find((hit) => hit.threadId === roomThreadId)!;
+      expect(roomHit).toMatchObject({ room: "Standup", crossed: false, current: false });
+      expect(hits.find((hit) => hit.threadId === bot.threadId)).toMatchObject({ current: true });
+      for (let index = 1; index < hits.length; index += 1) expect(Number(hits[index - 1]!.at)).toBeGreaterThanOrEqual(Number(hits[index]!.at));
+
+      // words plus a window; a window nothing falls in
+      const worded = (await (await search({ q: "reconcile invoices", since: "1d" })).json()) as { hits: Array<{ threadId: string }> };
+      expect(worded.hits.map((hit) => hit.threadId)).toEqual([bot.threadId]);
+      const future = (await (await search({ since: String(Date.now() + 60_000) })).json()) as { hits: unknown[] };
+      expect(future.hits).toEqual([]);
+
+      // from inside the room, a 1:1 hit is a crossing; a room hit is not
+      const fromRoom = (await (await search({ since: "1d" }, bot.id, roomThreadId)).json()) as { hits: Array<Record<string, unknown>> };
+      expect(fromRoom.hits.find((hit) => hit.threadId === bot.threadId)).toMatchObject({ crossed: true });
+      expect(fromRoom.hits.find((hit) => hit.threadId === roomThreadId)).toMatchObject({ crossed: false, current: true });
+
+      // the window has to parse; words or a window has to be there
+      expect((await search({ since: "soon" })).status).toBe(400);
+      expect((await search({ q: "x", until: "later" })).status).toBe(400);
+      expect((await search({})).status).toBe(400);
+    } finally {
+      await api("POST", `/api/bots/${bot.id}/interrupt`);
+      await api("POST", `/api/bots/${other.id}/interrupt`);
+      if (groupId) await api("DELETE", `/api/groups/${groupId}`).catch(() => undefined);
       await api("DELETE", `/api/bots/${bot.id}`);
       await api("DELETE", `/api/bots/${other.id}`);
     }
