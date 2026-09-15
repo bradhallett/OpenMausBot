@@ -121,6 +121,7 @@ import {
   skillAuthoringEnabled,
   sharedComputersEnabled,
   builtInBrowserEnabled,
+  llmThreadTitlesEnabled,
   browserProfileReplacementConflict,
   browserProfilePartitionTarget,
   syncCredentialEnv,
@@ -5260,7 +5261,7 @@ async function startTurn(
     // while the row still carries the snippet — a rename by the person or
     // by adoption has already broken that equality by then.
     const snippet = titled?.title;
-    if (titled && snippet && !titled.openedBy?.botId && instance.generateText) {
+    if (titled && snippet && !titled.openedBy?.botId && llmThreadTitlesEnabled(cfg) && instance.generateText) {
       void generateThreadTitle(instance, resolvedImages.text)
         .then((title) => {
           if (title) store.retitleTask(bot.id, threadId, snippet, title);
@@ -8265,7 +8266,7 @@ function startGroupTurn(
   const titleBot = goalCoordinator ?? responders[0]!;
   const titleInstance = registry.get(titleBot.modelSelection.instanceId);
   const titleText = extractTurnImages(text).text;
-  if (titled && snippet && titleText.trim() && titleInstance?.generateText) {
+  if (titled && snippet && titleText.trim() && llmThreadTitlesEnabled(cfg) && titleInstance?.generateText) {
     void generateThreadTitle(titleInstance, titleText)
       .then((title) => {
         if (title) store.retitleGroupTask(group.id, threadId, snippet, title);

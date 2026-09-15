@@ -232,6 +232,10 @@ const featureConfigSchema = z.object({
    * computer control to a workspace). Off until explicitly enabled; there is
    * no Settings toggle — see sharedComputersEnabled. */
   sharedComputers: z.boolean().optional(),
+  /** LLM-generated titles for new bot threads. Off until explicitly
+   * enabled; a one-shot that fails or answers junk leaves the first-message
+   * snippet in place — see llmThreadTitlesEnabled. */
+  llmThreadTitles: z.boolean().optional(),
 });
 /** First-run progress. Kept in the workspace config rather than a browser so
  * it survives cleared site data and is shared by every paired client. Hint
@@ -402,7 +406,7 @@ export interface AppConfig {
    * separate container, durable workspace, viewer and lease. */
   localVm?: { mode?: "shared" | "per-bot"; maxInstances?: number };
   /** Opt-in product experiments. Every flag defaults to disabled. */
-  features?: { skillAuthoring?: boolean; showToolCalls?: boolean; browser?: boolean; sharedComputers?: boolean };
+  features?: { skillAuthoring?: boolean; showToolCalls?: boolean; browser?: boolean; sharedComputers?: boolean; llmThreadTitles?: boolean };
   /** First-run progress; see onboardingConfigSchema. */
   onboarding?: { completedAt?: string; version?: number; reelSeen?: boolean; hintsSeen?: string[] };
   /** Named browser sessions any bot can be pointed at. */
@@ -561,6 +565,15 @@ export function builtInBrowserEnabled(cfg: AppConfig): boolean {
  * (`{"features": {"sharedComputers": true}}`) and restarts the server. */
 export function sharedComputersEnabled(cfg: AppConfig): boolean {
   return cfg.features?.sharedComputers === true;
+}
+
+/** Opt-in generated titles for new bot threads: a cheap provider one-shot
+ * names the row instead of the first-message snippet. Off until enabled by
+ * hand in ~/.openmausbot/config.json
+ * (`{"features": {"llmThreadTitles": true}}`); a one-shot that fails or
+ * answers anything unusable leaves the snippet untouched. */
+export function llmThreadTitlesEnabled(cfg: AppConfig): boolean {
+  return cfg.features?.llmThreadTitles === true;
 }
 
 /** Config sections no provider driver reads. A write that touches only
