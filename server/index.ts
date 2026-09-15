@@ -8264,8 +8264,9 @@ function startGroupTurn(
   // one-shot simply keeps the snippet.
   const titleBot = goalCoordinator ?? responders[0]!;
   const titleInstance = registry.get(titleBot.modelSelection.instanceId);
-  if (titled && snippet && titleInstance?.generateText) {
-    void generateThreadTitle(titleInstance, text)
+  const titleText = extractTurnImages(text).text;
+  if (titled && snippet && titleText.trim() && titleInstance?.generateText) {
+    void generateThreadTitle(titleInstance, titleText)
       .then((title) => {
         if (title) store.retitleGroupTask(group.id, threadId, snippet, title);
       })

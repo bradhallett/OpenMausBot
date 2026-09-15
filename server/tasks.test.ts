@@ -146,6 +146,7 @@ describe("tasks", () => {
     expect(titleFromLlm("Fix   the\tlogin")).toBe("Fix the login");
     expect(titleFromLlm("\u201CFix login timeout\u201D")).toBe("Fix login timeout");
     expect(titleFromLlm("## Fix login")).toBe("Fix login");
+    expect(titleFromLlm('"## Deploy app"')).toBe("Deploy app");
     expect(titleFromLlm("# Room deploy plan")).toBe("Room deploy plan");
     expect(titleFromLlm("- Fix the login flow")).toBe("Fix the login flow");
     expect(titleFromLlm("**Deploy the app**")).toBe("Deploy the app");
