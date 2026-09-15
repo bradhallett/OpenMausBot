@@ -48,10 +48,15 @@ export function sweepThreadEventLogs(
     if (since === null || since >= cutoff) continue;
     let removedAny = false;
     for (const dir of [EVENTS_DIR, NATIVE_DIR]) {
+      const path = join(dir, `${candidate.threadId}.ndjson`);
       try {
-        unlinkSync(join(dir, `${candidate.threadId}.ndjson`));
+        unlinkSync(path);
         removedAny = true;
-      } catch {}
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+          console.warn(`[retention] could not remove ${path}: ${(error as Error).message}`);
+        }
+      }
     }
     if (removedAny) swept++;
   }

@@ -103,4 +103,31 @@ describe("thread event log retention", () => {
     // the files are gone, so a repeat sweep has nothing to do
     expect(sweepThreadEventLogs([old], 30, now)).toBe(0);
   });
+
+  it("warns on removal failures other than a missing file", async () => {
+    const { sweepThreadEventLogs } = await freshSweep();
+    const { EVENTS_DIR, NATIVE_DIR } = await import("./config.ts");
+    const blocked = candidate({ threadId: "blocked", closedAt: now - 31 * DAY_MS });
+    const halfBlocked = candidate({ threadId: "half-blocked", closedAt: now - 31 * DAY_MS });
+    const missing = candidate({ threadId: "missing", closedAt: now - 31 * DAY_MS });
+    await writeLogs("blocked");
+    await writeLogs("half-blocked");
+    // a directory where a log file belongs makes unlink fail without ENOENT
+    rmSync(join(EVENTS_DIR, "blocked.ndjson"));
+    rmSync(join(NATIVE_DIR, "blocked.ndjson"));
+    mkdirSync(join(EVENTS_DIR, "blocked.ndjson"));
+    mkdirSync(join(NATIVE_DIR, "blocked.ndjson"));
+    rmSync(join(EVENTS_DIR, "half-blocked.ndjson"));
+    mkdirSync(join(EVENTS_DIR, "half-blocked.ndjson"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    expect(sweepThreadEventLogs([blocked, halfBlocked, missing], 30, now)).toBe(1);
+    // half-blocked still lost its native/ log, so only that thread counts
+    expect(existsSync(join(NATIVE_DIR, "half-blocked.ndjson"))).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(3);
+    const warned = warn.mock.calls[0]!.join(" ");
+    expect(warned).toContain("[retention]");
+    expect(warned).toContain("blocked.ndjson");
+    warn.mockRestore();
+  });
 });
