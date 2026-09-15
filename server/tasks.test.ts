@@ -164,18 +164,19 @@ describe("tasks", () => {
   it("deleting a bot removes every member thread's event logs", async () => {
     const { store } = await freshStore();
     const bot = store.createBot();
+    const original = bot.threadId;
     const extra = store.createTask(bot.id)!;
     const { EVENTS_DIR, NATIVE_DIR } = await import("./config.ts");
     for (const dir of [EVENTS_DIR, NATIVE_DIR]) {
       mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, `${bot.threadId}.ndjson`), "{}\n");
+      writeFileSync(join(dir, `${original}.ndjson`), "{}\n");
       writeFileSync(join(dir, `${extra.threadId}.ndjson`), "{}\n");
     }
 
     expect(store.deleteBot(bot.id)).toBe(true);
 
     for (const dir of [EVENTS_DIR, NATIVE_DIR]) {
-      for (const threadId of [bot.threadId, extra.threadId]) {
+      for (const threadId of [original, extra.threadId]) {
         expect(existsSync(join(dir, `${threadId}.ndjson`))).toBe(false);
       }
     }
