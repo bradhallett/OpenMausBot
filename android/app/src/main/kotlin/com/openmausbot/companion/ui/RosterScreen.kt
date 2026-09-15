@@ -121,6 +121,9 @@ fun RosterScreen(navigator: CompanionNavigator) {
     var expandedBots by rememberSaveable(stateSaver = StringSetSaver) { mutableStateOf(emptySet<String>()) }
     var collapsedFolders by rememberSaveable(stateSaver = StringSetSaver) { mutableStateOf(emptySet<String>()) }
     var creatingThreads by remember { mutableStateOf(emptySet<String>()) }
+    // One createBot at a time: a second tap while the first is in flight
+    // would race two bots into existence.
+    var creatingBot by remember { mutableStateOf(false) }
     var managingThreads by remember { mutableStateOf<Chat?>(null) }
 
     val query = bar.query
@@ -417,13 +420,21 @@ fun RosterScreen(navigator: CompanionNavigator) {
                 bar = bar.openSearch()
             },
             onCreateBot = {
-                scope.launch {
-                    session.createBot()?.let {
-                        haptics.play(TactileAction.CREATE_BOT_SUCCESS)
-                        navigator.open(Chat.BotChat(it))
+                if (!creatingBot) {
+                    creatingBot = true
+                    scope.launch {
+                        try {
+                            session.createBot()?.let {
+                                haptics.play(TactileAction.CREATE_BOT_SUCCESS)
+                                navigator.open(Chat.BotChat(it))
+                            }
+                        } finally {
+                            creatingBot = false
+                        }
                     }
                 }
             },
+            canCreateBot = !creatingBot,
             onCreateSection = {
                 haptics.play(TactileAction.START_NEW_SECTION)
                 showingNewSection = true
@@ -857,6 +868,7 @@ private fun RosterBottomBar(
     onOpenUpdates: () -> Unit,
     onOpenSearch: () -> Unit,
     onCreateBot: () -> Unit,
+    canCreateBot: Boolean,
     onCreateSection: () -> Unit,
     canCreateSection: Boolean,
     modifier: Modifier = Modifier,
@@ -958,6 +970,7 @@ private fun RosterBottomBar(
                 icon = Icons.Filled.Create,
                 contentDescription = "New bot",
                 onClick = onCreateBot,
+                enabled = canCreateBot,
                 size = MIN_TOUCH_TARGET,
             )
         }
