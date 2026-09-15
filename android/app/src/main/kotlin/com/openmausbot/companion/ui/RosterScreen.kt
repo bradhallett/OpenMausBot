@@ -148,7 +148,9 @@ fun RosterScreen(navigator: CompanionNavigator) {
     val summaries = remember(state, activityDetail) { state.chatSummaries(activityDetail) }
     // Only a search has rows to filter; the unsearched roster is assembled
     // section by section below.
-    val rows = remember(summaries, query) { rosterThreadRows(summaries, query) }
+    val rows = remember(summaries, query, state.queuedThreadIds) {
+        rosterThreadRows(summaries, query, state.queuedThreadIds)
+    }
     val approvals = remember(state) { state.pendingApprovals }
     val waiting = remember(state, approvals) { RosterLayout.waitingChats(state, approvals) }
     // One pass over the fleet rather than one per row: resolving a face walks the
@@ -179,6 +181,7 @@ fun RosterScreen(navigator: CompanionNavigator) {
             (summary.chat as? Chat.BotChat)?.bot?.let { bot ->
                 BotThreadTree(
                     bot = bot,
+                    queuedThreadIds = state.queuedThreadIds,
                     query = query,
                     expanded = bot.id in expandedBots,
                     collapsedFolders = collapsedFolders,

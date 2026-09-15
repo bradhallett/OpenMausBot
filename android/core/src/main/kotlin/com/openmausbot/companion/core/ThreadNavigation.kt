@@ -8,8 +8,14 @@ data class BotThreadGroup(val project: BotProject?, val tasks: List<BotTask>) {
 val BotTask.displayTitle: String
     get() = title.trim().ifEmpty { "Untitled thread" }
 
-val BotTask.demandsAttention: Boolean
-    get() = busy == true || unread == true || activity in setOf(
+/** Running, needing the person, unread, or holding a queued send — client
+ * state passed in, because the harness reports queues out-of-band, never as
+ * task activity. */
+fun BotTask.demandsAttention(queued: Boolean = false): Boolean =
+    busy == true || unread == true || queued || activity in setOf(
+        // "queued" stays in the set: the harness reports client queues
+        // out-of-band (hence the flag), but main already surfaces a thread
+        // whose wire activity says queued, and dropping that would regress it.
         "waiting-on-you", "waiting", "working", "running", "queued",
     )
 
@@ -43,7 +49,13 @@ val Bot.visibleTasks: List<BotTask>
  * A missing folder leaves its threads unfiled. Search includes closed threads
  * and matches folder names, and keeps relevance (stored) order.
  */
-fun Bot.threadGroups(matching: String = "", includingClosed: Boolean = false): List<BotThreadGroup> {
+fun Bot.threadGroups(
+    matching: String = "",
+    includingClosed: Boolean = false,
+    /** Threads holding a queued send. A closed thread with a held send stays
+     * in the list the way a running one does (Sidebar.tsx 865). */
+    queuedThreadIds: Set<String> = emptySet(),
+): List<BotThreadGroup> {
     val search = matching.trim()
     val threads = when {
         tasks == null -> listOf(BotTask(
@@ -53,9 +65,12 @@ fun Bot.threadGroups(matching: String = "", includingClosed: Boolean = false): L
         ))
         includingClosed || search.isNotEmpty() -> visibleTasks
         // Closed and archived threads fold away with the same override: one
-        // that starts working, waits on the person, or turns unread is back.
+        // that starts working, waits on the person, turns unread, or is
+        // holding a queued send is back.
         else -> visibleTasks.filter {
-            (!it.isClosed && !it.isArchived) || it.demandsAttention || it.threadId == threadId
+            (!it.isClosed && !it.isArchived) ||
+                it.demandsAttention(queued = queuedThreadIds.contains(it.threadId)) ||
+                it.threadId == threadId
         }
     }
     val ordered = if (search.isEmpty()) orderedThreads(threads, threadId) else threads

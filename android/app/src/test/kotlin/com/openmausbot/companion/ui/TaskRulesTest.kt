@@ -48,8 +48,16 @@ class TaskRulesTest {
             listOf("helper-0", "t1", "t2", "helper-1", "helper-2"),
             TaskRules.tasks(bot(helpers + own, current = "helper-0")).map { it.threadId },
         )
+        // a held send keeps a closed thread in the open pile — ordering, never filtering
+        assertEquals(
+            listOf("helper-0", "t1", "t2", "helper-1", "helper-2"),
+            TaskRules.tasks(bot(helpers + own), queuedThreadIds = setOf("helper-0")).map { it.threadId },
+        )
         assertTrue(TaskRules.demandsAttention(task("t1").copy(activity = "waiting-on-you")))
         assertFalse(TaskRules.demandsAttention(task("t1").copy(activity = "idle")))
+        // queued is client state, never activity: the dead string stays dead
+        assertFalse(TaskRules.demandsAttention(task("t1").copy(activity = "queued")))
+        assertTrue(TaskRules.demandsAttention(task("t1"), queued = true))
     }
 
     @Test

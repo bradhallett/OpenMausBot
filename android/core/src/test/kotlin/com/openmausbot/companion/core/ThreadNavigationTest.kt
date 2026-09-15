@@ -123,12 +123,28 @@ class ThreadNavigationTest {
     }
 
     @Test
+    fun aHeldSendFloatsARowTheActivityStringNeverCould() {
+        // queued is client state: the server never sends it as activity, so
+        // only a thread in the client's queue floats a closed row (Sidebar.tsx 865)
+        val closed = task("held").copy(closedBy = closer)
+        val grouped = bot.copy(tasks = listOf(closed, task("open")))
+        assertEquals(listOf("open"), grouped.threadGroups().single().tasks.map { it.threadId })
+        assertEquals(
+            listOf("held", "open"),
+            grouped.threadGroups(queuedThreadIds = setOf("held")).single().tasks.map { it.threadId },
+        )
+        // the dead string stays dead; the client flag is what speaks
+        assertFalse(task("dead").copy(activity = "queued").demandsAttention())
+        assertTrue(task("held").demandsAttention(queued = true))
+    }
+
+    @Test
     fun missingTaskMetadataHasALegacyConversationButAnExplicitEmptyListDoesNot() {
         val legacy = bot.copy(unread = true, busy = true)
         val thread = legacy.threadGroups().single().tasks.single()
         assertEquals("current", thread.threadId)
         assertEquals("Untitled thread", thread.displayTitle)
-        assertTrue(thread.demandsAttention)
+        assertTrue(thread.demandsAttention())
         assertTrue(bot.copy(tasks = emptyList()).threadGroups().isEmpty())
         assertTrue(bot.copy(tasks = listOf(task("run").copy(routineRunId = "internal"))).threadGroups().isEmpty())
     }
