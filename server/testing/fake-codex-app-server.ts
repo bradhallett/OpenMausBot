@@ -6,7 +6,7 @@
 //
 //   FAKE_CODEX_MODE   happy (default) | approval | resume | stream | windows-command |
 //                     mcp-elicitation | mcp-app-approval | mcp-form | permissions-approval | question |
-//                     multi-question | config-profile |
+//                     multi-question | empty-question | config-profile |
 //                     config-profile-unsupported | config-read-error | image |
 //                     logged-in-stdout | logged-out | unauthorized | late-request
 //   FAKE_CODEX_LAUNCH_CRASHES  die at turn/start (before ack) with transient stderr,
@@ -168,7 +168,7 @@ process.stdin.on("data", (chunk) => {
     // response to our own server->client request (approval decision)
     if ((msg.id === 100 || msg.id === 101) && (msg.result !== undefined || msg.error !== undefined)) {
       decision = msg.result ?? { error: msg.error };
-      if ((mode === "question" || mode === "multi-question") && process.env.FAKE_CODEX_ASK_HOLD === "1") {
+      if ((mode === "question" || mode === "multi-question" || mode === "empty-question") && process.env.FAKE_CODEX_ASK_HOLD === "1") {
         // Hold: completing the turn would start the driver's child-reap
         // timers, which freeze on a test's fake clock.
         dump();
@@ -545,8 +545,8 @@ process.stdin.on("data", (chunk) => {
               },
             },
           });
-        } else if (mode === "question" || mode === "multi-question") {
-          // one card per ask: a single question vs a bundled pair
+        } else if (mode === "question" || mode === "multi-question" || mode === "empty-question") {
+          // one card per ask: a single question vs a bundled pair vs none
           out({
             jsonrpc: "2.0",
             id: 101,
@@ -558,6 +558,8 @@ process.stdin.on("data", (chunk) => {
                     question: "Ship today?",
                     options: ["Yes", "No", "Maybe", "Later", "Soon", "Never"].map((label) => ({ label })),
                   }]
+                : mode === "empty-question"
+                ? []
                 : [
                     { id: "q-ship", question: "Ship today?", options: [{ label: "Yes" }, { label: "No" }] },
                     { id: "q-review", question: "Who reviews?", options: [{ label: "Ada" }, { label: "Lin" }] },

@@ -1078,6 +1078,21 @@ describe("CodexDriver turns (fake app-server)", () => {
     expect(decision.error.message).toContain("2");
   });
 
+  it("refuses an empty ask instead of opening a card with nothing to answer", async () => {
+    await create({ mode: "empty-question" });
+    const dump = join(scratch, "question-empty.json");
+    process.env.FAKE_CODEX_DUMP = dump;
+
+    await instance.adapter.sendTurn({ threadId: "t-question-empty", text: "ask me nothing" });
+    await recorder.until((e) => e.type === "turn.completed");
+
+    // no card may open: there is no question to answer
+    expect(recorder.events.some((e) => e.type === "request.opened")).toBe(false);
+    const decision = JSON.parse(readFileSync(dump, "utf8")).decision;
+    expect(decision.error.code).toBe(-32602);
+    expect(decision.error.message).toContain("sent none");
+  });
+
   it("maps a timed-out ask to the timeout note for its one question", async () => {
     // Hold the ask reply without completing the turn: a completed turn
     // starts the driver's child-reap loop, whose 25ms setTimeout poll would
