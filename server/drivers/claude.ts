@@ -2011,7 +2011,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           return () => listeners.delete(listener);
         },
       },
-      generateText: (prompt) => generateReview(prompt),
+      generateText: (prompt, options) => generateReview(prompt, options?.signal),
       reviewPermission: generateReview,
       dispose: async () => {
         try {
