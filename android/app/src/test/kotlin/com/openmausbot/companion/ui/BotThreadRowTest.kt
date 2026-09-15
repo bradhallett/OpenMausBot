@@ -24,7 +24,7 @@ class BotThreadRowTest {
     @Test
     fun onlyWorkShowsWorkAndUnknownActivitiesStayQuiet() {
         assertEquals("Working", task("run", activity = "working").runtimeLabel())
-        assertNull(task("run", activity = "running").runtimeLabel(), "running is not a wire activity")
+        assertEquals("Working", task("run", activity = "running").runtimeLabel(), "a running thread is work, exactly as its row labels it")
         assertEquals("Waiting on you", task("ask", activity = "waiting-on-you").runtimeLabel())
         assertEquals("Queued", task("later", activity = "queued").runtimeLabel())
         assertNull(task("idle", activity = "idle").runtimeLabel())

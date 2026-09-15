@@ -76,10 +76,10 @@ class ThreadNavigationTest {
         assertTrue(painted.isWorking)
         assertTrue(painted.isWaitingOnTeammate)
 
-        // Wire-dead activity strings never demand attention: the wire
-        // contract is working, waiting-on-you, idle, no-signal, dead.
-        assertFalse(wait.copy(activity = "running", busy = false, waitingOnTeammate = null).demandsAttention)
-        assertFalse(wait.copy(activity = "waiting", busy = false, waitingOnTeammate = null).demandsAttention)
+        // Composed with main: waiting and running ride along exactly as on
+        // main and iOS, and the teammate flag is additive on top.
+        assertTrue(wait.copy(activity = "running", busy = false, waitingOnTeammate = null).demandsAttention)
+        assertTrue(wait.copy(activity = "waiting", busy = false, waitingOnTeammate = null).demandsAttention)
 
         // The wire flag decodes, and a legacy bot-level wait reaches its
         // single synthesized thread.
@@ -131,6 +131,25 @@ class ThreadNavigationTest {
             listOf("idle-b", "idle-a"),
             grouped.threadGroups("idle").single().tasks.map { it.threadId },
         )
+    }
+
+    @Test
+    fun archivedThreadsFoldAwayUnlessTheyDemandAttentionOrAreCurrent() {
+        val archived = listOf("quiet", "current", "unread", "busy", "waiting", "open").map {
+            task(it).copy(
+                archivedAt = if (it == "open") null else 0.0,
+                unread = it == "unread", busy = it == "busy",
+                activity = if (it == "waiting") "waiting-on-you" else "idle",
+            )
+        }
+        val grouped = bot.copy(tasks = archived)
+        // Folding and attention ordering compose: "quiet" folds away, and the
+        // rest come back in attention order (waiting 0, busy 1, unread 3,
+        // current 4, idle 5) rather than in stored order.
+        assertEquals(listOf("waiting", "busy", "unread", "current", "open"),
+            grouped.threadGroups().single().tasks.map { it.threadId })
+        assertEquals(6, grouped.threadGroups(includingClosed = true).single().tasks.size)
+        assertEquals(listOf("quiet"), grouped.threadGroups("quiet").single().tasks.map { it.threadId })
     }
 
     @Test

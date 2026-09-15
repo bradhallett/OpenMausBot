@@ -8,9 +8,10 @@ data class BotThreadGroup(val project: BotProject?, val tasks: List<BotTask>) {
 val BotTask.displayTitle: String
     get() = title.trim().ifEmpty { "Untitled thread" }
 
-/** The thread's own turn is running — the desktop's isWorking exactly. */
+/** The thread's own turn is running — the desktop's isWorking exactly.
+ * A run counts as work here exactly as its row labels it Working. */
 val BotTask.isWorking: Boolean
-    get() = activity == "working" || busy == true
+    get() = activity == "working" || activity == "running" || busy == true
 
 /** Waiting on a dispatched teammate (#1223). The live #1228 wire paints busy
  * and working during a coordination wait, so the flag outranks the painted
@@ -20,9 +21,10 @@ val BotTask.isWaitingOnTeammate: Boolean
 
 val BotTask.demandsAttention: Boolean
     // The activity set is the BotActivity wire contract (working,
-    // waiting-on-you, idle, no-signal, dead) plus the queued wait.
-    get() = isWaitingOnTeammate || busy == true || unread == true || activity in setOf(
-        "waiting-on-you", "working", "queued",
+    // waiting-on-you, waiting, idle, no-signal, dead) plus the queued wait;
+    // work states arrive through isWorking.
+    get() = isWaitingOnTeammate || isWorking || busy == true || unread == true || activity in setOf(
+        "waiting-on-you", "waiting", "queued",
     )
 
 /**
@@ -65,7 +67,11 @@ fun Bot.threadGroups(matching: String = "", includingClosed: Boolean = false): L
             approvalMode = approvalMode, autoApprove = autoApprove, alwaysAllow = alwaysAllow,
         ))
         includingClosed || search.isNotEmpty() -> visibleTasks
-        else -> visibleTasks.filter { !it.isClosed || it.demandsAttention || it.threadId == threadId }
+        // Closed and archived threads fold away with the same override: one
+        // that starts working, waits on the person, or turns unread is back.
+        else -> visibleTasks.filter {
+            (!it.isClosed && !it.isArchived) || it.demandsAttention || it.threadId == threadId
+        }
     }
     val ordered = if (search.isEmpty()) orderedThreads(threads, threadId) else threads
     val projectIds = mutableSetOf<String>()
