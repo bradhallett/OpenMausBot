@@ -70,6 +70,27 @@ class TaskRulesTest {
     }
 
     @Test
+    fun `archived threads fold to the tail unless they demand attention`() {
+        val tasks = listOf(
+            task("live", "Live"),
+            task("later", "Later").copy(archivedAt = 0.0),
+            task("held", "Held").copy(archivedAt = 5.0, unread = true),
+        )
+        assertEquals(
+            listOf("live", "held", "later"),
+            TaskRules.tasks(bot(tasks)).map { it.threadId },
+        )
+    }
+
+    @Test
+    fun `archiving waits for work to settle`() {
+        assertFalse(TaskRules.canArchive(task("run").copy(activity = "working")))
+        assertFalse(TaskRules.canArchive(task("run").copy(busy = true)))
+        assertTrue(TaskRules.canArchive(task("run").copy(activity = "waiting-on-you")))
+        assertTrue(TaskRules.canArchive(task("run")))
+    }
+
+    @Test
     fun `the current task is the one the bot's thread points at`() {
         val subject = bot(listOf(task("t1"), task("t2")), current = "t2")
         assertFalse(TaskRules.isCurrent(task("t1"), subject))
