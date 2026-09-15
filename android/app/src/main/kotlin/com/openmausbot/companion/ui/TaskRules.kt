@@ -105,8 +105,14 @@ object TaskRules {
     fun canRename(chat: Chat): Boolean = true
 
     /** Archiving mid-turn would race the work, as with delete: wait for it. */
-    fun canArchive(task: BotTask): Boolean =
-        task.activity !in setOf("working", "running") && task.busy != true
+    fun canArchive(task: BotTask, bot: Bot): Boolean =
+        task.activity !in setOf("working", "running") &&
+            if (independent(bot)) task.busy != true else bot.busy != true
+
+    fun canArchive(task: BotTask, chat: Chat): Boolean = when (chat) {
+        is Chat.BotChat -> canArchive(task, chat.bot)
+        is Chat.RoomChat -> task.activity !in setOf("working", "running") && task.busy != true
+    }
 }
 
 /**

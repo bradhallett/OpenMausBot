@@ -87,11 +87,13 @@ class TaskRulesTest {
 
     @Test
     fun `archiving waits for work to settle`() {
-        assertFalse(TaskRules.canArchive(task("run").copy(activity = "working")))
-        assertFalse(TaskRules.canArchive(task("run").copy(activity = "running")))
-        assertFalse(TaskRules.canArchive(task("run").copy(busy = true)))
-        assertTrue(TaskRules.canArchive(task("run").copy(activity = "waiting-on-you")))
-        assertTrue(TaskRules.canArchive(task("run")))
+        // A modern bot paints per-task busy, so the task alone decides.
+        val modern = bot(listOf(task("run").copy(busy = false)))
+        assertFalse(TaskRules.canArchive(task("run").copy(activity = "working"), modern))
+        assertFalse(TaskRules.canArchive(task("run").copy(activity = "running"), modern))
+        assertFalse(TaskRules.canArchive(task("run").copy(busy = true), modern))
+        assertTrue(TaskRules.canArchive(task("run").copy(activity = "waiting-on-you"), modern))
+        assertTrue(TaskRules.canArchive(task("run"), modern))
     }
 
     @Test
@@ -114,6 +116,7 @@ class TaskRulesTest {
         val busy = bot(tasks, current = "t1", busy = true)
         assertFalse(TaskRules.canCreate(busy))
         assertFalse(TaskRules.canDelete(task("t2"), busy))
+        assertFalse(TaskRules.canArchive(task("t2"), busy))
         assertTrue(TaskRules.canSwitch(task("t2"), busy))
     }
 
@@ -129,6 +132,8 @@ class TaskRulesTest {
         assertTrue(TaskRules.canSwitch(idle, subject))
         assertTrue(TaskRules.canDelete(idle, subject))
         assertFalse(TaskRules.canDelete(running, subject))
+        assertTrue(TaskRules.canArchive(idle, subject))
+        assertFalse(TaskRules.canArchive(running, subject))
     }
 
     @Test
@@ -137,6 +142,7 @@ class TaskRulesTest {
         val idle = bot(tasks, current = "t1", busy = false)
         assertTrue(TaskRules.canCreate(idle))
         assertTrue(TaskRules.canDelete(task("t2"), idle))
+        assertTrue(TaskRules.canArchive(task("t2"), idle))
         assertTrue(TaskRules.canSwitch(task("t2"), idle))
     }
 

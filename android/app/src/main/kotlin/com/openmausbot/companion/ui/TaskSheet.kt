@@ -343,7 +343,7 @@ private fun TaskRow(
     val current = TaskRules.isCurrent(task, chat)
     val canSwitch = enabled && TaskRules.canSwitch(task, chat)
     val canDelete = enabled && TaskRules.canDelete(task, chat)
-    val canArchive = enabled && TaskRules.canArchive(task)
+    val canArchive = enabled && TaskRules.canArchive(task, chat)
 
     Row(
         modifier = Modifier
