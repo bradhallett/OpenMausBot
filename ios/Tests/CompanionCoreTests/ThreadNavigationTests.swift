@@ -78,6 +78,25 @@ final class ThreadNavigationTests: XCTestCase {
         )
     }
 
+    func testAHeldSendRanksInTheQueuedTierAboveTheThreadOpenHere() {
+        // A send held behind a running turn is client state, so it floats the
+        // thread the way a wire-queued one does, and a closed thread holding
+        // one stays surfaced — ordering, never filtering.
+        let closer = ThreadCloser(botId: "pm", name: "Parker", at: 9)
+        var helper = task("helper", title: "Helper")
+        helper.closedBy = closer
+        let bot = makeBot(tasks: [helper, task("current"), task("plan")])
+
+        XCTAssertEqual(
+            bot.threadGroups().flatMap(\.tasks).map(\.threadId),
+            ["current", "plan"]
+        )
+        XCTAssertEqual(
+            bot.threadGroups(queuedThreadIds: ["helper", "plan"]).flatMap(\.tasks).map(\.threadId),
+            ["helper", "plan", "current"]
+        )
+    }
+
     func testAttentionOrderingIsStableWithinATier() {
         var unreadB = task("unread-b")
         unreadB.unread = true

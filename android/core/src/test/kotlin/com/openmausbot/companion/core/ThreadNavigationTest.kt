@@ -123,9 +123,10 @@ class ThreadNavigationTest {
     }
 
     @Test
-    fun aHeldSendFloatsARowTheActivityStringNeverCould() {
-        // queued is client state: the server never sends it as activity, so
-        // only a thread in the client's queue floats a closed row (Sidebar.tsx 865)
+    fun aHeldSendFloatsARowTheWireNeverMarks() {
+        // the harness reports queues out-of-band, so the client flag floats
+        // rows the wire never marks; the wire value keeps counting, as on
+        // main (Sidebar.tsx 865)
         val closed = task("held").copy(closedBy = closer)
         val grouped = bot.copy(tasks = listOf(closed, task("open")))
         assertEquals(listOf("open"), grouped.threadGroups().single().tasks.map { it.threadId })
@@ -133,8 +134,8 @@ class ThreadNavigationTest {
             listOf("held", "open"),
             grouped.threadGroups(queuedThreadIds = setOf("held")).single().tasks.map { it.threadId },
         )
-        // the dead string stays dead; the client flag is what speaks
-        assertFalse(task("dead").copy(activity = "queued").demandsAttention())
+        // the wire value still surfaces a row; the client flag covers the rest
+        assertTrue(task("dead").copy(activity = "queued").demandsAttention())
         assertTrue(task("held").demandsAttention(queued = true))
     }
 

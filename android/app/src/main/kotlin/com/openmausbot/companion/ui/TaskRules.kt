@@ -51,9 +51,9 @@ object TaskRules {
                 isCurrent(it, bot)
         }
         val (closed, archived) = folded.partition { !it.isArchived }
-        return orderedThreads(surfaced, bot.threadId) +
-            orderedThreads(closed, bot.threadId) +
-            orderedThreads(archived, bot.threadId)
+        return orderedThreads(surfaced, bot.threadId, queuedThreadIds) +
+            orderedThreads(closed, bot.threadId, queuedThreadIds) +
+            orderedThreads(archived, bot.threadId, queuedThreadIds)
     }
 
     /** Running, needing the person, holding a queued send, or holding

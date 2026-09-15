@@ -55,8 +55,9 @@ class TaskRulesTest {
         )
         assertTrue(TaskRules.demandsAttention(task("t1").copy(activity = "waiting-on-you")))
         assertFalse(TaskRules.demandsAttention(task("t1").copy(activity = "idle")))
-        // queued is client state, never activity: the dead string stays dead
-        assertFalse(TaskRules.demandsAttention(task("t1").copy(activity = "queued")))
+        // the wire value still counts, as on main; the client flag covers the
+        // queues the harness reports out-of-band
+        assertTrue(TaskRules.demandsAttention(task("t1").copy(activity = "queued")))
         assertTrue(TaskRules.demandsAttention(task("t1"), queued = true))
     }
 

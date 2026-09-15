@@ -248,6 +248,7 @@ fun TaskSheet(chat: Chat, onDismiss: () -> Unit, onSelectTask: (ChatTarget) -> U
                                 task = task,
                                 chat = current,
                                 enabled = !saving,
+                                queued = task.threadId in state.queuedThreadIds,
                                 onSwitch = {
                                     saving = true
                                     error = null

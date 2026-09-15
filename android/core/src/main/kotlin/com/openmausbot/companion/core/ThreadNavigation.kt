@@ -21,15 +21,16 @@ fun BotTask.demandsAttention(queued: Boolean = false): Boolean =
 
 /**
  * Attention outranks recency within a bot: waiting-on-you needs the person
- * most, then working/busy, then queued, then unread. The thread being looked
- * at rides just above the idle tail; idle threads keep stored order. Mirrors
- * the desktop's orderedSidebarThreads so the tree, the sheet, and the pickers
- * agree on one order.
+ * most, then working/busy, then queued, then unread. A held send is client
+ * state, so it ranks in the queued tier the way the wire value does. The
+ * thread being looked at rides just above the idle tail; idle threads keep
+ * stored order. Mirrors the desktop's orderedSidebarThreads so the tree, the
+ * sheet, and the pickers agree on one order.
  */
-fun attentionRank(task: BotTask, activeThreadId: String): Int = when {
+fun attentionRank(task: BotTask, activeThreadId: String, queued: Boolean = false): Int = when {
     task.activity == "waiting-on-you" -> 0
     task.busy == true || task.activity == "working" -> 1
-    task.activity == "queued" -> 2
+    task.activity == "queued" || queued -> 2
     task.unread == true -> 3
     task.threadId == activeThreadId -> 4
     else -> 5
@@ -37,8 +38,12 @@ fun attentionRank(task: BotTask, activeThreadId: String): Int = when {
 
 /** Order, never filter: whatever the caller passes stays visible, only the
  * position changes. Sorting is stable, so equal ranks keep stored order. */
-fun orderedThreads(tasks: List<BotTask>, activeThreadId: String): List<BotTask> =
-    tasks.sortedBy { attentionRank(it, activeThreadId) }
+fun orderedThreads(
+    tasks: List<BotTask>,
+    activeThreadId: String,
+    queuedThreadIds: Set<String> = emptySet(),
+): List<BotTask> =
+    tasks.sortedBy { attentionRank(it, activeThreadId, queued = it.threadId in queuedThreadIds) }
 
 /** Routine results are ordinary threads; only their internal per-run executions are hidden. */
 val Bot.visibleTasks: List<BotTask>
@@ -73,7 +78,7 @@ fun Bot.threadGroups(
                 it.threadId == threadId
         }
     }
-    val ordered = if (search.isEmpty()) orderedThreads(threads, threadId) else threads
+    val ordered = if (search.isEmpty()) orderedThreads(threads, threadId, queuedThreadIds) else threads
     val projectIds = mutableSetOf<String>()
     val groups = buildList {
         projects.orEmpty().forEach { project ->

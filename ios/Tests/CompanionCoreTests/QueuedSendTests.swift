@@ -166,11 +166,14 @@ final class QueuedSendTests: XCTestCase {
 
     // MARK: - Row and attention derivation
 
-    func testQueuedActivityNeverDemandsAttentionOnItsOwn() {
+    func testWireQueuedActivityStillDemandsAttention() {
         var task = BotTask(threadId: "t1", title: "t", createdAt: 1)
         task.activity = "queued"
         XCTAssertFalse(task.busy == true)
-        XCTAssertFalse(task.demandsAttention(queued: false), "the server never sends queued as activity; the arm is dead")
+        XCTAssertTrue(
+            task.demandsAttention(queued: false),
+            "main surfaces a thread whose wire activity says queued; the client flag covers the out-of-band queues"
+        )
     }
 
     func testClientQueuedStateDemandsAttentionAndFloatsClosedThreads() {

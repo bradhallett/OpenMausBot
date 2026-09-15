@@ -332,7 +332,7 @@ public struct BotTask: Codable, Hashable, Sendable {
         if busy == true || unread == true { return true }
         if queued { return true }
         switch activity {
-        case "waiting-on-you", "waiting", "working", "running": return true
+        case "waiting-on-you", "waiting", "working", "running", "queued": return true
         default: return false
         }
     }
