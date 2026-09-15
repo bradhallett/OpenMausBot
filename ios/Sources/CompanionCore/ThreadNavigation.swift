@@ -20,7 +20,8 @@ extension Bot {
     /// folders leave their threads accessible in the unfiled group, and
     /// within every group attention outranks recency: a thread that needs
     /// the person floats above the idle tail, which keeps stored order.
-    /// A folder-name search keeps all of that folder's visible threads.
+    /// A folder-name search keeps all of that folder's visible threads,
+    /// in relevance order rather than attention tiers.
     ///
     /// Threads a bot closed are folded away by default, the way the desktop
     /// sidebar folds them: a PM bot that opened ten helper threads and closed
@@ -43,7 +44,7 @@ extension Bot {
         } else {
             threads = visibleTasks.filter { !$0.isClosed || $0.demandsAttention || $0.threadId == threadId }
         }
-        let ordered = threadsInAttentionOrder(threads)
+        let ordered = search.isEmpty ? threadsInAttentionOrder(threads) : threads
 
         var projectIDs = Set<String>()
         var groups = (projects ?? []).compactMap { project -> BotThreadGroup? in
@@ -69,8 +70,9 @@ extension Bot {
     /// Attention outranks recency within a bot: waiting-on-you needs the
     /// person most, then working/busy, then queued, then unread. The thread
     /// being looked at rides just above the idle tail; idle threads keep
-    /// stored order. Mirrors the desktop's attentionRank so the tree, the
-    /// manage sheet, and searches agree on what sits on top.
+    /// stored order. Mirrors the desktop's attentionRank so the tree and
+    /// the manage sheet agree on what sits on top; searches keep relevance
+    /// order, as on desktop and Android.
     private func attentionRank(_ task: BotTask) -> Int {
         if task.activity == "waiting-on-you" { return 0 }
         if task.busy == true || task.activity == "working" { return 1 }

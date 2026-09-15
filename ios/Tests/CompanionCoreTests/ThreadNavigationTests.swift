@@ -88,6 +88,26 @@ final class ThreadNavigationTests: XCTestCase {
         XCTAssertEqual(bot.threadGroups().flatMap(\.tasks).map(\.threadId), ["unread-b", "unread-a"])
     }
 
+    func testEqualAttentionRanksKeepStoredOrderAndSearchKeepsRelevanceOrder() {
+        var busy = task("busy")
+        busy.busy = true
+        var bot = makeBot(tasks: [
+            task("idle-b"), busy, task("idle-a"),
+            task("current"), task("in-folder", project: "plans"),
+        ])
+        bot.projects = [project("plans")]
+
+        XCTAssertEqual(
+            bot.threadGroups().first { $0.id == "unfiled" }?.tasks.map(\.threadId),
+            ["busy", "current", "idle-b", "idle-a"]
+        )
+        XCTAssertEqual(bot.threadGroups(matching: "idle").map(\.id), ["unfiled"])
+        XCTAssertEqual(
+            bot.threadGroups(matching: "idle").flatMap(\.tasks).map(\.threadId),
+            ["idle-b", "idle-a"]
+        )
+    }
+
     func testOrphansStayUnfiledAndEmptyOrDuplicateFoldersDoNotDuplicateRows() {
         var bot = makeBot(tasks: [task("orphan", project: "deleted"), task("filed", project: "a"), task("loose")])
         bot.projects = [project("empty"), project("a"), project("a")]
