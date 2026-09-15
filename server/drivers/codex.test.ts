@@ -1093,6 +1093,21 @@ describe("CodexDriver turns (fake app-server)", () => {
     expect(decision.error.message).toContain("sent none");
   });
 
+  it("refuses a malformed ask payload instead of opening an empty card", async () => {
+    await create({ mode: "malformed-question" });
+    const dump = join(scratch, "question-malformed.json");
+    process.env.FAKE_CODEX_DUMP = dump;
+
+    await instance.adapter.sendTurn({ threadId: "t-question-malformed", text: "ask me wrongly" });
+    await recorder.until((e) => e.type === "turn.completed");
+
+    // no card may open: there is no honest question shape to answer
+    expect(recorder.events.some((e) => e.type === "request.opened")).toBe(false);
+    const decision = JSON.parse(readFileSync(dump, "utf8")).decision;
+    expect(decision.error.code).toBe(-32602);
+    expect(decision.error.message).toContain("must be an array");
+  });
+
   it("maps a timed-out ask to the timeout note for its one question", async () => {
     // Hold the ask reply without completing the turn: a completed turn
     // starts the driver's child-reap loop, whose 25ms setTimeout poll would

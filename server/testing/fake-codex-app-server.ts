@@ -6,7 +6,7 @@
 //
 //   FAKE_CODEX_MODE   happy (default) | approval | resume | stream | windows-command |
 //                     mcp-elicitation | mcp-app-approval | mcp-form | permissions-approval | question |
-//                     multi-question | empty-question | config-profile |
+//                     multi-question | empty-question | malformed-question | config-profile |
 //                     config-profile-unsupported | config-read-error | image |
 //                     logged-in-stdout | logged-out | unauthorized | late-request
 //   FAKE_CODEX_LAUNCH_CRASHES  die at turn/start (before ack) with transient stderr,
@@ -545,14 +545,16 @@ process.stdin.on("data", (chunk) => {
               },
             },
           });
-        } else if (mode === "question" || mode === "multi-question" || mode === "empty-question") {
-          // one card per ask: a single question vs a bundled pair vs none
+        } else if (mode === "question" || mode === "multi-question" || mode === "empty-question" || mode === "malformed-question") {
+          // one card per ask: a single question vs a bundled pair vs none vs a malformed shape
           out({
             jsonrpc: "2.0",
             id: 101,
             method: "item/tool/requestUserInput",
             params: {
-              questions: mode === "question"
+              questions: mode === "malformed-question"
+                ? "please"
+                : mode === "question"
                 ? [{
                     id: "q-ship",
                     question: "Ship today?",

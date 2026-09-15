@@ -802,15 +802,18 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         // timeout note) would be copied into every question id (#1237).
         // Refuse the bundled call with a teaching error instead of
         // fabricating per-question answers.
-        if (isQuestion && Array.isArray(params.questions) && params.questions.length !== 1) {
+        if (isQuestion && (!Array.isArray(params.questions) || params.questions.length !== 1)) {
+          const bundled = Array.isArray(params.questions) && params.questions.length > 1;
           send({
             jsonrpc: "2.0",
             id: msg.id,
             error: {
               code: -32602,
-              message: params.questions.length > 1
+              message: bundled
                 ? `ask supports one question per call; this request bundled ${params.questions.length}. Split it into separate asks, one question each.`
-                : "ask supports one question per call; this request sent none.",
+                : Array.isArray(params.questions)
+                ? "ask supports one question per call; this request sent none."
+                : "ask supports one question per call; params.questions must be an array with exactly one question.",
             },
           });
           return;
