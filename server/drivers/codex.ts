@@ -771,6 +771,22 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           }
           return;
         }
+        // One ask card carries one question honestly: its choices would come
+        // from the first question alone and its one reply (including the
+        // timeout note) would be copied into every question id (#1237).
+        // Refuse the bundled call with a teaching error instead of
+        // fabricating per-question answers.
+        if (isQuestion && Array.isArray(params.questions) && params.questions.length > 1) {
+          send({
+            jsonrpc: "2.0",
+            id: msg.id,
+            error: {
+              code: -32602,
+              message: `ask supports one question per call; this request bundled ${params.questions.length}. Split it into separate asks, one question each.`,
+            },
+          });
+          return;
+        }
         const mcpTool = isLegacyMcpPermission
           ? String(params.message ?? "").match(/tool "([^"]+)"/)?.[1]
           : undefined;

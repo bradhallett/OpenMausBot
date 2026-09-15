@@ -101,6 +101,7 @@ describe("CodexDriver turns (fake app-server)", () => {
   afterEach(async () => {
     delete process.env.FAKE_CODEX_MODE;
     delete process.env.FAKE_CODEX_DUMP;
+    delete process.env.FAKE_CODEX_ASK_HOLD;
     delete process.env.FAKE_CODEX_TRANSIENTS;
     delete process.env.FAKE_CODEX_PARTIAL_FAILS;
     delete process.env.FAKE_CODEX_STATE;
@@ -1006,6 +1007,83 @@ describe("CodexDriver turns (fake app-server)", () => {
     await recorder.until((e) => e.type === "turn.completed");
     // legacy method name → legacy decision vocabulary
     expect(JSON.parse(readFileSync(dump, "utf8")).decision).toEqual({ decision: "approved" });
+  });
+
+  it("answers a single-question ask and keeps its reply scoped to that question", async () => {
+    await create({ mode: "question" });
+    const dump = join(scratch, "question-single.json");
+    process.env.FAKE_CODEX_DUMP = dump;
+
+    await instance.adapter.sendTurn({ threadId: "t-question-single", text: "ask me" });
+    const opened = await recorder.until((e) => e.type === "request.opened");
+    expect(opened).toMatchObject({
+      requestType: "question",
+      tool: "ask_user",
+      summary: "Ship today?",
+      // six options offered; the card keeps its five-row ceiling
+      choices: ["Yes", "No", "Maybe", "Later", "Soon"],
+    });
+
+    await instance.adapter.respondToRequest("t-question-single", opened.requestId!, { behavior: "answer", message: "Yes" });
+    const resolved = await recorder.until((e) => e.type === "request.resolved");
+    expect(resolved).toMatchObject({ behavior: "answer", source: "user" });
+
+    await recorder.until((e) => e.type === "turn.completed");
+    expect(JSON.parse(readFileSync(dump, "utf8")).decision).toEqual({
+      answers: { "q-ship": { answers: ["Yes"] } },
+    });
+  });
+
+  it("refuses a bundled multi-question ask instead of copying one answer into every question (#1237)", async () => {
+    await create({ mode: "multi-question" });
+    const dump = join(scratch, "question-multi.json");
+    process.env.FAKE_CODEX_DUMP = dump;
+
+    await instance.adapter.sendTurn({ threadId: "t-question-multi", text: "ask me twice" });
+    await recorder.until((e) => e.type === "turn.completed");
+
+    // no card may open: one card cannot carry two questions honestly
+    expect(recorder.events.some((e) => e.type === "request.opened")).toBe(false);
+    const decision = JSON.parse(readFileSync(dump, "utf8")).decision;
+    expect(decision.error.code).toBe(-32602);
+    expect(decision.error.message).toContain("one question");
+    expect(decision.error.message).toContain("2");
+  });
+
+  it("maps a timed-out ask to the timeout note for its one question", async () => {
+    // Hold the ask reply without completing the turn: a completed turn
+    // starts the driver's child-reap loop, whose 25ms setTimeout poll would
+    // freeze on the fake clock and strand the teardown.
+    process.env.FAKE_CODEX_ASK_HOLD = "1";
+    await create({ mode: "question" });
+    const dump = join(scratch, "question-timeout.json");
+    process.env.FAKE_CODEX_DUMP = dump;
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await instance.adapter.sendTurn({ threadId: "t-question-timeout", text: "ask me" });
+      const opened = await recorder.until((e) => e.type === "request.opened");
+      await vi.advanceTimersByTimeAsync(15 * 60_000);
+
+      const resolved = await recorder.until((e) => e.type === "request.resolved" && e.requestId === opened.requestId);
+      expect(resolved).toMatchObject({ behavior: "answer", source: "timeout" });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // The held fake records the answers it received once real time lets the
+    // child parse the reply; the turn is still open by design.
+    let decision: unknown = null;
+    for (let i = 0; i < 80 && (decision === null || decision === undefined); i++) {
+      try {
+        decision = JSON.parse(readFileSync(dump, "utf8")).decision;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+    expect(decision).toEqual({
+      answers: { "q-ship": { answers: ["No answer was given — use your best judgment."] } },
+    });
   });
 
   it("answers Codex 0.149 MCP elicitation with the MCP result shape", async () => {
