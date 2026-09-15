@@ -88,6 +88,7 @@ class TaskRulesTest {
     @Test
     fun `archiving waits for work to settle`() {
         assertFalse(TaskRules.canArchive(task("run").copy(activity = "working")))
+        assertFalse(TaskRules.canArchive(task("run").copy(activity = "running")))
         assertFalse(TaskRules.canArchive(task("run").copy(busy = true)))
         assertTrue(TaskRules.canArchive(task("run").copy(activity = "waiting-on-you")))
         assertTrue(TaskRules.canArchive(task("run")))

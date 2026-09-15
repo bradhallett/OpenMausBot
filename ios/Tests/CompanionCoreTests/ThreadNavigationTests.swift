@@ -261,18 +261,30 @@ final class ThreadNavigationTests: XCTestCase {
         var waiting = task("waiting", title: "Waiting")
         waiting.archivedAt = 5
         waiting.activity = "waiting-on-you"
+        var running = task("running", title: "Still running")
+        running.archivedAt = 5
+        running.activity = "running"
+        XCTAssertTrue(running.isWorking, "a running thread is work, exactly as its row labels it")
+        var held = task("held", title: "Plain waiting")
+        held.archivedAt = 5
+        held.activity = "waiting"
+        XCTAssertFalse(held.isWorking)
+        XCTAssertTrue(held.demandsAttention, "a plain waiting thread still needs the person")
         var active = task("current")
         active.archivedAt = 7
-        var bot = makeBot(tasks: [putAway, zero, waiting, active, task("plan")])
+        var bot = makeBot(tasks: [putAway, zero, waiting, running, held, active, task("plan")])
 
-        XCTAssertEqual(bot.threadGroups().flatMap(\.tasks).map(\.threadId), ["waiting", "current", "plan"])
-        XCTAssertEqual(bot.threadGroups(includingClosed: true).flatMap(\.tasks).count, 5)
+        XCTAssertEqual(
+            bot.threadGroups().flatMap(\.tasks).map(\.threadId),
+            ["waiting", "current", "running", "held", "plan"]
+        )
+        XCTAssertEqual(bot.threadGroups(includingClosed: true).flatMap(\.tasks).count, 7)
         XCTAssertEqual(bot.threadGroups(matching: "put away").flatMap(\.tasks).map(\.threadId), ["put-away"])
 
         // Unarchiving clears the stamp; the thread returns to the default tree.
         bot.tasks?[0].archivedAt = nil
         XCTAssertFalse(bot.tasks?[0].isArchived ?? true)
-        XCTAssertEqual(bot.threadGroups().flatMap(\.tasks).count, 4)
+        XCTAssertEqual(bot.threadGroups().flatMap(\.tasks).count, 6)
     }
 
     func testSiblingNavigationProjectionsKeepTheirOwnThreadAndRuntime() throws {

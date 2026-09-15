@@ -306,8 +306,9 @@ public struct BotTask: Codable, Hashable, Sendable {
 
     /// Working is activity or flag: the wire can carry either alone, so the
     /// archive action's busy gate and the working status ask the same
-    /// question.
-    public var isWorking: Bool { activity == "working" || busy == true }
+    /// question. A run counts as work here exactly as its row already
+    /// labels it Working.
+    public var isWorking: Bool { activity == "working" || activity == "running" || busy == true }
 
     /// The one line under a title: who closed it once a bot has, "Archived"
     /// once the person put it away, otherwise who opened it, otherwise
@@ -326,7 +327,7 @@ public struct BotTask: Codable, Hashable, Sendable {
     public var demandsAttention: Bool {
         if busy == true || unread == true { return true }
         switch activity {
-        case "waiting-on-you", "working", "queued": return true
+        case "waiting-on-you", "waiting", "working", "running", "queued": return true
         default: return false
         }
     }
