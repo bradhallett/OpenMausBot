@@ -76,8 +76,11 @@ class TaskRulesTest {
             task("later", "Later").copy(archivedAt = 0.0),
             task("held", "Held").copy(archivedAt = 5.0, unread = true),
         )
+        // "held" is archived but unread, so it is surfaced AND floated: attention
+        // ordering (rank 3) puts it above the idle "live" thread, and only the
+        // quiet "later" folds to the tail.
         assertEquals(
-            listOf("live", "held", "later"),
+            listOf("held", "live", "later"),
             TaskRules.tasks(bot(tasks)).map { it.threadId },
         )
     }

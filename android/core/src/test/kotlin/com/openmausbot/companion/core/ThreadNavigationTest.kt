@@ -113,7 +113,10 @@ class ThreadNavigationTest {
             )
         }
         val grouped = bot.copy(tasks = archived)
-        assertEquals(listOf("current", "unread", "busy", "waiting", "open"),
+        // Folding and attention ordering compose: "quiet" folds away, and the
+        // rest come back in attention order (waiting 0, busy 1, unread 3,
+        // current 4, idle 5) rather than in stored order.
+        assertEquals(listOf("waiting", "busy", "unread", "current", "open"),
             grouped.threadGroups().single().tasks.map { it.threadId })
         assertEquals(6, grouped.threadGroups(includingClosed = true).single().tasks.size)
         assertEquals(listOf("quiet"), grouped.threadGroups("quiet").single().tasks.map { it.threadId })
