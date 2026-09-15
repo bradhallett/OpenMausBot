@@ -61,6 +61,9 @@ export function isProjectEmoji(value: unknown): value is string {
  * wire shape; the extras below are server-private bookkeeping the wire
  * projection (toWireTask) strips. */
 export interface TaskRecord extends WireTask {
+  /** The first user message already drove a title attempt for this task,
+   * so a later one does not rename a thread the person may have retitled. */
+  titleFromFirstMessage?: true;
   /** provider-native continuation per instance, for THIS task only */
   resumeCursors: Record<string, unknown>;
   /** which instance dispatched the most recent turn. A cursor alone can't
@@ -2076,8 +2079,9 @@ export class Store {
    * can see the peer provenance it must leave alone. */
   titleTaskFromFirstMessage(botId: string, text: string, threadId?: string): TaskRecord | null {
     const task = threadId ? this.taskByThread(botId, threadId) : this.activeTask(botId);
-    if (!task || (task.title !== UNTITLED_TASK && task.title !== UNTITLED_THREAD)) return null;
+    if (!task || task.titleFromFirstMessage || (task.title !== UNTITLED_TASK && task.title !== UNTITLED_THREAD)) return null;
     task.title = titleFromMessage(text);
+    task.titleFromFirstMessage = true;
     this.saveBots();
     this.emit({ type: "bot", botId });
     return task;
