@@ -70,11 +70,11 @@ class ThreadNavigationTest {
         assertFalse(wait.isWorking)
         assertTrue(wait.demandsAttention)
 
-        // Work always wins over the wait flag: a working thread under
-        // coordination is genuinely working.
-        val working = wait.copy(busy = true, activity = "working")
-        assertTrue(working.isWorking)
-        assertFalse(working.isWaitingOnTeammate)
+        // The live #1228 wire paints busy+working+waitingOnTeammate together
+        // during a coordination wait: the flag outranks the painted work.
+        val painted = wait.copy(busy = true, activity = "working")
+        assertTrue(painted.isWorking)
+        assertTrue(painted.isWaitingOnTeammate)
 
         // Wire-dead activity strings never demand attention: the wire
         // contract is working, waiting-on-you, idle, no-signal, dead.

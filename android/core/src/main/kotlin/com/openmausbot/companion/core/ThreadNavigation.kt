@@ -12,10 +12,11 @@ val BotTask.displayTitle: String
 val BotTask.isWorking: Boolean
     get() = activity == "working" || busy == true
 
-/** Waiting on a dispatched teammate: this thread's own turn is done and the
- * teammate has not settled (#1223). A quiet wait, never the work spinner. */
+/** Waiting on a dispatched teammate (#1223). The live #1228 wire paints busy
+ * and working during a coordination wait, so the flag outranks the painted
+ * work: the row shows the wait, never the work spinner. */
 val BotTask.isWaitingOnTeammate: Boolean
-    get() = waitingOnTeammate == true && !isWorking
+    get() = waitingOnTeammate == true
 
 val BotTask.demandsAttention: Boolean
     // The activity set is the BotActivity wire contract (working,

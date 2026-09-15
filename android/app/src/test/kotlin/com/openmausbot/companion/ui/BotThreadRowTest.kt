@@ -16,8 +16,8 @@ class BotThreadRowTest {
     }
 
     @Test
-    fun aWorkingThreadStaysWorkEvenWhenTheWaitFlagRidesAlong() {
-        assertEquals("Working", task("run", activity = "working", busy = true, waiting = true).runtimeLabel())
+    fun aTeammateWaitOutranksThePaintedWorkingStatus() {
+        assertEquals("Waiting on teammate", task("run", activity = "working", busy = true, waiting = true).runtimeLabel())
         assertEquals("Working", task("run", busy = true).runtimeLabel())
     }
 
