@@ -128,6 +128,10 @@ describe("CodexDriver turns (fake app-server)", () => {
     delete process.env.FAKE_CODEX_INSTRUCTIONS;
     delete process.env.FAKE_CODEX_RESUME_ERROR;
     delete process.env.FAKE_CODEX_START_ERROR;
+    delete process.env.FAKE_CODEX_STEER_ERROR;
+    delete process.env.FAKE_CODEX_STEER_ERROR_FILE;
+    delete process.env.FAKE_CODEX_INTERRUPT_SILENT;
+    delete process.env.FAKE_CODEX_INTERRUPT_GRACE_MS;
     delete process.env.OPENAI_API_KEY;
     delete process.env.BOX_TOKEN;
     delete process.env.OMB_TTS_KEY;
@@ -1403,6 +1407,86 @@ describe("CodexDriver turns (fake app-server)", () => {
     await instance.adapter.interruptTurn("t-busy");
     await recorder.until((e) => e.type === "turn.completed");
   });
+
+  it("steers the running turn through turn/steer without killing the child", async () => {
+    const dump = join(scratch, "codex-steer.json");
+    process.env.FAKE_CODEX_DUMP = dump;
+    await create({ mode: "approval" }); // parks the turn open mid-flight
+    expect(instance.adapter.capabilities.queueing).toBe(true);
+
+    await instance.adapter.sendTurn({ threadId: "t-codex-steer", text: "one" });
+    const opened = await recorder.until((e) => e.type === "request.opened");
+    await expect(instance.adapter.steer?.("t-codex-steer", "and also this")).resolves.toBe(true);
+
+    const snapshot = JSON.parse(readFileSync(dump, "utf8"));
+    expect(snapshot.calls.find((c: any) => c.method === "turn/steer")?.params).toEqual({
+      threadId: "codex-thread-1",
+      input: [{ type: "text", text: "and also this" }],
+      expectedTurnId: "turn-1",
+    });
+    // steering is mid-turn input, never a kill: the child survives it
+    expect(processIsAlive(snapshot.pid)).toBe(true);
+    expect(recorder.events.some((e) => e.type === "runtime.error")).toBe(false);
+
+    // the steered turn still settles through its own protocol flow
+    await instance.adapter.respondToRequest("t-codex-steer", opened.requestId!, { behavior: "deny" });
+    await expect(recorder.until((e) => e.type === "turn.completed")).resolves.toMatchObject({ ok: true });
+    expect(recorder.events.some((e) => e.type === "runtime.error")).toBe(false);
+    await expect.poll(() => processIsAlive(snapshot.pid), { timeout: 5_000 }).toBe(false);
+  }, 20_000);
+
+  it("reports a refused steer as false so the caller queues, and keeps the child alive", async () => {
+    const dump = join(scratch, "codex-steer-refused.json");
+    process.env.FAKE_CODEX_DUMP = dump;
+    process.env.FAKE_CODEX_STEER_ERROR = JSON.stringify({ code: -32000, message: "active turn is not steerable" });
+    await create({ mode: "approval" });
+    await instance.adapter.sendTurn({ threadId: "t-codex-steer-refused", text: "one" });
+    await recorder.until((e) => e.type === "request.opened");
+
+    await expect(instance.adapter.steer?.("t-codex-steer-refused", "queued words")).resolves.toBe(false);
+    expect(processIsAlive(JSON.parse(readFileSync(dump, "utf8")).pid)).toBe(true);
+    expect(recorder.events.some((e) => e.type === "runtime.error")).toBe(false);
+
+    await instance.adapter.interruptTurn("t-codex-steer-refused");
+    await recorder.until((e) => e.type === "turn.completed");
+  }, 20_000);
+
+  it("steer is false with no running turn", async () => {
+    await create();
+    await expect(instance.adapter.steer?.("t-codex-idle", "hi")).resolves.toBe(false);
+  });
+
+  it("Stop interrupts through the protocol and reports no signal error", async () => {
+    const dump = join(scratch, "codex-interrupt.json");
+    process.env.FAKE_CODEX_DUMP = dump;
+    await create({ mode: "approval" });
+    await instance.adapter.sendTurn({ threadId: "t-codex-stop-clean", text: "one" });
+    await recorder.until((e) => e.type === "request.opened");
+
+    await instance.adapter.interruptTurn("t-codex-stop-clean");
+    await expect(recorder.until((e) => e.type === "turn.completed")).resolves.toMatchObject({
+      ok: false,
+      stopReason: "interrupted",
+    });
+    expect(JSON.parse(readFileSync(dump, "utf8")).calls.some((c: any) => c.method === "turn/interrupt")).toBe(true);
+    expect(recorder.events.some((e) => e.type === "runtime.error")).toBe(false);
+  }, 20_000);
+
+  it("escalates to a kill when the server ignores turn/interrupt, still without the signal error", async () => {
+    process.env.FAKE_CODEX_DUMP = join(scratch, "codex-interrupt-silent.json");
+    process.env.FAKE_CODEX_INTERRUPT_SILENT = "1";
+    process.env.FAKE_CODEX_INTERRUPT_GRACE_MS = "60";
+    await create({ mode: "approval" });
+    await instance.adapter.sendTurn({ threadId: "t-codex-stop-wedged", text: "one" });
+    await recorder.until((e) => e.type === "request.opened");
+
+    await instance.adapter.interruptTurn("t-codex-stop-wedged");
+    await expect(recorder.until((e) => e.type === "turn.completed")).resolves.toMatchObject({
+      ok: false,
+      stopReason: "interrupted",
+    });
+    expect(recorder.events.some((e) => e.type === "runtime.error")).toBe(false);
+  }, 20_000);
 
   it.each([false, true])("keeps ownership after an uncertain stop even when root close arrives (before failure: %s)", async (closeFirst) => {
     await create();
