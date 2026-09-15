@@ -98,6 +98,46 @@ describe("tasks", () => {
     expect(titleFromMessage("x".repeat(80))).toHaveLength(48);
   });
 
+  it("returns the task it named, so a caller knows which title it may replace", async () => {
+    const { store } = await freshStore();
+    const bot = store.createBot();
+    const task = store.createTask(bot.id)!;
+    const titled = store.titleTaskFromFirstMessage(bot.id, "Audit the payroll", task.threadId);
+    expect(titled?.threadId).toBe(task.threadId);
+    expect(titled?.title).toBe("Audit the payroll");
+    // nothing more to name once the row carries a title
+    expect(store.titleTaskFromFirstMessage(bot.id, "a second message", task.threadId)).toBeNull();
+  });
+
+  it("swaps a machine-made title for a generated one, exactly once", async () => {
+    const { store } = await freshStore();
+    const bot = store.createBot();
+    const task = store.createTask(bot.id)!;
+    const snippet = store.titleTaskFromFirstMessage(bot.id, "Audit the payroll", task.threadId)!.title;
+    // a person's rename wins over anything generated later
+    store.renameTask(bot.id, task.threadId, "Payroll audit");
+    expect(store.retitleTask(bot.id, task.threadId, snippet, "Payroll checks")).toBeNull();
+    expect(store.activeTask(bot.id)!.title).toBe("Payroll audit");
+    // and where nothing intervened, the generated title lands once — a
+    // second answer aimed at the same snippet finds nothing to replace
+    const other = store.createTask(bot.id)!;
+    const otherSnippet = store.titleTaskFromFirstMessage(bot.id, "Draft the announcement", other.threadId)!.title;
+    expect(store.retitleTask(bot.id, other.threadId, otherSnippet, "Draft announcement")).toMatchObject({ threadId: other.threadId });
+    expect(store.retitleTask(bot.id, other.threadId, otherSnippet, "A second opinion")).toBeNull();
+    expect(store.taskByThread(bot.id, other.threadId)!.title).toBe("Draft announcement");
+  });
+
+  it("reads a usable title out of a model reply", async () => {
+    const { titleFromLlm } = await import("./store.ts");
+    expect(titleFromLlm('"Fix login timeout."\n')).toBe("Fix login timeout");
+    expect(titleFromLlm("Fix the login\nthat is the whole answer")).toBe("Fix the login");
+    expect(titleFromLlm("Fix   the\tlogin")).toBe("Fix the login");
+    expect(titleFromLlm("\u201CFix login timeout\u201D")).toBe("Fix login timeout");
+    expect(titleFromLlm("")).toBeNull();
+    expect(titleFromLlm("   \n  ")).toBeNull();
+    expect(titleFromLlm(`${"word".repeat(13)}`)).toBeNull();
+  });
+
   it("deletes a task with its transcript and replaces the last one with fresh context", async () => {
     const { store, UNTITLED_THREAD } = await freshStore();
     const bot = store.createBot();
