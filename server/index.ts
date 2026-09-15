@@ -919,6 +919,15 @@ function threadBusy(botId: string, threadId: string): boolean {
   return store.taskByThread(botId, threadId)?.busy === true || directTurnDispatchClaims.has(threadId);
 }
 
+/** Opt-in direct-chat parking (#1194): when this bot's person chose to queue
+ * messages behind running work, a message that arrives while delegated
+ * assignments are still out waits in the steer queue — room-style parking —
+ * instead of steering the conversation immediately. */
+function parksBehindCoordination(botId: string, threadId: string): boolean {
+  if (!roomHandoffs.activeDirect(threadId)) return false;
+  return (store.projectBotForTask(botId, threadId) ?? store.bot(botId))?.parkDirectMessages === true;
+}
+
 function botAtThreadCapacity(botId: string): boolean {
   // Setup/dispatch reservations still occupy a slot even if an early
   // completion event has already cleared the stored busy flag.
@@ -2414,6 +2423,11 @@ const roomHandoffs = new RoomHandoffs(join(DATA_DIR, "room-handoffs.json"), {
       const bot = store.botByThread(threadId);
       if (bot) broadcast({ kind: "bot", bot: wireBot(bot) });
     }
+    // #1194: when a direct coordination's last node settles, no later
+    // turn.completed arrives to release messages parked behind it — the
+    // resume turn's own event lands while the source node is still
+    // non-terminal. Node changes are that release signal.
+    if (directThreadIds.size > 0) drainQueuedSends();
   },
   report: (child, parent) => {
     // Same-room replies already appear in this conversation.
@@ -4805,7 +4819,8 @@ function drainQueuedSends() {
     }),
     // Provider completion can precede its dispatch promise: keep the queue
     // intact until that exact handshake releases its runtime-only claim.
-    (botId, threadId) => threadBusy(botId, threadId) || botAtThreadCapacity(botId) || Boolean(activeGroupTurnForBot(botId)),
+    (botId, threadId) => threadBusy(botId, threadId) || botAtThreadCapacity(botId) || Boolean(activeGroupTurnForBot(botId))
+      || parksBehindCoordination(botId, threadId),
   );
 }
 
@@ -4813,7 +4828,7 @@ function drainQueuedSends() {
  * available. Reuse the existing cancellable, idempotent composer queue. */
 async function startOrQueueDirectMessage(botId: string, threadId: string, text: string, replyTo?: Message, sendId?: string) {
   const capacity = botAtThreadCapacity(botId);
-  if (capacity || threadBusy(botId, threadId)) {
+  if (capacity || threadBusy(botId, threadId) || parksBehindCoordination(botId, threadId)) {
     const reason = capacity ? "capacity" as const : undefined;
     const queued = queueSteeredMessage(botId, threadId, text, {
       replyToId: replyTo?.id,
@@ -13105,6 +13120,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (body.composio !== undefined) {
         if (typeof body.composio !== "boolean") return json(res, 400, { error: "composio must be true or false" });
         patch.composio = body.composio;
+      }
+      // Queue this bot's direct messages behind outstanding delegated work
+      // instead of steering the conversation immediately (#1194).
+      if (body.parkDirectMessages !== undefined) {
+        if (typeof body.parkDirectMessages !== "boolean") return json(res, 400, { error: "parkDirectMessages must be true or false" });
+        patch.parkDirectMessages = body.parkDirectMessages;
       }
       // Per-bot selection of app-wide MCP servers. Omitted keeps the current
       // selection; null restores all enabled servers; [] explicitly mounts none.
