@@ -5622,6 +5622,69 @@ describe("harness HTTP API", () => {
     expect(nothing.status).toBe(400);
   });
 
+  it("clears incompatible default and per-agent voices when the provider changes", async () => {
+    let botId = "";
+    try {
+      expect((await api("PUT", "/api/config", {
+        tts: { provider: "elevenlabs", voice: "eleven-default" },
+      })).status).toBe(200);
+      const created = await api("POST", "/api/bots");
+      botId = created.body.bot.id;
+      expect((await api("PATCH", `/api/bots/${botId}/profile`, {
+        voice: "eleven-agent",
+      })).status).toBe(200);
+
+      const changed = await api("PUT", "/api/config", { tts: { provider: "fish" } });
+      expect(changed.status).toBe(200);
+      expect(changed.body.tts).toMatchObject({ provider: "fish", voice: "", ready: false });
+      const bot = (await api("GET", "/api/bots?messages=0")).body.bots.find(
+        (candidate: { id: string }) => candidate.id === botId,
+      );
+      expect(bot).not.toHaveProperty("voice");
+      const disk = JSON.parse(readFileSync(join(home, ".openmausbot", "config.json"), "utf8"));
+      expect(disk.tts).toMatchObject({ provider: "fish", voice: "" });
+    } finally {
+      if (botId) await api("DELETE", `/api/bots/${botId}`).catch(() => undefined);
+      await api("PUT", "/api/config", { tts: { provider: "elevenlabs", voice: "" } }).catch(() => undefined);
+    }
+  });
+
+  it("does not switch voice providers when per-agent voices cannot be cleared", async () => {
+    let botId = "";
+    const botsPath = join(home, ".openmausbot", "bots.json");
+    const backupPath = `${botsPath}.voice-switch-test`;
+    let blocked = false;
+    try {
+      expect((await api("PUT", "/api/config", {
+        tts: { provider: "elevenlabs", voice: "eleven-default" },
+      })).status).toBe(200);
+      const created = await api("POST", "/api/bots");
+      botId = created.body.bot.id;
+      expect((await api("PATCH", `/api/bots/${botId}/profile`, {
+        voice: "eleven-agent",
+      })).status).toBe(200);
+
+      renameSync(botsPath, backupPath);
+      mkdirSync(botsPath);
+      blocked = true;
+      const changed = await api("PUT", "/api/config", { tts: { provider: "fish" } });
+      expect(changed.status).toBe(500);
+      const config = await api("GET", "/api/config");
+      expect(config.body.tts).toMatchObject({ provider: "elevenlabs", voice: "eleven-default" });
+      const bot = (await api("GET", "/api/bots?messages=0")).body.bots.find(
+        (candidate: { id: string }) => candidate.id === botId,
+      );
+      expect(bot).toMatchObject({ voice: "eleven-agent" });
+    } finally {
+      if (blocked) {
+        rmSync(botsPath, { recursive: true, force: true });
+        renameSync(backupPath, botsPath);
+      }
+      if (botId) await api("DELETE", `/api/bots/${botId}`).catch(() => undefined);
+      await api("PUT", "/api/config", { tts: { provider: "elevenlabs", voice: "" } }).catch(() => undefined);
+    }
+  });
+
   it("keeps Box resources attached while allowing a proven same-account token rotation", async () => {
     let botId = "";
     try {
@@ -6323,7 +6386,7 @@ describe("harness HTTP API", () => {
   it("keeps skill authoring on by default and persists an explicit opt-out", async () => {
     const before = await api("GET", "/api/config");
     expect(before.status).toBe(200);
-    expect(before.body.features).toEqual({ browser: false, skillAuthoring: true, showToolCalls: false, sharedComputers: false });
+    expect(before.body.features).toEqual({ browser: false, skillAuthoring: true, showToolCalls: false, sharedComputers: false, claudeUserMcp: false });
     // the default is the absence of the key: nothing is written until the toggle is used
     const untouched = JSON.parse(readFileSync(join(home, ".openmausbot", "config.json"), "utf8"));
     expect(untouched.features?.skillAuthoring).toBeUndefined();
@@ -6335,7 +6398,7 @@ describe("harness HTTP API", () => {
       features: { skillAuthoring: false },
     });
     expect(saved.status).toBe(200);
-    expect(saved.body.features).toEqual({ browser: false, skillAuthoring: false, showToolCalls: false, sharedComputers: false });
+    expect(saved.body.features).toEqual({ browser: false, skillAuthoring: false, showToolCalls: false, sharedComputers: false, claudeUserMcp: false });
 
     const disk = JSON.parse(readFileSync(join(home, ".openmausbot", "config.json"), "utf8"));
     // Earlier browser coverage may have persisted its own toggle. Opting out
@@ -6345,7 +6408,7 @@ describe("harness HTTP API", () => {
     // the opt-out survives patches to sibling flags
     const tools = await api("PATCH", "/api/config", { features: { showToolCalls: true } });
     expect(tools.status).toBe(200);
-    expect(tools.body.features).toEqual({ browser: false, skillAuthoring: false, showToolCalls: true, sharedComputers: false });
+    expect(tools.body.features).toEqual({ browser: false, skillAuthoring: false, showToolCalls: true, sharedComputers: false, claudeUserMcp: false });
 
     // an opted-out workspace refuses the skill routes a turn would otherwise reach
     const bot = (await api("POST", "/api/bots", {})).body.bot;
