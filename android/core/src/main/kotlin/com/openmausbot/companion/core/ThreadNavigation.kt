@@ -18,8 +18,10 @@ val BotTask.isWaitingOnTeammate: Boolean
     get() = waitingOnTeammate == true && !isWorking
 
 val BotTask.demandsAttention: Boolean
+    // The activity set is the BotActivity wire contract (working,
+    // waiting-on-you, idle, no-signal, dead) plus the queued wait.
     get() = isWaitingOnTeammate || busy == true || unread == true || activity in setOf(
-        "waiting-on-you", "waiting", "working", "running", "queued",
+        "waiting-on-you", "working", "queued",
     )
 
 /** Routine results are ordinary threads; only their internal per-run executions are hidden. */

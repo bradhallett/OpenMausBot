@@ -33,7 +33,7 @@ import com.openmausbot.companion.core.isWorking
 internal fun BotTask.runtimeLabel(): String? = when {
     activity == "waiting-on-you" -> "Waiting on you"
     isWaitingOnTeammate -> "Waiting on teammate"
-    isWorking || activity == "running" -> "Working"
+    isWorking -> "Working"
     activity == "queued" -> "Queued"
     else -> null
 }

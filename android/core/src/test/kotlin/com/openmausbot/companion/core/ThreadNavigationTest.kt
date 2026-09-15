@@ -76,6 +76,11 @@ class ThreadNavigationTest {
         assertTrue(working.isWorking)
         assertFalse(working.isWaitingOnTeammate)
 
+        // Wire-dead activity strings never demand attention: the wire
+        // contract is working, waiting-on-you, idle, no-signal, dead.
+        assertFalse(wait.copy(activity = "running", busy = false, waitingOnTeammate = null).demandsAttention)
+        assertFalse(wait.copy(activity = "waiting", busy = false, waitingOnTeammate = null).demandsAttention)
+
         // The wire flag decodes, and a legacy bot-level wait reaches its
         // single synthesized thread.
         val decoded = CompanionJson.decodeFromString<BotTask>(
