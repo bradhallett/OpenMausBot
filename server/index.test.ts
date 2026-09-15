@@ -23,6 +23,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { removeTempDir, waitForExit } from "./testing/cleanup.ts";
+import { startFakeHttpMcp } from "./testing/fake-http-mcp-server.ts";
 import { freePortBlock } from "./testing/ports.ts";
 import { openSse } from "./testing/sse.ts";
 import { FILE_MAX_BYTES, IMAGE_MAX_BYTES } from "./attachments.ts";
@@ -105,6 +106,7 @@ let child: ChildProcess;
 let boxStub: Server;
 let boxStubPort = 0;
 const boxRouteCalls: Array<{ method: string; path: string }> = [];
+const boxPromptBodies: Array<Record<string, unknown>> = [];
 let boxSlowRequestCount = 0;
 let managedBoxRows: Array<Record<string, unknown>> = [];
 let managedBoxListRowsOverride: Array<Record<string, unknown>> | null = null;
@@ -731,6 +733,12 @@ beforeAll(async () => {
       }
       res.setHeader("content-type", "application/json");
       res.statusCode = 200;
+      if (method === "POST" && /^\/boxes\/[^/]+\/prompt$/.test(path)) {
+        let raw = "";
+        for await (const chunk of req) raw += chunk;
+        boxPromptBodies.push(JSON.parse(raw));
+        return res.end(JSON.stringify({ ok: true }));
+      }
       if (method === "POST" && path === "/boxes") {
         let raw = "";
         for await (const chunk of req) raw += chunk;
@@ -5288,6 +5296,23 @@ describe("harness HTTP API", () => {
     expect(after.modelSelection.effort).toBeUndefined();
   });
 
+  it("preserves an opaque variant separately from effort and rejects ambiguous or malformed selections", async () => {
+    const bot = (await api("POST", "/api/bots")).body.bot;
+    const selection = { instanceId: "ghost", model: "ghost-1" };
+    for (const variant of ["minimal", "none", "default", "custom-variant"]) {
+      const set = await api("PATCH", `/api/bots/${bot.id}`, { modelSelection: { ...selection, variant } });
+      expect(set.status).toBe(200);
+      expect(set.body.bot.modelSelection).toEqual({ ...selection, variant });
+    }
+    for (const variant of ["", " low", "a\nb", 42, null]) {
+      expect((await api("PATCH", `/api/bots/${bot.id}`, { modelSelection: { ...selection, variant } })).status).toBe(400);
+    }
+    expect((await api("PATCH", `/api/bots/${bot.id}`, { modelSelection: { ...selection, variant: "low", effort: "high" } })).status).toBe(400);
+    const cleared = await api("PATCH", `/api/bots/${bot.id}`, { modelSelection: selection });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.bot.modelSelection).toEqual(selection);
+  });
+
   it("grants Auto on this computer only through the warning acknowledgement", async () => {
     const created = await api("POST", "/api/bots");
     const bot = created.body.bot;
@@ -5691,6 +5716,69 @@ describe("harness HTTP API", () => {
     expect(cleared.body.task.surface).toBeUndefined();
   });
 
+  it("dispatches the conversation's pinned computer, never advertises a phantom Auto Box, and previews that same surface", async () => {
+    const bot = (await api("POST", "/api/bots", {
+      name: "Surface routing fixture", modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
+    })).body.bot;
+    const idle = () => expect.poll(async () =>
+      (await api("GET", "/api/bots?messages=0")).body.bots.find((b: { id: string }) => b.id === bot.id)?.busy,
+    { timeout: 10_000 }).toBe(false);
+    try {
+      expect((await api("PUT", "/api/config", { box: { token: "box_route" } })).status).toBe(200);
+      await api("PATCH", `/api/bots/${bot.id}`, { browser: false, computer: null, cloudBackend: "box" });
+      managedBoxRows = [{ id: "bx_3456789a", name: managedBoxNameForFixture(bot.id), state: "idle" }];
+      boxRouteCalls.length = 0;
+      boxPromptBodies.length = 0;
+      rmSync(fakeClaudeDump, { force: true });
+      expect((await api("POST", `/api/bots/${bot.id}/messages`, { text: "Describe your available computer tools" })).status).toBe(202);
+      const local = await readJsonFileWhenReady<{ mcpConfig: { mcpServers: Record<string, unknown> }; systemPrompt: string }>(fakeClaudeDump);
+      expect(local.mcpConfig.mcpServers.computer).toBeUndefined();
+      expect(boxPromptBodies).toHaveLength(0);
+      expect(boxRouteCalls.some(call => call.method === "POST" && call.path === "/boxes")).toBe(false);
+      await api("POST", `/api/bots/${bot.id}/interrupt`, {}); await idle();
+
+      // A Local VM pin must win even when the bot default says Cloud. The
+      // fixture has no ready Local VM: fail there, never click the host/Box.
+      await api("PATCH", `/api/bots/${bot.id}`, { computer: "cloud" });
+      await api("PATCH", `/api/bots/${bot.id}/tasks/${bot.threadId}`, { surface: "vm" });
+      rmSync(fakeClaudeDump, { force: true });
+      expect((await api("POST", `/api/bots/${bot.id}/messages`, { text: "Open Chrome on the Local VM" })).status).toBe(202);
+      await idle();
+      expect(existsSync(fakeClaudeDump)).toBe(false);
+      expect(boxPromptBodies).toHaveLength(0);
+      const saved = (await api("GET", "/api/bots?messages=0")).body.bots.find((b: { id: string }) => b.id === bot.id);
+      expect(saved.tasks.find((task: { threadId: string }) => task.threadId === bot.threadId).surface).toBe("vm");
+      expect((await api("GET", `/api/bots/${bot.id}/computer?threadId=${bot.threadId}`)).body.surface).toBe("vm");
+      expect((await api("POST", `/api/bots/${bot.id}/computer/join?threadId=${bot.threadId}`, {})).status).toBe(409);
+
+      // The inverse pin dispatches the Box runner with its own model, not
+      // the local provider's model alias/effort. Preview opens the same Box.
+      await api("PATCH", `/api/bots/${bot.id}`, { computer: "vm" });
+      await api("PATCH", `/api/bots/${bot.id}/tasks/${bot.threadId}`, { surface: "cloud" });
+      expect((await api("POST", `/api/bots/${bot.id}/messages`, { text: "Open Chrome on the cloud VM" })).status).toBe(202);
+      await expect.poll(() => boxPromptBodies.length, { timeout: 10_000 }).toBe(1);
+      expect(boxPromptBodies[0]).toMatchObject({ model: "claude-fable-5", provider: "claude-code" });
+      expect(boxPromptBodies[0]!.prompt).toContain("assigned cloud computer");
+      expect(existsSync(fakeClaudeDump)).toBe(false);
+      expect((await api("GET", `/api/bots/${bot.id}/computer?threadId=${bot.threadId}`)).body.surface).toBe("cloud");
+      const joined = await api("POST", `/api/bots/${bot.id}/computer/join?threadId=${bot.threadId}`, {});
+      expect(joined).toMatchObject({ status: 200, body: { joinUrl: "https://desktop.invalid/bx_3456789a" } });
+      await api("POST", `/api/bots/${bot.id}/interrupt`, {}); await idle();
+      const before = boxRouteCalls.length;
+      expect((await api("POST", `/api/bots/${bot.id}/computer/provision?threadId=${bot.threadId}`, {})).status).toBe(409);
+      expect((await api("GET", `/api/bots/${bot.id}/computer?threadId=not-owned`)).status).toBe(404);
+      expect(boxRouteCalls).toHaveLength(before);
+    } finally {
+      await api("POST", `/api/bots/${bot.id}/interrupt`, {}).catch(() => {});
+      await idle();
+      managedBoxRows = [];
+      await api("DELETE", `/api/bots/${bot.id}`).catch(() => {});
+      await api("PUT", "/api/config", { box: { token: "" } }).catch(() => {});
+      rmSync(fakeClaudeDump, { force: true });
+      boxPromptBodies.length = 0;
+    }
+  }, 45_000);
+
   it("excludes new Box turns, lifecycle actions, and bot deletion while a token change validates", async () => {
     let botId = "";
     try {
@@ -5805,6 +5893,49 @@ describe("harness HTTP API", () => {
     expect(removed).toEqual({ status: 200, body: { servers: [] } });
     const after = await api("GET", "/api/mcp/servers");
     expect(after).toEqual({ status: 200, body: { servers: [] } });
+  });
+
+  it("manages and probes a url MCP server, and the Claude Code servers switch", async () => {
+    const secret = "Bearer mcp-header-that-must-never-render";
+    const fake = await startFakeHttpMcp({ requireHeader: { name: "Authorization", value: secret } });
+    try {
+      const created = await api("POST", "/api/mcp/servers", { name: "docs", url: fake.url, headers: { Authorization: secret } });
+      expect(created.status).toBe(201);
+      expect(created.body.servers).toEqual([{ name: "docs", type: "http", url: fake.url, headerKeys: ["Authorization"], enabled: false }]);
+      expect(JSON.stringify(created.body)).not.toContain(secret);
+
+      const tested = await api("POST", "/api/mcp/servers/docs/test");
+      expect(tested).toEqual({
+        status: 200,
+        body: { ok: true, tools: [{ name: "read_notes", description: "Read saved notes" }] },
+      });
+
+      const updated = await api("PUT", "/api/mcp/servers/docs", {
+        type: "sse",
+        url: fake.url,
+        headers: { Authorization: true, "X-Org": "acme" },
+        enabled: true,
+      });
+      expect(updated.status).toBe(200);
+      expect(updated.body.servers[0]).toMatchObject({ type: "sse", headerKeys: ["Authorization", "X-Org"], enabled: true });
+      expect(JSON.stringify(updated.body)).not.toContain(secret);
+      const disk = JSON.parse(readFileSync(join(home, ".openmausbot", "config.json"), "utf8"));
+      expect(disk.mcpServers.docs).toEqual({ type: "sse", url: fake.url, headers: { Authorization: secret, "X-Org": "acme" }, enabled: true });
+
+      const bad = await api("POST", "/api/mcp/servers", { name: "nowhere", url: "docs.example/mcp" });
+      expect(bad.status).toBe(400);
+      expect(bad.body.error).toMatch(/full address/);
+
+      // the switch that lets Claude bots also see this machine's own servers
+      const on = await api("PUT", "/api/config", { features: { claudeUserMcp: true } });
+      expect(on.status).toBe(200);
+      expect(on.body.features.claudeUserMcp).toBe(true);
+      const off = await api("PUT", "/api/config", { features: { claudeUserMcp: false } });
+      expect(off.body.features.claudeUserMcp).toBe(false);
+    } finally {
+      await fake.close();
+      await api("DELETE", "/api/mcp/servers/docs").catch(() => undefined);
+    }
   });
 
   it("round-trips the UI language and clears it back to system", async () => {
