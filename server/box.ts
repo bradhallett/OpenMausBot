@@ -34,6 +34,7 @@ import {
   retireBoxDeletion,
   type BoxDeletionRecord,
 } from "./box-delete-journal.ts";
+import type { BoxComputerBackend, ComputerScreenshotFrame } from "./computer-backend.ts";
 
 const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
 
@@ -1198,7 +1199,12 @@ async function finishPriorDeletionBeforeProvision(cfg: AppConfig, botId: string)
 }
 
 /** Box state for the Computer panel. */
-export async function boxStatus(cfg: AppConfig, botId: string) {
+export interface BoxComputerStatus {
+  configured: boolean;
+  box: { boxId: string; state: string; desktopAvailable: boolean | null } | null;
+}
+
+export async function boxStatus(cfg: AppConfig, botId: string): Promise<BoxComputerStatus> {
   cfg = snapshotBoxConfig(cfg);
   if (!boxConfigured(cfg)) return { configured: false, box: null };
   const box = await findBox(cfg, botId);
@@ -1398,7 +1404,11 @@ async function readFileBase64(cfg: AppConfig, boxId: string, path: string): Prom
 
 /** `knownBoxId` skips box resolution entirely — the screen poller holds
  * the id for the whole turn and must not re-resolve it every frame. */
-export async function screenshotBox(cfg: AppConfig, botId: string, knownBoxId?: string) {
+export async function screenshotBox(
+  cfg: AppConfig,
+  botId: string,
+  knownBoxId?: string,
+): Promise<ComputerScreenshotFrame> {
   cfg = snapshotBoxConfig(cfg);
   let boxId = knownBoxId;
   if (!boxId) {
@@ -1415,3 +1425,22 @@ export async function screenshotBox(cfg: AppConfig, botId: string, knownBoxId?: 
   if (!data) throw new Error("could not read the frame back from the box");
   return { png: data, format: "jpeg" };
 }
+
+/** The Box arm of the shared ComputerBackend dispatch (computer-backend.ts).
+ * Thin adapters over the module's own functions; Box-specific lifecycle
+ * policy (find/wake gates) stays with its callers. */
+export const boxComputerBackend: BoxComputerBackend = {
+  kind: "box",
+  status: (cfg, botId) => boxStatus(cfg, botId),
+  action: (cfg, botId, action, input = {}) => {
+    if (action === "provision") return provisionBox(cfg, botId, input.botName ?? "");
+    if (action === "sleep") return sleepBox(cfg, botId);
+    return execOnBox(cfg, botId, input.command ?? "");
+  },
+  screenshot: (cfg, botId, knownBoxId) => screenshotBox(cfg, botId, knownBoxId),
+  join: (cfg, botId, mode) => (mode === "ready" ? joinReadyBox(cfg, botId) : joinBox(cfg, botId)),
+  closeViewer: () => ({ closed: false }),
+  inventory: (cfg, owners, options) => listManagedBoxes(cfg, owners, options),
+  removeManaged: (cfg, owners, boxId, confirmName, claim, options) =>
+    deleteManagedBox(cfg, owners, boxId, confirmName, claim, options),
+};

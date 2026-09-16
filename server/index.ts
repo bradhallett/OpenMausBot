@@ -80,6 +80,7 @@ import { fitsOnOneLine, parseBotProfilePatch } from "./bot-profile.ts";
 import { groupTurnCwd } from "./room-cwd.ts";
 import { RoomTurnDeadline, RoomTurnStallRegistry, roomTurnTimeoutMessage } from "./room-turn-timeout.ts";
 import * as box from "./box.ts";
+import { computerBackendFor } from "./computer-backend.ts";
 import { TeamComputers, teamComputerAssignment, teamComputerCreate, teamComputerOwner, type TeamComputerRecord } from "./team-computers.ts";
 import { isEffortLevel, type WireBot, type WireGroup, type WireTask } from "../shared/wire.ts";
 import type { TeamComputersPayload } from "../shared/team-computer.ts";
@@ -1699,7 +1700,7 @@ function previewSystemPrompt(bot: BotRecord) {
     previewComputer === "vm"
       ? caps?.computerMcp ? localVmMode(cfg) === "per-bot" ? "vm-private" : "vm-shared" : null
       : previewComputer === "cloud"
-        ? instance?.driverKind === "boxAgent" ? "box-agent" : caps?.computerMcp ? bot.cloudBackend === "vps" ? "vps" : "box" : null
+        ? instance?.driverKind === "boxAgent" ? "box-agent" : caps?.computerMcp ? computerBackendFor(bot).kind : null
         : previewComputer === "local"
           ? caps?.localComputerMcp ? "local" : null
           : null;
@@ -3791,7 +3792,7 @@ function turnProvider(bot: BotRecord, runOn?: RoutineRunOn, threadId?: string): 
   const wants = turnSurfacePlan(bot, runOn, threadId).computer;
   if (wants !== undefined && wants !== "cloud") return null;
   if (registry.get(bot.modelSelection.instanceId)?.driverKind === "boxAgent") return "box";
-  return bot.cloudBackend === "vps" ? "vps" : wants === "cloud" ? "box" : null;
+  return computerBackendFor(bot).kind === "vps" ? "vps" : wants === "cloud" ? "box" : null;
 }
 
 /** A turn on the cloud computer runs ON the cloud computer: the Box runs the
@@ -3820,8 +3821,9 @@ async function computerPreviewSurface(bot: BotRecord, threadId?: string) {
   if (plan.computer !== undefined) return plan.computer === "off" && plan.browser ? "browser" : plan.computer;
   const instance = registry.get(bot.modelSelection.instanceId);
   if (instance?.driverKind === "boxAgent") return "cloud";
-  if (bot.cloudBackend === "vps") {
-    const remote = await vps.vpsComputerStatus(cfg, bot.id);
+  const computerBackend = computerBackendFor(bot);
+  if (computerBackend.kind === "vps") {
+    const remote = await computerBackend.status(cfg, bot.id);
     if (remote.ready) return "cloud";
   }
   const target = localVmTargetForBot(bot.id);
@@ -3831,7 +3833,7 @@ async function computerPreviewSurface(bot: BotRecord, threadId?: string) {
   }
   if (shouldMountLocalComputer({ requested: undefined, hostPlatform: process.platform,
     providerSupportsLocal: instance?.adapter.capabilities.localComputerMcp === true }) && readCuaConnection()) return "local";
-  if (bot.cloudBackend === "vps") return "cloud"; // show its unavailable reason
+  if (computerBackend.kind === "vps") return "cloud"; // show its unavailable reason
   return plan.browser ? "browser" : "off";
 }
 
@@ -3839,6 +3841,7 @@ async function computerPreviewSurface(bot: BotRecord, threadId?: string) {
  * deferred until a chat tool selects it and the old turn releases its tools. */
 async function selectableComputers(bot: BotRecord) {
   const caps = registry.get(bot.modelSelection.instanceId)?.adapter.capabilities;
+  const computerBackend = computerBackendFor(bot);
   const off = bot.computer === "off";
   const localEngine = registry.get(bot.modelSelection.instanceId)?.driverKind !== "boxAgent";
   return Promise.all((["cloud", "vm", "local", "browser"] as const).map(async surface => {
@@ -3849,15 +3852,15 @@ async function selectableComputers(bot: BotRecord) {
     try {
       if (off) reason = "Computer access is Off in this bot's settings.";
       else if (surface === "cloud") {
-        if (bot.cloudBackend === "vps") {
-          const status = localEngine && caps?.computerMcp ? await vps.vpsComputerStatus(cfg, bot.id) : null;
+        if (computerBackend.kind === "vps") {
+          const status = localEngine && caps?.computerMcp ? await computerBackend.status(cfg, bot.id) : null;
           ready = status?.ready === true;
           canStart = Boolean(status?.daemonUp && status.managed && status.container === "stopped" &&
             status.image && status.imageMatches && status.network === "private" && status.mounts === "none" && status.security === "hardened");
           canCreate = Boolean(status?.configured && status.daemonUp && status.container === "missing");
           reason = status?.problem ?? reason;
         } else if (box.boxConfigured(cfg) && registry.instances().some(instance => instance.driverKind === "boxAgent")) {
-          const status = await box.boxStatus(cfg, bot.id);
+          const status = await computerBackend.status(cfg, bot.id);
           const lifecycle = box.boxTurnLifecycleAction({ explicitCloud: true, canMount: true, state: status.box?.state ?? null });
           ready = lifecycle === "attach";
           canStart = lifecycle === "wake";
@@ -5712,7 +5715,8 @@ async function startTurn(
       // Cloud routines always use Box/BoxAgent. The per-bot backend applies
       // only to ordinary turns that mount a computer into the local agent.
       const teamComputer = inheritedTeamComputer(bot);
-      const cloudBackend = teamComputer || opts?.runOn === "cloud" || bot.cloudBackend !== "vps" ? "box" : "vps";
+      const computerBackend = computerBackendFor(bot);
+      const cloudBackend = teamComputer || opts?.runOn === "cloud" || computerBackend.kind !== "vps" ? "box" : "vps";
       const mountsComputerMcp = instance.adapter.capabilities.computerMcp === true;
       // Box's native runner owns its computer tools. Local drivers mount
       // Local VM/VPS tools, but have no Box relay to execute this descriptor.
@@ -5847,7 +5851,7 @@ async function startTurn(
       // A VPS is a local-agent computer mount, never a remote agent runner.
       // Explicit Cloud may prepare/start it. Auto remains read-only unless
       // the person explicitly opted this bot into remote lifecycle actions.
-      if ((wants === "cloud" || wants === undefined) && cloudBackend === "vps") {
+      if (computerBackend.kind === "vps" && !teamComputer && opts?.runOn !== "cloud" && (wants === "cloud" || wants === undefined)) {
         const unsupported = vps.vpsDriverError(instance.driverKind, mountsComputerMcp);
         if (unsupported && wants === "cloud") throw new Error(unsupported);
         if (unsupported && wants === undefined) autoVpsProblem = unsupported;
@@ -5858,18 +5862,18 @@ async function startTurn(
           activeVpsThreads.set(bot.id, threadId);
           let remote;
           remote = vps.vpsStartsForTurn({ wants, autoStartVps: bot.autoStartVps, automationSource: opts?.automationSource })
-            ? await vps.vpsComputerAction("provision", cfg, bot.id)
-            : await vps.inspectVpsForAuto(cfg, bot.id);
+            ? await computerBackend.action(cfg, bot.id, "provision")
+            : await computerBackend.inspectForAuto(cfg, bot.id);
           if (remote?.ready && remote.sshAlias) {
             const targetCfg = { ...cfg, vps: { sshAlias: remote.sshAlias } };
-            const vpsMcp = vps.vpsComputerMcp(targetCfg, bot.id, remote.container_id ?? undefined);
+            const vpsMcp = computerBackend.mcp(targetCfg, bot.id, remote.container_id ?? undefined);
             const vpsControl = controlIntegration(bot.id, threadId, dispatchClaimId);
             integrations.localComputer = {
               ...vpsMcp,
               env: { ...vpsMcp.env, OMB_CONTROL_URL: vpsControl.url, OMB_CONTROL_TOKEN: vpsControl.token },
             };
             computerKind = "vps";
-            previewCapture = () => vps.vpsComputerScreenshot(targetCfg, bot.id);
+            previewCapture = () => computerBackend.screenshot(targetCfg, bot.id);
           } else {
             activeVpsThreads.delete(bot.id);
             if (wants === "cloud") {
@@ -16749,12 +16753,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const bot = computerPreviewBot(m[1], url);
       if (!bot) return json(res, 404, { error: "no such bot" });
       const surface = url.searchParams.has("threadId") ? await computerPreviewSurface(bot, bot.threadId) : "cloud";
-      if (surface !== "cloud") return json(res, 200, { surface, configured: false, backend: bot.cloudBackend === "vps" ? "vps" : "box" });
+      const computerBackend = computerBackendFor(bot);
+      if (surface !== "cloud") return json(res, 200, { surface, configured: false, backend: computerBackend.kind });
       const teamComputer = inheritedTeamComputer(bot);
       if (teamComputer) return json(res, 200, { surface, backend: "box", teamComputer: { id: teamComputer.id, name: teamComputer.name }, ...(await box.boxStatus(cfg, teamComputerOwner(teamComputer.id))) });
-      return bot.cloudBackend === "vps"
-        ? json(res, 200, { surface, backend: "vps", ...(await vps.vpsComputerStatus(cfg, bot.id)) })
-        : json(res, 200, { surface, backend: "box", ...(await box.boxStatus(cfg, bot.id)) });
+      return json(res, 200, { surface, backend: computerBackend.kind, ...(await computerBackend.status(cfg, bot.id)) });
     }
     // Who is driving this bot's computer. GET is the panel's initial read;
     // POST take/release/dismiss-help are the person's three moves. The bot
@@ -16814,7 +16817,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
         return json(res, 415, { error: "content-type must be application/json" });
       }
-      return json(res, 200, bot.cloudBackend === "vps" ? vps.closeVpsDesktopTunnel(bot.id) : { closed: false });
+      return json(res, 200, computerBackendFor(bot).closeViewer(bot.id));
     }
     m = path.match(/^\/api\/bots\/([\w-]+)\/computer\/(provision|join|sleep|exec|screenshot|remove)$/);
     if (m && method === "POST") {
@@ -16834,7 +16837,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
         return json(res, 415, { error: "content-type must be application/json" });
       }
-      const remoteProvider: RemoteComputerProvider = bot.cloudBackend === "vps" ? "vps" : "box";
+      const computerBackend = computerBackendFor(bot);
+      const remoteProvider: RemoteComputerProvider = computerBackend.kind;
       if (computerProviderConfigTransitions.has(remoteProvider)) {
         return json(res, 409, { error: providerTransitionMessage(remoteProvider) });
       }
@@ -16855,11 +16859,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           return json(res, 200, await box.sleepBox(cfg, key));
         } finally { release(); }
       }
-      if (bot.cloudBackend === "vps") {
+      if (computerBackend.kind === "vps") {
         if (m[2] === "screenshot") {
           let preview = vpsPreviewRequests.get(botId);
           if (!preview) {
-            preview = vps.vpsComputerScreenshot(cfg, botId).finally(() => {
+            preview = computerBackend.screenshot(cfg, botId).finally(() => {
               vpsPreviewRequests.delete(botId);
             });
             vpsPreviewRequests.set(botId, preview);
@@ -16880,10 +16884,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             return json(res, 409, { error: "the VPS computer is being used by this bot — interrupt the turn first" });
           }
           if (m[2] === "join") {
-            return json(res, 200, await vps.vpsComputerJoin(cfg, botId));
+            return json(res, 200, await computerBackend.join(cfg, botId));
           }
           const action = m[2] === "provision" ? "provision" : m[2] === "remove" ? "remove" : "stop";
-          return json(res, 200, await vps.vpsComputerAction(action, cfg, botId));
+          return json(res, 200, await computerBackend.action(cfg, botId, action));
         } finally {
           releaseComputerLifecycle();
         }
@@ -16920,15 +16924,15 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       try {
         switch (m[2]) {
           case "provision":
-            return json(res, 200, await box.provisionBox(cfg, botId, bot.name));
+            return json(res, 200, await computerBackend.action(cfg, botId, "provision", { botName: bot.name }));
           case "join":
-            return json(res, 200, await (activeBoxTurn || threadPreview ? box.joinReadyBox(cfg, botId) : box.joinBox(cfg, botId)));
+            return json(res, 200, await computerBackend.join(cfg, botId, activeBoxTurn || threadPreview ? "ready" : "wake"));
           case "sleep":
-            return json(res, 200, await box.sleepBox(cfg, botId));
+            return json(res, 200, await computerBackend.action(cfg, botId, "sleep"));
           case "exec":
-            return json(res, 200, await box.execOnBox(cfg, botId, boxCommand ?? ""));
+            return json(res, 200, await computerBackend.action(cfg, botId, "exec", { command: boxCommand ?? "" }));
           case "screenshot":
-            return json(res, 200, await box.screenshotBox(cfg, botId));
+            return json(res, 200, await computerBackend.screenshot(cfg, botId));
         }
       } finally {
         releaseComputerLifecycle();
