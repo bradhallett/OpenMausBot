@@ -23,16 +23,16 @@ describe("composerCanSteerQueuedMessages", () => {
 });
 
 describe("double-Enter steer gesture", () => {
-  it("opens the window only when a chip arrives on a busy steer-capable 1:1 thread", () => {
+  it("opens the window only when a chip arrives on a busy steer-capable thread", () => {
     const now = 1_000_000;
-    expect(doubleEnterSteerWindowExpiresAt(0, 1, true, true, false, now)).toBe(now + 1_500);
+    expect(doubleEnterSteerWindowExpiresAt(0, 1, true, true, now)).toBe(now + 1_500);
     // nothing new queued: not a second-Enter moment
-    expect(doubleEnterSteerWindowExpiresAt(1, 1, true, true, false, now)).toBeNull();
-    expect(doubleEnterSteerWindowExpiresAt(2, 1, true, true, false, now)).toBeNull();
-    // rooms/groups, idle threads, and engines without live steering never open it
-    expect(doubleEnterSteerWindowExpiresAt(0, 1, true, true, true, now)).toBeNull();
-    expect(doubleEnterSteerWindowExpiresAt(0, 1, false, true, false, now)).toBeNull();
-    expect(doubleEnterSteerWindowExpiresAt(0, 1, true, false, false, now)).toBeNull();
+    expect(doubleEnterSteerWindowExpiresAt(1, 1, true, true, now)).toBeNull();
+    expect(doubleEnterSteerWindowExpiresAt(2, 1, true, true, now)).toBeNull();
+    // idle threads and engines without live steering never open it; rooms
+    // share the gesture, so capability alone decides
+    expect(doubleEnterSteerWindowExpiresAt(0, 1, false, true, now)).toBeNull();
+    expect(doubleEnterSteerWindowExpiresAt(0, 1, true, false, now)).toBeNull();
   });
 
   it("steers on the second Enter only while the composer is empty, a chip waits, and the window is open", () => {
@@ -82,7 +82,23 @@ describe("QueuedComposerMessages", () => {
     expect(interruptMarkup).not.toContain("aria-label=\"Steer queued message now\"");
   });
 
-  it("room chips say the interrupt truth for their queue-only drain", () => {
+  it("capable room chips offer the live head steer, one message at a time", () => {
+    const markup = renderToStaticMarkup(
+      createElement(QueuedComposerMessages, {
+        items: [
+          { queueId: "q1", text: "first queued in the room" },
+          { queueId: "q2", text: "second queued in the room" },
+        ],
+        onSteer: () => undefined,
+        steerMode: "next",
+        onCancel: () => undefined,
+      }),
+    );
+    expect(markup).toContain("aria-label=\"Steer the next queued message now\"");
+    expect(markup).not.toContain("Stop the running turn");
+  });
+
+  it("room chips whose engine cannot steer live say the interrupt truth", () => {
     const markup = renderToStaticMarkup(
       createElement(QueuedComposerMessages, {
         items: [

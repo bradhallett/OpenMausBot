@@ -14,19 +14,20 @@ export function composerCanSteerQueuedMessages(
 /** How long a just-queued chip accepts a second Enter as "steer it now". */
 export const DOUBLE_ENTER_STEER_WINDOW_MS = 1_500;
 
-/** A new chip on a busy steer-capable 1:1 thread opens the double-Enter
+/** A new chip on a busy steer-capable thread opens the double-Enter
  * window: the words queued because the live steer lost its race (or carried
  * an attachment) can still join the running turn without interrupting it.
+ * Rooms and 1:1 threads share the gesture; capability, not the surface,
+ * decides whether it applies.
  * Returns the window's expiry, or null when the gesture does not apply. */
 export function doubleEnterSteerWindowExpiresAt(
   prevPendingCount: number,
   pendingCount: number,
   busy: boolean,
   canSteer: boolean,
-  inGroup: boolean,
   now = Date.now(),
 ): number | null {
-  if (!busy || !canSteer || inGroup) return null;
+  if (!busy || !canSteer) return null;
   return pendingCount > prevPendingCount ? now + DOUBLE_ENTER_STEER_WINDOW_MS : null;
 }
 
