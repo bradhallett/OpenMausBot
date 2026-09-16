@@ -1451,6 +1451,38 @@ describe("CodexDriver turns (fake app-server)", () => {
     await recorder.until((e) => e.type === "turn.completed");
   }, 20_000);
 
+  it("a refused steer queues, and the follow-up turn needs no mid-turn kill", async () => {
+    // killCliTree legitimately reaps the catalog probe and a finished turn server;
+    // a queue path must never kill the child that owns the running turn.
+    const dump = join(scratch, "codex-queue-nokill.json");
+    process.env.FAKE_CODEX_DUMP = dump;
+    process.env.FAKE_CODEX_STEER_ERROR = JSON.stringify({ code: -32000, message: "active turn is not steerable" });
+    const kills = vi.spyOn(procs, "killCliTree");
+    const killed = (pid: number) => kills.mock.calls.some((c: any[]) => c[0]?.pid === pid);
+    await create({ mode: "approval" });
+    await instance.adapter.sendTurn({ threadId: "t-codex-queue-nokill", text: "one" });
+    const opened = await recorder.until((e) => e.type === "request.opened");
+    const turnPid = JSON.parse(readFileSync(dump, "utf8")).pid;
+    // the queue trigger is a refused steer: the turn child stays alive, unkilled
+    await expect(instance.adapter.steer?.("t-codex-queue-nokill", "queued words")).resolves.toBe(false);
+    expect(killed(turnPid)).toBe(false);
+    expect(processIsAlive(turnPid)).toBe(true);
+    await instance.adapter.respondToRequest("t-codex-queue-nokill", opened.requestId!, { behavior: "deny" });
+    await expect(recorder.until((e) => e.type === "turn.completed")).resolves.toMatchObject({ ok: true });
+    // the drained queue runs as its own turn: fresh child, still no mid-turn kill
+    await instance.adapter.sendTurn({ threadId: "t-codex-queue-nokill", text: "queued words" });
+    await recorder.until((e) => e.type === "turn.started");
+    // the fresh app-server writes its dump pid only once it serves a message
+    await expect.poll(() => JSON.parse(readFileSync(dump, "utf8")).pid, { timeout: 5_000 }).not.toBe(turnPid);
+    const drainPid = JSON.parse(readFileSync(dump, "utf8")).pid;
+    expect(killed(drainPid)).toBe(false);
+    expect(processIsAlive(drainPid)).toBe(true);
+    expect(recorder.events.some((e) => e.type === "runtime.error")).toBe(false);
+    await instance.adapter.interruptTurn("t-codex-queue-nokill");
+    await recorder.until((e) => e.type === "turn.completed");
+    kills.mockRestore();
+  }, 20_000);
+
   it("steer is false with no running turn", async () => {
     await create();
     await expect(instance.adapter.steer?.("t-codex-idle", "hi")).resolves.toBe(false);
