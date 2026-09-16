@@ -8,6 +8,7 @@ import {
   queuedChannelMessage,
   queueChannelMessage,
   restoreHeldChannelQueue,
+  resolveHeldReplyTarget,
   settleHeldChannelQueueHead,
 } from "./channel-queue.ts";
 
@@ -123,6 +124,27 @@ describe("channel queue", () => {
     expect(_queuedChannelCount("thread-d")).toBe(1);
     expect(queuedChannelMessage("group-d", "thread-d", "send_late_123456")?.id).toBe(late.id);
     cancelChannelMessage("group-d", late.id);
+  });
+
+  it("restores the held queue when the head's reply target can no longer be resolved", () => {
+    const head = queueChannelMessage("group-h", "thread-h", "reply to a vanished message", {
+      replyToId: "msg_gone",
+    });
+    const held = holdChannelQueue("group-h", "thread-h", head.id)!;
+    expect(_queuedChannelCount("thread-h")).toBe(0);
+
+    // The steer route resolves the reply target while the queue is lifted;
+    // a target that drifted out of the transcript must put the words back.
+    expect(() =>
+      resolveHeldReplyTarget(held, () => {
+        throw new Error("the message being replied to is no longer available");
+      }),
+    ).toThrow("no longer available");
+    expect(_queuedChannelCount("thread-h")).toBe(1);
+    const run = vi.fn();
+    drainChannelMessages(() => false, run);
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({ id: head.id, replyToId: "msg_gone" }));
+    cancelChannelMessage("group-h", head.id);
   });
 
   it("settles only the steered head and re-queues the tail for the room drain", () => {

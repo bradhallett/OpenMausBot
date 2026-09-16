@@ -126,6 +126,25 @@ export function restoreHeldChannelQueue(held: HeldChannelQueue): void {
   });
 }
 
+/** Resolve the held head's reply target through a caller-supplied resolver.
+ * The queue is already lifted out of the map here, so a target that cannot
+ * be resolved (missing, non-text, empty — state drift between queueing and
+ * the steer) must not strand the held words outside it until restart:
+ * restore first, then let the error propagate to the request. */
+export function resolveHeldReplyTarget<T>(
+  held: HeldChannelQueue,
+  resolve: (threadId: string, replyToId: string) => T,
+): T | undefined {
+  const head = held.items[0];
+  if (!head?.replyToId) return undefined;
+  try {
+    return resolve(held.threadId, head.replyToId);
+  } catch (error) {
+    restoreHeldChannelQueue(held);
+    throw error;
+  }
+}
+
 /** Mark a held queue's head delivered — its words were folded into the
  * running turn — and re-queue the rest for the room's normal one-at-a-time
  * drain. A restart must not replay the steered head as a fresh follow-up. */

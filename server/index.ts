@@ -213,6 +213,7 @@ import {
   queueChannelMessage,
   restoreChannelMessages,
   restoreHeldChannelQueue,
+  resolveHeldReplyTarget,
   settleHeldChannelQueueHead,
 } from "./channel-queue.ts";
 import {
@@ -13489,7 +13490,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         restoreHeldChannelQueue(held);
         return json(res, 409, { error: "only the first queued message can steer" });
       }
-      const replyTo = head.replyToId ? resolveReplyTarget(targetThreadId, head.replyToId) : undefined;
+      // A reply target that cannot be resolved restores the held queue
+      // before the request fails — the room's normal drain keeps the head.
+      const replyTo = resolveHeldReplyTarget(held, resolveReplyTarget);
       const steered = await instance.adapter
         .steer(targetThreadId, promptWithReply(head.text, replyTo, cfg.profile?.name?.trim() || "User"))
         .catch(() => false);
