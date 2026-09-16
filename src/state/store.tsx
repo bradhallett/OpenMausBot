@@ -910,6 +910,7 @@ export type Action =
   | { type: "cancelQueued"; botId: string; queueId: string; threadId?: string }
   | { type: "steerQueued"; botId: string; queueId: string; threadId?: string; onError?: () => void; onSettled?: () => void }
   | { type: "cancelGroupQueued"; groupId: string; threadId: string; queueId: string }
+  | { type: "steerGroupQueued"; groupId: string; queueId: string; threadId?: string; onError?: () => void; onSettled?: () => void }
   | { type: "editMessage"; botId: string; messageId: string; text: string; threadId?: string }
   | { type: "switchBranch"; botId: string; messageId: string; threadId?: string }
   | { type: "threadActive"; threadId: string; activeLeafId: string }
@@ -1941,6 +1942,7 @@ export function reducer(state: AppState, action: Action): AppState {
     case "createGroup":
     case "deleteGroup":
     case "interruptGroup":
+    case "steerGroupQueued":
     case "createRoutine":
     case "updateRoutine":
     case "deleteRoutine":
@@ -2621,6 +2623,27 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           void api(`/api/groups/${action.groupId}/queue/${action.queueId}`, { method: "DELETE" })
             .then(() => rawDispatch(action))
             .catch(showError);
+          break;
+        case "steerGroupQueued":
+          void api(`/api/groups/${action.groupId}/queue/${action.queueId}/steer`, {
+            method: "POST",
+            body: JSON.stringify({ threadId: action.threadId }),
+          })
+            .then((body) => {
+              if (body?.steered === true && Array.isArray(body.messages) && typeof body.threadId === "string") {
+                for (const message of body.messages) {
+                  rawDispatch({ type: "messageAdded", threadId: body.threadId, message });
+                }
+                for (const queueId of body.queueIds ?? []) {
+                  rawDispatch({ type: "consumePendingQueued", threadId: body.threadId, queueId });
+                }
+              }
+              action.onSettled?.();
+            })
+            .catch((error) => {
+              showError(error);
+              action.onError?.();
+            });
           break;
         case "send": {
           // persist through the existing card route so an older server that
