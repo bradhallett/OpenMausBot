@@ -7,12 +7,16 @@
 
 import type { ApprovalMode } from "../shared/approval-mode.ts";
 import type { AskQuestion } from "../shared/ask-question.ts";
+import type { EffortLevel } from "../shared/wire.ts";
+
+// These contract types live in shared/wire.ts now (part of the wire model);
+// re-exported here so existing server-side importers keep working.
+export type { CloudBackend, EffortLevel, ModelSelection } from "../shared/wire.ts";
 
 export type DriverKind = string;
 export type InstanceId = string;
 export type ThreadId = string;
 export type TurnId = string;
-export type CloudBackend = "box" | "vps";
 
 export type ProviderErrorCode =
   | "missing_cli"
@@ -32,15 +36,6 @@ export class ProviderError extends Error {
   }
 }
 
-/** Reasoning-effort levels, ascending. A union of everything any engine
- * accepts; each driver declares the subset its CLI will take. */
-export const EFFORT_LEVELS = ["none", "low", "medium", "high", "xhigh", "max"] as const;
-export type EffortLevel = (typeof EFFORT_LEVELS)[number];
-
-/** Narrow untrusted API/config input before it becomes a model selection. */
-export function isEffortLevel(value: unknown): value is EffortLevel {
-  return typeof value === "string" && (EFFORT_LEVELS as readonly string[]).includes(value);
-}
 
 /** Variants are opaque provider IDs, not the cross-engine effort enum. */
 export function isModelVariant(value: unknown): value is string {
@@ -61,14 +56,6 @@ export interface ModelVariantState {
 // ── model selection ────────────────────────────────────────────────────
 // "Which model" is a data value carried on the request, never a service
 // binding (upstream ModelSelectionWire). instanceId is the routing key.
-export interface ModelSelection {
-  instanceId: InstanceId;
-  model: string;
-  /** Optional: no effort means no flag, and the CLI keeps its own default. */
-  effort?: EffortLevel;
-  /** Explicit model-specific variant. Omitted leaves the native session alone. */
-  variant?: string;
-}
 
 /** An image already admitted to OpenMausBot's private attachment store.
  * Drivers receive this structured value instead of learning a host path from
