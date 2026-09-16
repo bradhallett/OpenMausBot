@@ -10,7 +10,6 @@ import {
 } from "./records.ts";
 import type { StoreContext } from "./context.ts";
 import { clearPendingThreadDeletions, flushPendingThreadDeletions, stagePendingThreadDeletions } from "./messages.ts";
-import { threadTitleFrom } from "./records.ts";
 
 export function group(ctx: StoreContext, id: string): GroupRecord | undefined {
   return ctx.groups.find((g) => g.id === id);
@@ -263,7 +262,7 @@ export function titleGroupTaskFromFirstMessage(ctx: StoreContext, groupId: strin
 export function retitleGroupTask(ctx: StoreContext, groupId: string, threadId: string, machineTitle: string, title: string): GroupTaskRecord | null {
   const task = ctx.groupTaskByThread(groupId, threadId);
   if (!task || task.title !== machineTitle) return null;
-  return renameGroupTask(ctx, groupId, threadId, threadTitleFrom(title));
+  return renameGroupTask(ctx, groupId, threadId, title);
 }
 
 export function deleteGroupTask(ctx: StoreContext, groupId: string, threadId: string): GroupRecord | null {
