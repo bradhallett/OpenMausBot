@@ -5,7 +5,15 @@
 // WireTask or listed in TaskWirePrivateKeys.
 import { describe, expect, it } from "vitest";
 
-import { toWireTask, type BotRecord, type GroupRecord, type Message, type TaskRecord } from "./store.ts";
+import {
+  botWireProjectionIsExact,
+  groupWireProjectionIsExact,
+  toWireTask,
+  type BotRecord,
+  type GroupRecord,
+  type Message,
+  type TaskRecord,
+} from "./store.ts";
 import type { WireBot, WireGroup, WireMessage, WireTask } from "../shared/wire.ts";
 
 const fullTask: TaskRecord = {
@@ -47,6 +55,14 @@ describe("shared wire model", () => {
     expect(wire).toEqual({ ...fullTask, resumeCursors: undefined, lastInstanceId: undefined });
     expect(fullTask.resumeCursors).toEqual({ claude: "cursor" });
     expect(fullTask.lastInstanceId).toBe("claude");
+  });
+
+  it("bot and group wire projections stay exact (compile-enforced)", () => {
+    // Referencing the guard constants keeps the exactness assertions live:
+    // a new BotRecord field fails typecheck until it is declared on WireBot
+    // or listed in BotWirePrivateKeys; a group field likewise on WireGroup.
+    expect(botWireProjectionIsExact).toBe(true);
+    expect(groupWireProjectionIsExact).toBe(true);
   });
 
   it("server records stay assignable to the shared wire shapes (compile-enforced)", () => {

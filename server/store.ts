@@ -42,6 +42,12 @@ export type Message = WireMessage;
 /** A room record: the shared wire shape minus the computed working flag,
  * which publicGroupState adds at projection time. */
 export type GroupRecord = Omit<WireGroup, "working">;
+/** Groups keep no private fields; the only projection work is the
+ * transient `working` flag publicGroupState computes at broadcast time. */
+export type GroupWireProjection = GroupRecord & { working: boolean };
+export type GroupWireProjectionIsExact = AssertExact<WireGroup, GroupWireProjection> & AssertSameKeys<WireGroup, GroupWireProjection>;
+export const groupWireProjectionIsExact: GroupWireProjectionIsExact = true;
+
 
 // Unicode's complete emoji sequences include flags, skin tones and ZWJ
 // combinations. Also allow unqualified single symbols (e.g. ♥), but not
@@ -314,6 +320,16 @@ export interface BotRecord extends Omit<WireBot, "avatarUrl" | "tasks"> {
   /** Receipt committed with a reviewed team batch; prevents replay after a lost response. */
   lastTeamSetupReceipt?: { requestId: string; result: TeamSetupResult };
 }
+
+/** BotRecord fields no client may see, plus the two the projection
+ * re-derives rather than passes through (tasks are re-projected as
+ * WireTask[], avatarUrl is coerced to always-present). The exactness
+ * assertion fails to compile when either side drifts, so a new server
+ * field forces a decision — wire-visible or private here. */
+export type BotWirePrivateKeys = "resumeCursors" | "tasks" | "avatarUrl" | "approvalGrant" | "lastProfileRequestId" | "lastTeamSetupReceipt";
+export type BotWireProjection = Pick<BotRecord, Exclude<keyof BotRecord, BotWirePrivateKeys>>;
+export type BotWireProjectionIsExact = AssertExact<Omit<WireBot, "avatarUrl" | "tasks">, BotWireProjection> & AssertSameKeys<Omit<WireBot, "avatarUrl" | "tasks">, BotWireProjection>;
+export const botWireProjectionIsExact: BotWireProjectionIsExact = true;
 
 const BOTS_FILE = join(DATA_DIR, "bots.json");
 const GROUPS_FILE = join(DATA_DIR, "groups.json");

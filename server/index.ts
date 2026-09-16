@@ -81,7 +81,7 @@ import { groupTurnCwd } from "./room-cwd.ts";
 import { RoomTurnDeadline, RoomTurnStallRegistry, roomTurnTimeoutMessage } from "./room-turn-timeout.ts";
 import * as box from "./box.ts";
 import { TeamComputers, teamComputerAssignment, teamComputerCreate, teamComputerOwner, type TeamComputerRecord } from "./team-computers.ts";
-import { isEffortLevel, type WireTask } from "../shared/wire.ts";
+import { isEffortLevel, type WireBot, type WireGroup, type WireTask } from "../shared/wire.ts";
 import type { TeamComputersPayload } from "../shared/team-computer.ts";
 import { boxCreateRecoverySnapshot, retireDeletedBoxCreate } from "./box-create-idempotency.ts";
 import { boxDeletionSnapshot } from "./box-delete-journal.ts";
@@ -1636,7 +1636,7 @@ const wireTask = (task: TaskRecord): WireTask =>
     ? { ...toWireTask(task), busy: true, activity: "working" as const }
     : toWireTask(task);
 
-const wireBot = (bot: NonNullable<ReturnType<typeof store.bot>>) => {
+const wireBot = (bot: BotRecord): WireBot => {
   const { resumeCursors: _resumeCursors, tasks, approvalGrant, lastProfileRequestId: _lastProfileRequestId, lastTeamSetupReceipt: _lastTeamSetupReceipt, ...rest } = bot;
   // An elevated selection is inert until the desktop confirms its exact
   // private reply. Every ordinary client sees the effective Ask state during
@@ -2698,7 +2698,7 @@ const roomHandoffs = new RoomHandoffs(join(DATA_DIR, "room-handoffs.json"), {
   },
 });
 activeCoordinationForThread = threadId => roomHandoffs.activeDirect(threadId);
-function publicGroupState(group: GroupRecord) {
+function publicGroupState(group: GroupRecord): WireGroup {
   return { ...group, working: groupIsWorking(group) || [...roomHandoffs.nodes.values()].some(n => n.groupId === group.id && !["completed", "failed", "cancelled"].includes(n.status)) };
 }
 
