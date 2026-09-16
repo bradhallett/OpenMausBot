@@ -116,10 +116,12 @@ export function overlaysReducer(overlays: OverlaysState, action: Action, selecti
         };
       }
       const excluded = OVERLAY_EXCLUDES[action.kind];
-      const openList = overlays.open.filter((kind) => !excluded.includes(kind));
+      const openList = overlays.open.filter(
+        (kind) => kind !== action.kind && !excluded.includes(kind),
+      );
       return {
         ...overlays,
-        open: openList.includes(action.kind) ? openList : [...openList, action.kind],
+        open: [...openList, action.kind],
         ...(action.kind === "plugins" && action.section !== undefined
           ? { pluginsSurface: action.section as "apps" | "mcp" }
           : {}),

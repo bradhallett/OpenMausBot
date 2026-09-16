@@ -865,6 +865,7 @@ function agentsIntegration(
       OMB_THREAD_ID: threadId,
       OMB_COMMS_TOKEN: token,
       OMB_TURN_DEPTH: String(depth),
+      OMB_TURN_GENERATION: generation,
       OMB_ROOM_TURN: roomCoordination ? "1" : "0",
       OMB_OWN_THREAD_CREATION: ownThreadCreation ? "1" : "0",
       OMB_SKILL_AUTHORING_ENABLED: skillAuthoring ? "1" : "0",

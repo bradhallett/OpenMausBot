@@ -875,7 +875,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
         {density === "icons" ? (
           <div className="flex items-center justify-center">
             <button
-              onClick={() => dispatch({ type: "openOverlay", kind: "appSettings" })}
+              onClick={() => dispatch({ type: "openOverlay", kind: "appSettings", open: true })}
               className="flex min-w-0 items-center justify-center rounded-xl px-2 py-2 text-left hover:bg-raised/50"
               aria-label={t("sidebar.appSettings")}
               title={state.config?.profile?.name?.trim() || t("sidebar.appSettings")}

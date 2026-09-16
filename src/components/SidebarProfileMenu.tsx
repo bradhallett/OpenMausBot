@@ -212,7 +212,7 @@ export function SidebarProfileMenu() {
       key: "settings",
       label: t("sidebar.menu.settings"),
       icon: <SettingsIcon size={18} />,
-      onSelect: () => dispatch({ type: "openOverlay", kind: "appSettings" }),
+      onSelect: () => dispatch({ type: "openOverlay", kind: "appSettings", open: true }),
     },
     {
       key: "shortcuts",
