@@ -18,6 +18,15 @@ export interface AutoVmClaimSlot {
    * refusing screen calls for this generation instead of forwarding them
    * onto a VM the turn never claimed (gate finding F1). */
   failed?: boolean;
+  /** The rejection's message, so the gate can refuse honestly instead of
+   * blaming another thread. */
+  failure?: string;
+  /** Set when the fired claim resolved: this turn now holds the desktop. */
+  claimed?: boolean;
+  /** True when dispatch mounted the computer tools without claiming, so
+   * the gate must fire the claim on the first screen call. Eager attaches
+   * register the same slot shape but never need the gate. */
+  lazy?: boolean;
 }
 
 export type AutoVmClaimTable = Map<string, AutoVmClaimSlot>;
@@ -35,7 +44,10 @@ export function startAutoVmClaim(table: AutoVmClaimTable, threadId: string, gene
   const slot = table.get(threadId);
   if (!slot || slot.owner.threadId !== threadId || slot.owner.generation !== generation || slot.begin) return;
   slot.begin = slot.claim().then(
-    () => undefined,
-    () => { slot.failed = true; },
+    () => { slot.claimed = true; },
+    (error: unknown) => {
+      slot.failed = true;
+      slot.failure = error instanceof Error ? error.message : String(error);
+    },
   );
 }
