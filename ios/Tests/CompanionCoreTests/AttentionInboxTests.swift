@@ -69,6 +69,32 @@ final class AttentionInboxTests: XCTestCase {
         XCTAssertEqual(crossBotAttentionThreads([alpha, beta]).map(\.task.threadId), ["a0", "b0"])
     }
 
+    func testAttentionRowTapResolvesTheChatDestinationBot() {
+        let alpha = bot("a", "Alpha", "a0", tasks: [
+            task("a0", "Idle chat"),
+            task("a1", "Waiting approval", activity: "waiting-on-you"),
+        ])
+        var state = CompanionState()
+        state.bots = [alpha]
+
+        let entry = crossBotAttentionThreads([alpha]).first { $0.task.threadId == "a1" }
+        let destination = entry?.destinationBot(in: state)
+
+        XCTAssertEqual(destination?.id, "a")
+        XCTAssertEqual(destination?.threadId, "a1")
+    }
+
+    func testAttentionRowTapIsASafeNoOpWhenTheBotIsMissing() {
+        let gone = bot("g", "Gone", "g0", tasks: [task("g0", "Waiting", activity: "waiting-on-you")])
+        guard let entry = crossBotAttentionThreads([gone]).first else {
+            return XCTFail("the waiting thread should appear in the attention list")
+        }
+        var state = CompanionState()
+        state.bots = []
+
+        XCTAssertNil(entry.destinationBot(in: state))
+    }
+
     private func task(
         _ id: String, _ title: String,
         busy: Bool? = false, activity: String? = nil,

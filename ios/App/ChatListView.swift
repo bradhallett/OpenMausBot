@@ -563,8 +563,8 @@ struct ChatListView: View {
     }
 
     private func openAttention(_ entry: AttentionThread) {
-        guard let chat = session.state.bot(forThread: entry.task.threadId) else { return }
-        path.append(chat)
+        guard let bot = entry.destinationBot(in: session.state) else { return }
+        path.append(Chat.bot(bot))
     }
 
     private func summaries(for bots: [Bot]) -> [ChatSummary] {

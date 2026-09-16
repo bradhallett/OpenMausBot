@@ -11,6 +11,16 @@ public struct AttentionThread: Identifiable, Hashable, Sendable {
     public var id: String { "\(botId):\(task.threadId)" }
 }
 
+extension AttentionThread {
+    /// The bot a tapped row opens, projected onto the thread the entry
+    /// points at, or nil when that thread no longer resolves to a bot —
+    /// a missing destination must leave the navigation path untouched
+    /// instead of appending a value no destination matches.
+    public func destinationBot(in state: CompanionState) -> Bot? {
+        state.bot(forThread: task.threadId)
+    }
+}
+
 extension BotTask {
     /// Whether a thread belongs in an attention list at all: it is working,
     /// needs the person, or has something they have not read. Attention is
