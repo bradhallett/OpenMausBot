@@ -82,6 +82,23 @@ describe("QueuedComposerMessages", () => {
     expect(interruptMarkup).not.toContain("aria-label=\"Steer queued message now\"");
   });
 
+  it("room chips say the interrupt truth for their queue-only drain", () => {
+    const markup = renderToStaticMarkup(
+      createElement(QueuedComposerMessages, {
+        items: [
+          { queueId: "q1", text: "first queued in the room" },
+          { queueId: "q2", text: "second queued in the room" },
+        ],
+        onSteer: () => undefined,
+        steerMode: "next",
+        steerInterrupts: true,
+        onCancel: () => undefined,
+      }),
+    );
+    expect(markup).toContain("aria-label=\"Stop the running turn and send the next queued message now\"");
+    expect(markup).not.toContain("aria-label=\"Steer the next queued message now\"");
+  });
+
   it("puts the queue-level Steer action on the head only and keeps every delete distinct", () => {
     const markup = renderToStaticMarkup(
       createElement(QueuedComposerMessages, {
