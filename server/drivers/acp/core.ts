@@ -49,7 +49,7 @@ import { augmentedPath } from "../../env-path.ts";
 import { supportsApprovalMode } from "../../../shared/approval-mode.ts";
 
 import { appendNative } from "../native.ts";
-import { createDriverSessionRuntime } from "../driver-runtime.ts";
+import { createDriverSessionRuntime, createRefreshModels } from "../driver-runtime.ts";
 import { commandSummary, toolDetailPreview } from "../../tool-summary.ts";
 import { AcpConnection, type AcpWireMessage } from "./protocol.ts";
 
@@ -334,16 +334,13 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         support.transformEnv?.(env, activeConfig, instanceId);
         return env;
       };
-      let models = support.models;
-      const refreshModels = async () => {
-        if (!support.resolveModels) return;
-        try {
-          const resolved = await support.resolveModels(childEnv(), config, instanceId);
-          if (resolved.options.length) models = resolved;
-        } catch {
-          // Keep the last usable catalog when an optional discovery source is down.
-        }
-      };
+      const { resolveModels } = support;
+      const catalog = createRefreshModels({
+        initial: support.models,
+        // no resolveModels means no live source; a down discovery source keeps the last usable catalog
+        load: resolveModels ? () => resolveModels(childEnv(), config, instanceId) : undefined,
+      });
+      const refreshModels = catalog.refreshModels;
       if (support.resolveModelsOnCreate !== false) await refreshModels();
       interface Turn {
         stop: () => Promise<boolean>;
@@ -498,6 +495,12 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
           && !skipSubscriptionAuthForLocalInject(turn.model)
           && !(await support.isAuthenticated(env, turnConfig, instanceId))
         ) {
+          if (runtime.claimCanceled(turnId)) {
+            runtime.endTurn(threadId, turnId);
+            emit({ ...base(threadId, turnId), type: "turn.started" });
+            emit({ ...base(threadId, turnId), type: "turn.completed", ok: false, stopReason: "interrupted", cost: null });
+            return { turnId };
+          }
           emit({ ...base(threadId, turnId), type: "turn.started" });
           emit({ ...base(threadId, turnId), type: "runtime.error", message: support.loginNote, setup: true });
           runtime.endTurn(threadId, turnId);
@@ -517,6 +520,12 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             ? await support.resolveCommand(env, turnConfig, instanceId)
             : { command: turnConfig.cli };
         } catch (error) {
+          if (runtime.claimCanceled(turnId)) {
+            runtime.endTurn(threadId, turnId);
+            emit({ ...base(threadId, turnId), type: "turn.started" });
+            emit({ ...base(threadId, turnId), type: "turn.completed", ok: false, stopReason: "interrupted", cost: null });
+            return { turnId };
+          }
           emit({ ...base(threadId, turnId), type: "turn.started" });
           emit({
             ...base(threadId, turnId),
@@ -526,6 +535,16 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
           });
           runtime.endTurn(threadId, turnId);
           emit({ ...base(threadId, turnId), type: "turn.completed", ok: false, stopReason: "setup_required", cost: null });
+          return { turnId };
+        }
+
+        // stopAll()/dispose() canceled this claim while auth or command
+        // resolution ran. Release the claim, settle as interrupted, and
+        // spawn nothing.
+        if (runtime.claimCanceled(turnId)) {
+          runtime.endTurn(threadId, turnId);
+          emit({ ...base(threadId, turnId), type: "turn.started" });
+          emit({ ...base(threadId, turnId), type: "turn.completed", ok: false, stopReason: "interrupted", cost: null });
           return { turnId };
         }
 
@@ -1143,7 +1162,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         displayName: input.displayName,
         enabled: input.enabled,
         get models() {
-          return models;
+          return catalog.models;
         },
         refreshModels: support.resolveModels ? refreshModels : undefined,
         snapshot,

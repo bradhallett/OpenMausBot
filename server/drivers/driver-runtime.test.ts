@@ -39,7 +39,70 @@ describe("driver session runtime teardown", () => {
     expect(() => runtime.claimTurn("t1", "turn-2")).not.toThrow();
   });
 
-  it("rejects new claims after dispose and stops late registrations", async () => {
+  it("clears a canceled claim marker when its setup fails", async () => {
+    const { runtime } = makeRuntime();
+    runtime.claimTurn("t1", "turn-1");
+    await runtime.stopAll();
+    expect(runtime.claimCanceled("turn-1")).toBe(true);
+    runtime.endTurn("t1", "turn-1");
+    expect(runtime.claimCanceled("turn-1")).toBe(false);
+  });
+
+  it("rejects new claims while a stopAll teardown is in flight", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const afterStopTurns = () => gate;
+    const runtime = createDriverSessionRuntime<{ turnId: string }>({ driverKind: "test", stopTurn: vi.fn(), afterStopTurns });
+    const teardown = runtime.stopAll();
+    expect(() => runtime.claimTurn("t1", "turn-1")).toThrow(/stopping/);
+    release();
+    await teardown;
+    expect(() => runtime.claimTurn("t1", "turn-1")).not.toThrow();
+  });
+
+  it("serializes overlapping teardowns so each turn stops exactly once", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let runtime!: ReturnType<typeof createDriverSessionRuntime<{ turnId: string }>>;
+    // a real stopTurn settles the turn, which drains it from the runtime
+    const stopTurn = vi.fn(() => gate.then(() => runtime.endTurn("t1", "turn-1")));
+    runtime = createDriverSessionRuntime<{ turnId: string }>({ driverKind: "test", stopTurn });
+    const active = { turnId: "turn-1" };
+    runtime.claimTurn("t1", "turn-1");
+    runtime.setTurn("t1", active);
+    const stop = runtime.stopAll();
+    const dispose = runtime.dispose();
+    expect(() => runtime.claimTurn("t1", "turn-2")).toThrow(/stopping/);
+    release();
+    await Promise.all([stop, dispose]);
+    expect(stopTurn).toHaveBeenCalledTimes(1);
+    expect(stopTurn).toHaveBeenCalledWith(active);
+  });
+
+  it("stops each turn once when a void stopTurn leaves it registered", async () => {
+    const stopTurn = vi.fn();
+    const runtime = createDriverSessionRuntime<{ turnId: string }>({ driverKind: "test", stopTurn });
+    const first = { turnId: "turn-1" };
+    const second = { turnId: "turn-2" };
+    runtime.claimTurn("t1", "turn-1");
+    runtime.setTurn("t1", first);
+    runtime.claimTurn("t2", "turn-2");
+    runtime.setTurn("t2", second);
+    const stop = runtime.stopAll();
+    const teardown = runtime.dispose();
+    await Promise.all([stop, teardown]);
+    expect(stopTurn).toHaveBeenCalledTimes(2);
+    expect(stopTurn).toHaveBeenCalledWith(first);
+    expect(stopTurn).toHaveBeenCalledWith(second);
+  });
+
+  it("reports a live claim as not canceled", () => {
+    const { runtime } = makeRuntime();
+    runtime.claimTurn("t1", "turn-1");
+    expect(runtime.claimCanceled("turn-1")).toBe(false);
+  });
+
+    it("rejects new claims after dispose and stops late registrations", async () => {
     const { runtime, stopTurn } = makeRuntime();
     await runtime.dispose();
     expect(() => runtime.claimTurn("t1", "turn-1")).toThrow(/disposed/);
