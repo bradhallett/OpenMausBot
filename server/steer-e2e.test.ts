@@ -390,4 +390,85 @@ posixOnly("mid-turn steering e2e", () => {
     await api("POST", `/api/bots/${created.id}/interrupt`);
     await waitFor(async () => (await getBot(created.id)).busy === false, "the drained turn to settle");
   }, 40_000);
+
+  it("a room steer folds the queued head into the running codex turn, and room Stop reports no SIGTERM", async () => {
+    const created = (await api("POST", "/api/bots")).body.bot;
+    const instances = (await api("GET", "/api/instances")).body.instances;
+    const model = instances.find((i: any) => i.instanceId === "codex").models.default;
+    await api("PATCH", `/api/bots/${created.id}`, { modelSelection: { instanceId: "codex", model } });
+    const room = (await api("POST", "/api/groups", {
+      name: "Steer room",
+      memberIds: [created.id],
+      setup: { bulletin: "", defaultResponder: { kind: "member", botId: created.id } },
+    })).body.group;
+    const getGroup = async () =>
+      (await api("GET", "/api/bots?messages=30")).body.groups.find((g: any) => g.id === room.id);
+
+    expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "first room turn" })).status).toBe(202);
+    await waitFor(async () => (await getGroup())?.busyBotId === created.id, "the room turn to start");
+    await waitFor(async () => (await getGroup())?.messages.some((m: any) => m.card), "the room question card");
+
+    // Enter still queues in rooms: the send lands as a queued chip, not a turn
+    const queued = await api("POST", `/api/groups/${room.id}/messages`, { text: "steer these room words" });
+    expect(queued.status).toBe(202);
+    expect(queued.body).toMatchObject({ ok: true, queued: true });
+    expect((await getGroup())?.messages.some((m: any) => m.text === "steer these room words")).toBe(false);
+
+    // the room Steer chip routes through the same non-interrupting fold
+    const steered = await api("POST", `/api/groups/${room.id}/queue/${queued.body.queueId}/steer`, {
+      threadId: room.threadId,
+    });
+    expect(steered.status).toBe(200);
+    expect(steered.body).toMatchObject({ ok: true, steered: true });
+    expect(steered.body.queueIds).toEqual([queued.body.queueId]);
+    const folded = (await getGroup())?.messages.find((m: any) => m.text === "steer these room words");
+    expect(folded?.steered).toBe(true);
+
+    // the fold reached the app-server as mid-turn input for the SAME turn
+    const nativeRows = readFileSync(join(home, ".openmausbot", "native", `${room.threadId}.ndjson`), "utf8")
+      .trim().split("\n").map((line) => JSON.parse(line));
+    const steerRow = nativeRows.find((row) => row.dir === "out" && row.msg?.method === "turn/steer")?.msg;
+    expect(steerRow?.params).toMatchObject({ input: [{ type: "text", text: "steer these room words" }] });
+
+    await api("POST", `/api/groups/${room.id}/interrupt`, {});
+    await waitFor(async () => (await getGroup())?.working === false, "the steered room turn to settle");
+    expect(JSON.stringify((await getGroup())?.messages)).not.toContain("SIGTERM");
+    expect(stderr).not.toContain("signal SIGTERM");
+  }, 40_000);
+
+  it("a room whose engine cannot steer keeps its queue, then drains after Stop", async () => {
+    const created = (await api("POST", "/api/bots")).body.bot;
+    await api("PATCH", `/api/bots/${created.id}`, { modelSelection: { instanceId: "acp", model: "fake-model" } });
+    const room = (await api("POST", "/api/groups", {
+      name: "Queue room",
+      memberIds: [created.id],
+      setup: { bulletin: "", defaultResponder: { kind: "member", botId: created.id } },
+    })).body.group;
+    const getGroup = async () =>
+      (await api("GET", "/api/bots?messages=30")).body.groups.find((g: any) => g.id === room.id);
+
+    expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "first" })).status).toBe(202);
+    await waitFor(async () => (await getGroup())?.busyBotId === created.id, "the hung room turn to start");
+    const queued = await api("POST", `/api/groups/${room.id}/messages`, { text: "second" });
+    expect(queued.status).toBe(202);
+    expect(queued.body).toMatchObject({ ok: true, queued: true });
+
+    // the room steer endpoint never interrupts an incapable engine: the
+    // queue waits for the room's own one-at-a-time drain
+    const still = await api("POST", `/api/groups/${room.id}/queue/${queued.body.queueId}/steer`, {
+      threadId: room.threadId,
+    });
+    expect(still.status).toBe(200);
+    expect(still.body).toMatchObject({ ok: true, queued: true });
+    expect((await getGroup())?.working).toBe(true);
+    expect((await getGroup())?.messages.some((m: any) => m.text === "second")).toBe(false);
+
+    await api("POST", `/api/groups/${room.id}/interrupt`, {});
+    await waitFor(
+      async () => (await getGroup())?.messages.some((m: any) => m.text === "second"),
+      "the preserved room queue to drain",
+    );
+    await api("POST", `/api/groups/${room.id}/interrupt`, {});
+    await waitFor(async () => (await getGroup())?.working === false, "the drained room turn to settle");
+  }, 40_000);
 });

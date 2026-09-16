@@ -69,6 +69,13 @@ graceful-first stop when its instance is disposed. No deletion path calls
   `startTurn`; it never touches the previous child.
 - `rg -n "kill|interrupt|stop\(" server/steer-queue.ts` matches nothing
   (only comments/warns).
+- The room queue/steer endpoint (index.ts:13355-13437) rides the same
+  contract: it lifts the channel queue atomically (holdChannelQueue),
+  calls adapter.steer() on the engine that owns the running room turn,
+  and restores or settles the held queue (restoreHeldChannelQueue /
+  settleHeldChannelQueueHead) without any interrupt or kill call. A room
+  whose running engine cannot steer keeps its queue, exactly like an
+  incapable 1:1 engine.
 
 ## Criterion (c) test proof
 

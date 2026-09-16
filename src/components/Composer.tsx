@@ -823,7 +823,7 @@ export function Composer({
         <QueuedComposerMessages
           items={queuedMessages}
           onSteer={canSteerQueued ? steerQueued : undefined}
-            steerInterrupts={!canSteer}
+          steerInterrupts={!canSteer}
           steerMode={group ? "next" : "all"}
           steering={steering}
           onCancel={(queueId) => {
