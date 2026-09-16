@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { startAutoVmClaim, type AutoVmClaimTable } from "./auto-vm-claims.ts";
+import { startAutoVmClaim, type AutoVmClaimSlot, type AutoVmClaimTable } from "./auto-vm-claims.ts";
 
-const slot = (claim: () => Promise<void>, generation = "gen-1") => ({
+const slot = (claim: () => Promise<void>, generation = "gen-1"): AutoVmClaimSlot => ({
   owner: { threadId: "t1", generation },
   claim,
 });
@@ -49,5 +49,19 @@ describe("startAutoVmClaim", () => {
     await Promise.resolve();
     expect(claim).toHaveBeenCalledExactlyOnceWith();
     expect(table.has("t1")).toBe(true);
+  });
+
+  it("a stale rejection cannot delete a newer generation's slot", async () => {
+    const table: AutoVmClaimTable = new Map();
+    let rejectFirst: (error: Error) => void = () => {};
+    const first = slot(() => new Promise<void>((_, reject) => { rejectFirst = reject; }));
+    table.set("t1", first);
+    startAutoVmClaim(table, "t1", "gen-1");
+    const second = slot(vi.fn(async () => undefined), "gen-2");
+    table.set("t1", second);
+    rejectFirst(new Error("stale holder"));
+    await first.begin;
+    expect(table.get("t1")).toBe(second);
+    expect(second.begin).toBeUndefined();
   });
 });

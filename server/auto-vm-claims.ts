@@ -21,12 +21,14 @@ export type AutoVmClaimTable = Map<string, AutoVmClaimSlot>;
 /** Fire a thread's lazy claim exactly once, fenced by the dispatch
  * generation. A failed claim clears the slot so later polls fail closed
  * (the capability dies and the bridge treats the computer as held)
- * instead of wedging a claim that can never succeed. */
+ * instead of wedging a claim that can never succeed. A rejection only
+ * clears the slot it fired from, so a stale claim can never remove a
+ * newer generation's slot on the same thread. */
 export function startAutoVmClaim(table: AutoVmClaimTable, threadId: string, generation: string): void {
   const slot = table.get(threadId);
   if (!slot || slot.owner.threadId !== threadId || slot.owner.generation !== generation || slot.begin) return;
   slot.begin = slot.claim().then(
     () => undefined,
-    () => { table.delete(threadId); },
+    () => { if (table.get(threadId) === slot) table.delete(threadId); },
   );
 }

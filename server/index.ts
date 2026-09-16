@@ -958,7 +958,7 @@ function claimTurnResource(owner: TurnOwner, resource: string): boolean {
 
 function releaseTurnResources(owner: TurnOwner | undefined): void {
   if (!owner) return;
-  autoVmClaims.delete(owner.threadId);
+  if (autoVmClaims.get(owner.threadId)?.owner.generation === owner.generation) autoVmClaims.delete(owner.threadId);
   if (settlingResourceOwners.get(owner.threadId) === owner.generation) settlingResourceOwners.delete(owner.threadId);
   turnResources.release(owner);
   if (turnResourceOwners.get(owner.threadId)?.generation === owner.generation) turnResourceOwners.delete(owner.threadId);
@@ -5813,11 +5813,11 @@ async function startTurn(
       let browserCapture: (() => Promise<{ png: string; format: string }>) | null = null;
       let computerKind: "box" | "vps" | "vm" | "local" | null = null;
       let autoVpsProblem: string | null = null;
-      // The exclusive Local VM claim sequence, verbatim from the old inline
-      // attach path, shared by dispatch (eager today) and the first-screen-
-      // call gate (issue #1361). Idempotent per turn: the resource claim and
-      // the lease both re-assert the same owner, so a re-entrant call from
-      // the gate no-ops once dispatch has already claimed.
+      /** The exclusive Local VM claim sequence, verbatim from the old inline
+       * attach path, shared by dispatch (eager today) and the first-screen-
+       * call gate (issue #1361). Idempotent per turn: the resource claim and
+       * the lease both re-assert the same owner, so a re-entrant call from
+       * the gate no-ops once dispatch has already claimed. */
       const claimAutoLocalVm = async (claimThreadId: string): Promise<{ target: LocalVmTarget; runtime: Runtime }> => {
         const localVmTarget = localVmTargetForBot(bot.id);
         await bindTurnComputer(resourceOwner, `computer:vm:${localVmTarget.key}`, true);

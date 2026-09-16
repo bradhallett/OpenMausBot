@@ -46,7 +46,7 @@ function fixture(kind: "direct" | "group", threadIds = ["first"]) {
   const owners = new Map<string, Owner>(), generations = new Map<string, string>();
   const directBots = new Map<string, Bot>(), speakers = new Map<string, Speaker>();
   const vmLeases = new Map<string, object>(), approvals = new Set<string>(), screens = new Set<string>(), watched = new Set<string>();
-  const autoVmClaims = new Map<string, object>();
+  const autoVmClaims = new Map<string, { owner: { threadId: string; generation: string } }>();
   const started = new Map<string, ReturnType<typeof deferred>>(), interrupted = new Map<string, ReturnType<typeof deferred>>();
   const interruptCalls: string[] = [], cancelled: string[] = [], revoked: string[] = [], messages: string[] = [], settled: string[] = [], detached: string[] = [];
   for (const threadId of threadIds) {
@@ -57,7 +57,7 @@ function fixture(kind: "direct" | "group", threadIds = ["first"]) {
     if (kind === "direct") directBots.set(threadId, bot);
     else { speakers.set(threadId, { botId: threadId, name: "Company turn" }); groups.set(threadId, { id: threadId, busyBotId: threadId }); }
     vmLeases.set(threadId, {}); approvals.add(threadId); screens.add(threadId); watched.add(threadId);
-    autoVmClaims.set(threadId, {});
+    autoVmClaims.set(threadId, { owner: { threadId, generation: `company-${threadId}` } });
     started.set(threadId, deferred()); interrupted.set(threadId, deferred());
   }
   const context = vm.createContext({
@@ -111,13 +111,14 @@ function fixture(kind: "direct" | "group", threadIds = ["first"]) {
       if (kind === "direct") directBots.set(threadId, bot);
       else if (replaceSpeaker) speakers.set(threadId, { botId: threadId, name: "Personal turn" });
       vmLeases.set(threadId, {}); approvals.add(threadId); screens.add(threadId); watched.add(threadId);
-      autoVmClaims.set(threadId, {});
+      autoVmClaims.set(threadId, { owner: { threadId, generation: `personal-${threadId}` } });
     },
   };
 }
 
 function expectPersonalResources(f: ReturnType<typeof fixture>, threadId: string) {
   expect(f.owners.get(threadId)?.generation).toBe(`personal-${threadId}`);
+  expect(f.autoVmClaims.get(threadId)?.owner?.generation).toBe(`personal-${threadId}`);
   expect(f.vmLeases.has(threadId)).toBe(true);
   expect(f.approvals.has(threadId)).toBe(true);
   expect(f.screens.has(threadId)).toBe(true);
