@@ -117,7 +117,6 @@ import {
   type Runtime,
 } from "./container-computer.ts";
 import {
-  ensureDirs,
   instanceConfigs,
   loadConfig,
   providerReloadKeys,
@@ -125,7 +124,6 @@ import {
   localVmMode,
   parseConfigPatch,
   roomTurnTimeoutMinutes,
-  threadEventLogMaxBytes,
   maxConcurrentBotThreads,
   threadEventLogRetentionDays,
   saveConfig,
@@ -149,7 +147,6 @@ import {
 import { sweepThreadEventLogs, type ThreadLogRetentionCandidate } from "./thread-retention.ts";
 import { ComputerControl } from "./computer-control.ts";
 import { augmentedPath, findCliCandidates, resetPathCache } from "./env-path.ts";
-import { registerEnginesBinDir } from "./engine-install.ts";
 import { appendUsage, parseUsageRange, readUsage, summarizeUsage, usageCsv, USAGE_GROUPINGS, flushUsageLedger, type UsageGroupBy, type UsageTrigger } from "./usage-ledger.ts";
 import type { RequestAuth } from "./request-auth.ts";
 import { checkProviderKey, PROVIDER_KEY_KINDS, type ProviderKeyKind } from "./provider-key-check.ts";
@@ -162,7 +159,6 @@ import { buildNotification, type Notification } from "./notify.ts";
 import {
   isModelVariant,
   type ModelSelection,
-  type RequestOutcome,
   type RuntimeEvent,
   type SteerOutcome,
 } from "./contracts.ts";
@@ -257,12 +253,9 @@ import {
   SendSequencer,
 } from "./send-idempotency.ts";
 import { EventBus } from "./harness/bus.ts";
-import { ProviderRegistry } from "./harness/registry.ts";
 import { ManagedDesktopProviders } from "./managed-desktop.ts";
-import { selectDefaultModelSelection } from "./default-model-selection.ts";
 import {
   cancelPeerApprovalsFor,
-  cancelPeerApprovalsForThread,
   dismissStalePeerCards,
   resolvePeerComms,
   type ApprovalBus,
@@ -276,7 +269,6 @@ import {
   mentionedBots,
   roomResponders,
   sectionKey,
-  Store,
   type BotRecord,
   type GroupDefaultResponder,
   type GroupRecord,
@@ -289,7 +281,7 @@ import { narrateTool, toUtterances } from "./tts/speech-text.ts";
 import { buildRecoveryText, buildTurnContext, engineIsFresh, peerMessageText } from "./turn-context.ts";
 import { extractTurnImages } from "./turn-images.ts";
 import { TurnWatchdog } from "./turn-watchdog.ts";
-import { TurnResources, workspaceResource, type TurnOwner } from "./turn-resources.ts";
+import { workspaceResource, type TurnOwner } from "./turn-resources.ts";
 import {
   ensureWorkspace,
   ensureTaskWorkspace,
@@ -409,7 +401,6 @@ import { BOT_PACKAGE_MAX_SKILLS, isBotPackage, packageAgentAsMember, parseBotPac
 import { createTeamManifest, importedMemberProfile, parseTeamManifest } from "./team-manifest.ts";
 import { takeImportName } from "../shared/import-name.ts";
 import { readThreadEvents } from "./thread-events.ts";
-import { bindThreadLogCapProvider } from "./thread-log-rotation.ts";
 import { listenWebhookIngress, webhookCredential, type WebhookIngress } from "./webhook-ingress.ts";
 import { assertModelVariantSupported, memberTurnSelection } from "./member-turn.ts";
 import { WebhookManager } from "./webhooks.ts";
@@ -433,10 +424,8 @@ import {
   isTurnEventQuarantined,
 } from "./turn-dispatch-guard.ts";
 import { createGracefulShutdown } from "./graceful-shutdown.ts";
-import { acquireDataDirLeaseForProcess } from "./data-dir-lease.ts";
 import { createWorkspaceAccess, describeEdition, editionStatus, hostedWorkspaceConfiguration, hostedWorkspaceConfigured, loadEnterpriseLayer, type WorkspaceAccess } from "./enterprise.ts";
-import { environmentDescriptor, loadEnvironmentId, serverVersion } from "./environment.ts";
-import { WorkspaceBackupMaintenance } from "./workspace-backup-maintenance.ts";
+import { environmentDescriptor, serverVersion } from "./environment.ts";
 import { createWorkspaceBackupRoutes, isWorkspaceBackupSessionControl } from "./workspace-backup-http.ts";
 import { json, readBody, stderrOf } from "./http.ts";
 import { createEventsRoutes } from "./routes/events.ts";
@@ -454,8 +443,32 @@ import {
   revokeInternalCapabilityForProviderEvent,
   revokeInternalCapabilityGeneration,
 } from "./internal-capabilities.ts";
-import { askMessageByRequest, requestBehavior, toolMessageByItem } from "./turn-fold.ts";
-import { applyPendingWorkspaceRestore, readLastWorkspaceRestore, type WorkspaceRestoreResult } from "./workspace-backup.ts";
+import { answerRequest, askMessageByRequest, closeOpenApprovals, requestBehavior, toolMessageByItem } from "./turn-fold.ts";
+import {
+  cfg,
+  defaultSelection,
+  ENVIRONMENT_ID,
+  registry,
+  releaseDataDirLeaseAtExit,
+  store,
+  teamComputerTurns,
+  workspaceMaintenance,
+  workspaceRestore,
+} from "./runtime.ts";
+import {
+  botAtThreadCapacity,
+  botForThread,
+  claimTurnResource,
+  directTurnBots,
+  directTurnDispatchClaims,
+  hasDirectDispatch,
+  requestedTaskBot,
+  threadBusy,
+  turnComputerResources,
+  turnResourceOwners,
+  turnResources,
+  type DirectTurnDispatchClaim,
+} from "./turn-admission.ts";
 import { createCustomDomainVerifier, customDomainIpv4, normalizeCustomDomain } from "./custom-domain.ts";
 import { allowedScopes, createEmailSignIn, parseAllowList } from "./account-signin.ts";
 import { ProviderAuthSessions } from "./provider-auth-sessions.ts";
@@ -501,39 +514,6 @@ const MIME: Record<string, string> = {
   ".woff2": "font/woff2",
 };
 
-ensureDirs();
-// The desktop parent owns the primary lease and delegates one private child
-// claim; a standalone/headless server owns the primary lease itself. Acquire
-// before any durable identity, sessions, config, or Store state is loaded.
-const dataDirLease = acquireDataDirLeaseForProcess(DATA_DIR);
-let dataDirLeaseReleaseAttempted = false;
-function releaseDataDirLeaseAtExit(): void {
-  if (dataDirLeaseReleaseAttempted) return;
-  dataDirLeaseReleaseAttempted = true;
-  try {
-    dataDirLease.release();
-  } catch (error) {
-    // A failed release deliberately leaves a stale, owner-token-protected
-    // lease. The next process can recover it only after this PID is dead.
-    console.error(`[data-directory] lease release failed: ${error instanceof Error ? error.message : String(error)}`);
-  }
-}
-process.once("exit", releaseDataDirLeaseAtExit);
-// Restore before constructing any long-lived config, Store, session or provider
-// objects. Replacing files underneath a live Store would overwrite restored data.
-let workspaceRestore: WorkspaceRestoreResult = { restored: false };
-if (existsSync(join(DATA_DIR, ".backups"))) {
-  workspaceRestore = applyPendingWorkspaceRestore(DATA_DIR);
-  if (!workspaceRestore.restored && !workspaceRestore.rolledBack) {
-    workspaceRestore = readLastWorkspaceRestore(DATA_DIR) ?? workspaceRestore;
-  }
-}
-const workspaceMaintenance = new WorkspaceBackupMaintenance();
-// Only after ensureDirs(): it performs the one-time rename of the legacy data
-// dir, which must not find a freshly created ~/.openmausbot already there.
-// Remote clients (server/request-auth.ts, server/sessions.ts): a stable identity
-// for this server, the paired sessions, and the cookie the served UI uses.
-const ENVIRONMENT_ID = loadEnvironmentId(DATA_DIR);
 function signInAllowList() {
   const current = loadConfig().signIn;
   return { admins: parseAllowList(current?.admins?.join(",")), members: parseAllowList(current?.members?.join(",")) };
@@ -557,11 +537,6 @@ let desktopMutationToken: string | undefined = DESKTOP_MANAGED ? "" : undefined;
 let companionMutationToken: string | undefined = DESKTOP_MANAGED ? "" : undefined;
 // Where remote clients reach this server (a proxy's public address); pairing URLs use it.
 const FALLBACK_PUBLIC_URL = process.env.OMB_PUBLIC_URL?.trim().replace(/\/+$/, "") || null;
-const cfg = loadConfig();
-// The per-thread event log cap is checked after every NDJSON append.
-// config.json is read once per process (a change restarts the server, like
-// every other hand-edited knob), so a binding made here never goes stale.
-bindThreadLogCapProvider(() => threadEventLogMaxBytes(cfg));
 const customDomainVerifier = createCustomDomainVerifier({ environmentId: ENVIRONMENT_ID });
 // "Sign in with your email" on /pair: the allow-list is read per call so a
 // Settings change or an env bootstrap applies without a restart.
@@ -582,11 +557,6 @@ function customDomainStatus() {
     serverIpv4: DESKTOP_MANAGED ? null : customDomainIpv4(),
   };
 }
-const registry = new ProviderRegistry(BUILT_IN_DRIVERS);
-// Engines installed from Settings live under the data directory and win over
-// any other copy on PATH.
-registerEnginesBinDir();
-
 // Who asked for the next turn on a thread, noted where a message comes in
 // and read by the usage ledger when the turn settles. The last note stands
 // until the next message: a resumed connector or a drained queued send
@@ -602,7 +572,6 @@ function noteTurnTrigger(threadId: string, auth: RequestAuth): void {
   );
 }
 const providerAuthSessions = new ProviderAuthSessions();
-await registry.load(instanceConfigs(cfg));
 const bundledSkills = loadBundledSkills();
 const availableSkills = () => mergeSkills(bundledSkills, loadUserSkills(join(DATA_DIR, "skills")));
 
@@ -856,14 +825,7 @@ function agentsIntegration(
 }
 
 
-type DirectTurnDispatchClaim = {
-  id: string;
-  botId: string;
-  threadId: string;
-  phase: "setup" | "dispatching";
-};
 class DirectTurnSetupCancelled extends Error {}
-const directTurnDispatchClaims = new Map<string, DirectTurnDispatchClaim>();
 const directTurnGenerationByThread = new Map<string, string>();
 // Stop revokes credentials before completion, but the receipt must retain its
 // exact provider-turn owner until that completion or explicit failure cleanup.
@@ -889,22 +851,9 @@ function settleDirectFollowup(generation: string | undefined): void {
   for (const turnId of directFollowupTurns.deleteGeneration(pending.threadId, generation)) retireProviderTurn(turnId);
   pending.settle?.();
 }
-// Keep the exact provider/profile settings that own a running conversation.
-// Selecting another thread or changing a default must not retarget its tools.
-const directTurnBots = new Map<string, BotRecord>();
 let providerFleetReloading = false;
-const turnResources = new TurnResources();
 const sharedComputerControl = new SharedComputerControl(turnResources, () => store.bots.some(bot => botComputerControlSnapshot(bot.id).held));
-const turnResourceOwners = new Map<string, TurnOwner>();
-const turnComputerResources = new Map<string, { owner: TurnOwner; resource: string }>();
-const teamComputerTurns = new Map<string, { owner: TurnOwner; computerId: string; botId: string; remoteAgent: boolean }>();
 const settlingResourceOwners = new Map<string, string>();
-
-function claimTurnResource(owner: TurnOwner, resource: string): boolean {
-  if (!turnResources.claim(resource, owner)) return false;
-  turnResourceOwners.set(owner.threadId, owner);
-  return true;
-}
 
 function releaseTurnResources(owner: TurnOwner | undefined): void {
   if (!owner) return;
@@ -953,14 +902,6 @@ async function bindTurnComputer(owner: TurnOwner, resource: string, exclusive = 
   turnComputerResources.set(owner.threadId, { owner, resource });
 }
 
-function botForThread(botId: string, threadId: string): BotRecord | null {
-  return directTurnBots.get(threadId) ?? store.projectBotForTask(botId, threadId) ?? store.bot(botId);
-}
-
-function threadBusy(botId: string, threadId: string): boolean {
-  return store.taskByThread(botId, threadId)?.busy === true || directTurnDispatchClaims.has(threadId);
-}
-
 /** Opt-in direct-chat parking (#1194): when this bot's person chose to queue
  * messages behind running work, a message that arrives while delegated
  * assignments are still out waits in the steer queue — room-style parking —
@@ -970,16 +911,6 @@ function parksBehindCoordination(botId: string, threadId: string): boolean {
   return (store.projectBotForTask(botId, threadId) ?? store.bot(botId))?.parkDirectMessages === true;
 }
 
-function botAtThreadCapacity(botId: string): boolean {
-  // Setup/dispatch reservations still occupy a slot even if an early
-  // completion event has already cleared the stored busy flag.
-  return store.tasks(botId).filter((task) => threadBusy(botId, task.threadId)).length >= maxConcurrentBotThreads(cfg);
-}
-
-function hasDirectDispatch(botId: string): boolean {
-  return [...directTurnDispatchClaims.values()].some((claim) => claim.botId === botId);
-}
-
 /** Routine and webhook dispatch shares startTurn's admission preconditions
  * instead of waiting for whole-bot idleness: a free thread slot and no
  * active group turn. A group turn blocks scheduled starts the same way it
@@ -987,18 +918,6 @@ function hasDirectDispatch(botId: string): boolean {
 function unattendedDispatchState(botId: string): "ready" | "busy" | "missing" {
   const bot = store.bot(botId);
   return !bot ? "missing" : botAtThreadCapacity(botId) || activeGroupTurnForBot(botId) ? "busy" : "ready";
-}
-
-function requestedTaskBot(botId: string, rawThreadId: unknown): BotRecord {
-  const profile = store.bot(botId);
-  if (!profile) throw Object.assign(new Error("no such bot"), { status: 404 });
-  if (rawThreadId !== undefined && (typeof rawThreadId !== "string" || !/^[\w-]+$/.test(rawThreadId))) {
-    throw Object.assign(new Error("threadId must be a task id"), { status: 400 });
-  }
-  const threadId = typeof rawThreadId === "string" ? rawThreadId : profile.threadId;
-  const task = store.projectBotForTask(botId, threadId);
-  if (!task) throw Object.assign(new Error("no such task"), { status: 404 });
-  return task;
 }
 
 async function interruptDirectThread(botId: string, threadId: string): Promise<void> {
@@ -1341,12 +1260,6 @@ function askBotAndWait(targetBotId: string, message: string, depth: number, from
     );
   });
 }
-
-// New bots honor setup's saved choice; unconfigured workspaces prefer Claude.
-async function defaultSelection() {
-  return selectDefaultModelSelection(await registry.describe(), cfg.defaultModelSelection);
-}
-
 function checkedModelSelection(
   raw: unknown,
   current?: { selection: ModelSelection; busy: boolean },
@@ -1540,13 +1453,9 @@ function checkedMemberIds(value: unknown): { ok: true; memberIds: string[] } | {
   }
   return { ok: true, memberIds };
 }
-let bootSelection = { instanceId: "", model: "" };
-const store = new Store(() => bootSelection);
 const teamComputers = new TeamComputers(join(DATA_DIR, "team-computers.json"), ENVIRONMENT_ID);
 let followupsReady = false;
 const sendSequencer = new SendSequencer();
-bootSelection = await defaultSelection();
-store.seedIfEmpty();
 // A committed profile cleanup means both its config deletion and bot-reference
 // cleanup were intended to be durable. Reconcile stale secondary references
 // before Electron can ACK and remove the journal: a crash between those writes
@@ -3113,107 +3022,6 @@ onSteeredQueueChange(() => broadcast({ kind: "bot.queued", queues: publicBotQueu
 // The canonical stream is the source of truth; the persisted transcript
 // and every client view are projections of it.
 // The in-flight item/request message-id maps live in ./turn-fold.ts.
-
-/** Deliver a person's answer to the engine that asked, and tell the truth
- * about what happened. `unavailable` — the turn ended, the ask timed out,
- * the engine has no asks — is fail-closed: the action was never run. The
- * card is settled and a chip says so, instead of the answer vanishing into
- * a 500 while the card sits open forever. */
-async function answerRequest(
-  threadId: string,
-  instanceId: string,
-  requestId: string,
-  behavior: "allow" | "deny" | "answer",
-  message?: string,
-  decidedFor?: { id: string; name: string },
-  /** "Always allow this session": the provider keeps the allow, not the app */
-  always?: boolean,
-): Promise<RequestOutcome> {
-  // Snapshot the card BEFORE delivering the answer: a delivered answer
-  // resolves the request synchronously through the fold, which consumes
-  // the askMessageByRequest entry — by the time the await returns, nobody
-  // remembers which tool this requestId was about.
-  const thread = store.messagesFor(threadId);
-  const cardMessageId = askMessageByRequest.get(`${threadId}:${requestId}`);
-  // The map is an in-flight optimization and disappears on restart; the
-  // durable transcript still carries the request id and its audit metadata.
-  const cardMessage = cardMessageId
-    ? thread.find((m) => m.id === cardMessageId)
-    : thread.find((m) => m.card?.requestId === requestId);
-  const card = cardMessage?.card;
-  const instance = registry.get(instanceId);
-  let outcome: RequestOutcome = "unavailable";
-  if (instance) {
-    try {
-      outcome = await instance.adapter.respondToRequest(threadId, requestId, { behavior, message, always: always && behavior === "allow" });
-    } catch {
-      outcome = "unavailable";
-    }
-  }
-  // An answered question keeps its words. `request.resolved` only records
-  // the behavior, so without this the card reads "answer" forever and the
-  // person can no longer see what they told the bot.
-  if (outcome !== "unavailable" && behavior === "answer" && message && cardMessage) {
-    const settled = store.messagesFor(threadId).find((m) => m.id === cardMessage.id)?.card;
-    if (settled) {
-      store.patchMessage(threadId, cardMessage.id, { card: { ...settled, answeredText: message } });
-    }
-  }
-  // The human's verdict, recorded only when it actually reached the engine:
-  // `unavailable` means the action never ran, and a "user-approved" row
-  // over a request nothing answered would be the audit log lying. A
-  // question's `answer` is conversation, not authorization, so it is not a
-  // decision either.
-  if (outcome !== "unavailable" && behavior !== "answer") {
-    appendDecision(DATA_DIR, {
-      threadId,
-      requestId,
-      botId: decidedFor?.id,
-      botName: decidedFor?.name,
-      tool: card?.tool,
-      summary: card?.subtitle,
-      decision: behavior === "allow" ? "user-approved" : "user-denied",
-      source: "user",
-    });
-  }
-  if (outcome === "unavailable") {
-    // The in-flight map is memory-only. After a restart the card is still on
-    // the thread, so fall back to the request it carries — otherwise an
-    // unreachable approval is never closed and keeps owning the composer.
-    const messageId = askMessageByRequest.get(`${threadId}:${requestId}`);
-    const thread = store.messagesFor(threadId);
-    const existing = messageId
-      ? thread.find((m) => m.id === messageId)
-      : thread.find((m) => m.card?.requestId === requestId);
-    if (existing?.card && !existing.card.answered) {
-      store.patchMessage(threadId, existing.id, { card: { ...existing.card, answered: "unavailable", dismissed: true } });
-    }
-    if (messageId) askMessageByRequest.delete(`${threadId}:${requestId}`);
-    store.appendMessage(threadId, {
-      role: "bot",
-      kind: "activity",
-      tool: { name: "Couldn't deliver that answer — the request is no longer open, so the action was not run", ok: false },
-    });
-  }
-  return outcome;
-}
-
-/** Close every provider-owned approval still open on a thread. Interrupting a
- * turn kills the process that raised its questions, so those cards can never
- * be answered. Routine proposals are harness-owned and durable, so they stay
- * actionable even after the proposing turn has stopped. */
-function closeOpenApprovals(threadId: string): void {
-  // Peer approvals also hold an in-memory promise. Resolve those first; merely
-  // patching their cards would leave the delegation queue waiting 15 minutes.
-  cancelPeerApprovalsForThread(threadId);
-  for (const message of store.messagesFor(threadId)) {
-    const card = message.card;
-    if (!card?.requestId || card.answered || card.dismissed) continue;
-    if (card.routineRequest || card.skillRequest) continue;
-    store.patchMessage(threadId, message.id, { card: { ...card, answered: "unavailable", dismissed: true } });
-    askMessageByRequest.delete(`${threadId}:${card.requestId}`);
-  }
-}
 
 // the last settled assistant text per thread, so a "finished" notification
 // can carry what the bot actually said
