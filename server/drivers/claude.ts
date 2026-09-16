@@ -1058,6 +1058,32 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       // never a silent no-op between two CLI processes of the same turn.
       const relaunch = logicalTurnId !== undefined;
       runtime.assertThreadIdle(threadId, { allowBusy: relaunch });
+      // Internal relaunches are still the turn acknowledged to the harness.
+      // A new user message gets a fresh id, but retry/recovery must not orphan
+      // its capability, coordination result or queued continuation ownership.
+      const turnId = logicalTurnId ?? newId();
+      // Hold the thread from before the first await (CLI version probe, model
+      // resolution, broker setup) until setTurn registers the turn, so a
+      // stopAll()/dispose() during setup cancels the launch instead of racing
+      // it; the catch releases the claim when setup fails before then.
+      if (!relaunch) runtime.claimTurn(threadId, turnId);
+      try {
+        return await runClaimedTurn(turn, threadId, botId, relaunch, turnId);
+      } catch (error) {
+        if (!relaunch) runtime.endTurn(threadId, turnId);
+        throw error;
+      }
+    };
+
+    /** The body of sendTurn once the thread is claimed: a throw anywhere
+     *  before setTurn releases the claim through the catch above. */
+    const runClaimedTurn = async (
+      turn: SendTurnInput,
+      threadId: SendTurnInput["threadId"],
+      botId: SendTurnInput["botId"],
+      relaunch: boolean,
+      turnId: string,
+    ) => {
       // A bot-level mode is authoritative for this turn. In particular, an
       // old provider instance may still be configured with
       // `bypassPermissions`; Ask/Auto must restore Claude's interactive
@@ -1075,10 +1101,6 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       // Materialize before creating a broker or process. A missing/corrupt
       // attachment must fail this call without leaving a live session behind.
       const promptMsg = claudeUserMessage(turn.text, turn.images);
-      // Internal relaunches are still the turn acknowledged to the harness.
-      // A new user message gets a fresh id, but retry/recovery must not orphan
-      // its capability, coordination result or queued continuation ownership.
-      const turnId = logicalTurnId ?? newId();
       const retryAbort = new AbortController();
       const retry = retryState.get(threadId) ?? { attempt: 0, cancelled: false };
       // A fresh user turn starts un-cancelled. A relaunch must keep a Stop
@@ -1308,6 +1330,15 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       const live = sessions.get(threadId);
       if (live && !live.turn && !live.closing && live.child.exitCode === null && live.argsKey === argsKey && (!sessionId || sessionId === live.sessionId)) {
         if (live.idleTimer) clearTimeout(live.idleTimer);
+        // stopAll()/dispose() canceled this launch while it set up: the live
+        // process was torn down with it, and no new turn may ride it
+        if (!relaunch && runtime.claimCanceled(turnId)) {
+          closeSession(threadId, "interrupted");
+          runtime.endTurn(threadId, turnId);
+          emit({ ...base(threadId, turnId), type: "turn.started" });
+          emit({ ...base(threadId, turnId), type: "turn.completed", ok: false, stopReason: "interrupted", cost: null });
+          return { turnId };
+        }
         live.turn = { turnId, input: turn, retryAbort, settled: false, sawStreamDelta: false };
         runtime.setTurn(threadId, { stop: () => {
           closeSession(threadId, "interrupted");
@@ -1457,6 +1488,17 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       if (relaunch && retry.cancelled) {
         cleanupUnownedLaunch();
         if (runtime.turn(threadId)?.turnId === turnId) runtime.endTurn(threadId);
+        emit({ ...base(threadId, turnId), type: "turn.completed", ok: false, stopReason: "interrupted", cost: null });
+        return { turnId };
+      }
+
+      // The fresh-turn counterpart: stopAll()/dispose() canceled this claim
+      // while version/model/broker setup ran. Release the claim, settle as
+      // interrupted, and spawn nothing.
+      if (!relaunch && runtime.claimCanceled(turnId)) {
+        cleanupUnownedLaunch();
+        runtime.endTurn(threadId, turnId);
+        emit({ ...base(threadId, turnId), type: "turn.started" });
         emit({ ...base(threadId, turnId), type: "turn.completed", ok: false, stopReason: "interrupted", cost: null });
         return { turnId };
       }

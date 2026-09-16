@@ -303,10 +303,10 @@ export function migrateBotTaskBackfill(bots: BotRecord[], deps: MigrationDeps): 
         delete task.approvalMode;
         changed = true;
       }
-      if (task.busy !== undefined || task.activity !== undefined || task.turnStartedAt !== undefined) changed = true;
+      if (task.busy || (task.activity !== undefined && task.activity !== "idle") || task.turnStartedAt !== undefined) changed = true;
       task.busy = false;
       task.activity = "idle";
-      task.turnStartedAt = undefined;
+      delete task.turnStartedAt;
     }
     mirrorActiveTask(b, active);
     b.unread = b.tasks.some((task) => task.unread);

@@ -136,6 +136,15 @@ export const BoxAgentDriver: ProviderDriver<BoxAgentConfig> = {
         .join("\n");
 
       if (!catalog) await loadCatalog();
+      // stopAll()/dispose() tore through while the catalog loaded: the claim
+      // is canceled and nobody will collect this prompt. Do not dispatch
+      // work a finished teardown would have to chase.
+      if (runtime.claimCanceled(turnId)) {
+        runtime.endTurn(threadId, turnId);
+        emit({ ...base(threadId, turnId), type: "turn.started" });
+        emit({ ...base(threadId, turnId), type: "turn.completed", ok: false, stopReason: "interrupted", cost: null });
+        return { turnId };
+      }
       const started: any = await api(`/boxes/${boxId}/prompt`, {
         method: "POST",
         body: JSON.stringify({ ...providerFor(model), prompt }),

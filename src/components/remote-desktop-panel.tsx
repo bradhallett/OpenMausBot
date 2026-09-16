@@ -206,7 +206,7 @@ export function RemoteDesktopPanel({ bot }: { bot: Bot }) {
         </div>
         <button
           type="button"
-          onClick={() => dispatch({ type: "toggleComputer", open: false })}
+          onClick={() => dispatch({ type: "closeOverlay", kind: "computer" })}
           className="rounded-md p-1 text-ink-secondary hover:bg-control hover:text-ink"
           aria-label="Close computer panel"
         >
