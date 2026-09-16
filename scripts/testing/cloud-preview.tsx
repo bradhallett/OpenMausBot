@@ -147,7 +147,7 @@ function Fixture() {
     if (bot) {
       dispatch({ type: "screenFrame", botId: bot.id, png: blank, mime: "image/png" });
       dispatch({ type: "updateBot", botId: bot.id, patch: { computer: "cloud", cloudBackend: "box" } });
-      dispatch({ type: "toggleComputer", open: true });
+      dispatch({ type: "openOverlay", kind: "computer", open: true });
     }
   }, [bot?.id, dispatch]);
   useEffect(() => {
@@ -198,7 +198,7 @@ function Fixture() {
     {state.computerOpen && fixtureBot ? panel === "computer"
       ? <ComputerPanel key={generation} bot={fixtureBot} />
       : <RemoteDesktopPanel key={generation} bot={fixtureBot} />
-      : !state.settingsOpen && <button onClick={() => dispatch({ type: "toggleComputer", open: true })}>Open computer panel</button>}
+      : !state.settingsOpen && <button onClick={() => dispatch({ type: "openOverlay", kind: "computer", open: true })}>Open computer panel</button>}
   </div>;
 }
 applySkin(readSkin());
