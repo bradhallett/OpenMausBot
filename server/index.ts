@@ -5870,6 +5870,7 @@ async function startTurn(
           throw new Error("this model engine cannot use the Local VM — choose Claude or an ACP engine, or select another computer destination");
         }
         const localVmTarget = localVmTargetForBot(bot.id);
+        let lazyReadyVm: { runtime: Runtime } | null = null;
         if (!strict) {
           // Nothing this process has ever seen for this target, and nobody is
           // relying on an unattended run: do not pay for a runtime probe.
@@ -5877,17 +5878,37 @@ async function startTurn(
           const seen = await containerComputerStatus(undefined, undefined, localVmTarget).catch(() => null);
           if (!seen || !autoLocalVmAttachable(seen)) return false;
           if (localVmImageBusy || localVmModeChangeBusy || localVmLifecycleBusy.has(localVmTarget.key)) return false;
+          if (seen.ready && seen.runtime) lazyReadyVm = { runtime: seen.runtime };
         }
         try {
+          if (lazyReadyVm) {
+            // Lazy exclusivity (issue #1361): a VM that is ready right now
+            // mounts without claiming — screen-less Auto turns never touch
+            // the lease, and the first screen tools/call fires the claim
+            // through the computer-control gate. A VM that must be created
+            // or recreated first keeps the eager claim below: the bridge
+            // child needs the container to exist, and readyLocalVmForTurn
+            // is what boots it.
+            integrations.localComputer = containerComputerMcp(
+              lazyReadyVm.runtime,
+              controlIntegration(bot.id, threadId, dispatchClaimId),
+              localVmTarget,
+            );
+            autoVmClaims.set(threadId, {
+              owner: resourceOwner,
+              claim: async () => { await claimAutoLocalVm(threadId); },
+            });
+            return true;
+          }
           const claimed = await claimAutoLocalVm(threadId);
           integrations.localComputer = containerComputerMcp(
             claimed.runtime,
             controlIntegration(bot.id, threadId, dispatchClaimId),
             claimed.target,
           );
-          // Hand the same claim to the first-screen-call gate. Dispatch has
-          // already claimed, so the gate's fire-once path can only re-assert
-          // the same owner — a no-op until attachLocalVm defers (issue #1361).
+          // Hand the same claim to the first-screen-call gate. This eager
+          // path has already claimed, so the gate's fire-once call can only
+          // re-assert the same owner — a no-op (issue #1361).
           autoVmClaims.set(threadId, {
             owner: resourceOwner,
             claim: async () => { await claimAutoLocalVm(threadId); },
@@ -12100,8 +12121,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             // First screen tools/call on a lazily-attached Auto VM (issue
             // #1361): fire the exclusive claim — once — and answer with the
             // same contention text a dispatched claim produces until it
-            // lands. No-op today: dispatch claims eagerly, so a live VM
-            // capability always has its computer entry already.
+            // lands. The fire-once slot means at most one claim attempt per
+            // turn; a failed claim clears the slot so later polls and the
+            // capability check fail closed instead of retrying forever.
             startAutoVmClaim(autoVmClaims, internalCapability.threadId, internalCapability.generation);
             return json(res, 200, {
               held: true, helpOpen: false,

@@ -367,6 +367,74 @@ describe("Group Local VM ownership on the real isolated server", () => {
     expect(body).toEqual({ held: false, helpOpen: false });
     await stop(group.id); await idle(bots[0].id);
   });
+
+  it("runs a screen-less Auto turn to completion while another thread holds the Local VM (issue #1361 AC1)", async () => {
+    vmState(); rmSync(dumpFile, { force: true }); rmSync(finishFile, { force: true });
+    const { bot: holder } = await api("POST", "/api/bots", { name: "VM holder" });
+    const { bot: auto } = await api("POST", "/api/bots", { name: "Screen-less Auto" });
+    try {
+      await api("PATCH", `/api/bots/${holder.id}`, { computer: "vm" });
+      await api("PATCH", `/api/bots/${auto.id}`, { browser: false });
+      await api("POST", `/api/bots/${holder.id}/messages`, { text: "Hold the VM" });
+      await until(async () => (await api("GET", "/api/bots?messages=0")).bots.find((b: any) => b.id === holder.id)?.busy, Boolean);
+      // The Auto attach mounts the computer MCP without claiming the VM, so
+      // this dispatch must not block behind the holder's eager claim.
+      await api("POST", `/api/bots/${auto.id}/messages`, { text: "No screen work today" });
+      expect(computer(await dump())).toBeTruthy();
+      await until(async () => (await api("GET", "/api/bots?messages=0")).bots.find((b: any) => b.id === auto.id)?.busy, Boolean);
+      writeFileSync(finishFile, "finish");
+      await idle(auto.id); await idle(holder.id);
+      const state = await api("GET", "/api/bots?messages=30");
+      const activities = (botId: string) => (state.bots.find((b: any) => b.id === botId)?.messages ?? [])
+        .filter((m: any) => m.kind === "activity")
+        .map((m: any) => m.tool?.name ?? "");
+      expect(activities(auto.id).join("|")).not.toContain("Waiting for computer");
+      expect(activities(holder.id).join("|")).not.toContain("Waiting for computer");
+    } finally {
+      writeFileSync(finishFile, "finish");
+      await api("POST", `/api/bots/${auto.id}/interrupt`, {}); await api("POST", `/api/bots/${holder.id}/interrupt`, {});
+      await idle(auto.id); await idle(holder.id);
+      await api("DELETE", `/api/bots/${auto.id}`); await api("DELETE", `/api/bots/${holder.id}`);
+    }
+  });
+
+  it("claims a lazily attached Auto VM on the first screen call and proceeds on release (issue #1361 AC2)", async () => {
+    vmState(); rmSync(dumpFile, { force: true }); rmSync(finishFile, { force: true });
+    const { bot: auto } = await api("POST", "/api/bots", { name: "Steering Auto" });
+    const { bot: holder } = await api("POST", "/api/bots", { name: "VM holder" });
+    try {
+      await api("PATCH", `/api/bots/${auto.id}`, { browser: false });
+      await api("PATCH", `/api/bots/${holder.id}`, { computer: "vm" });
+      await api("POST", `/api/bots/${auto.id}/messages`, { text: "Take a screenshot when free" });
+      const autoComputer = computer(await dump());
+      expect(autoComputer).toBeTruthy();
+      await api("POST", `/api/bots/${holder.id}/messages`, { text: "Hold the VM" });
+      await until(async () => (await api("GET", "/api/bots?messages=0")).bots.find((b: any) => b.id === holder.id)?.busy, Boolean);
+      // First screen tools/call: the gate fires the deferred claim, answers
+      // with the contention text, and the existing wait activity appears.
+      const first = await (await gate(autoComputer)).json();
+      expect(first).toMatchObject({ held: true, helpOpen: false,
+        blockedReason: "Another thread is using this computer. This call was not performed. Pause computer work until that thread finishes, then take a fresh screenshot before acting." });
+      await until(async () => {
+ const state = await api("GET", "/api/bots?messages=30");
+        return (state.bots.find((b: any) => b.id === auto.id)?.messages ?? [])
+          .some((m: any) => m.kind === "activity" && String(m.tool?.name ?? "").startsWith("Waiting for computer"));
+      }, Boolean);
+      // Releasing the holder lets the waiting claim land; the next poll passes.
+      await api("POST", `/api/bots/${holder.id}/interrupt`, {}); await idle(holder.id);
+      await until(async () => {
+        const state = await api("GET", "/api/bots?messages=30");
+        return (state.bots.find((b: any) => b.id === auto.id)?.messages ?? [])
+          .some((m: any) => m.kind === "activity" && String(m.tool?.name ?? "").startsWith("Computer available"));
+      }, Boolean);
+      expect(await (await gate(autoComputer)).json()).toEqual({ held: false, helpOpen: false });
+    } finally {
+      writeFileSync(finishFile, "finish");
+      await api("POST", `/api/bots/${auto.id}/interrupt`, {}); await api("POST", `/api/bots/${holder.id}/interrupt`, {});
+      await idle(auto.id); await idle(holder.id);
+      await api("DELETE", `/api/bots/${auto.id}`); await api("DELETE", `/api/bots/${holder.id}`);
+    }
+  });
   it.each(["timeout", "stall"])("releases %s bookkeeping after the interrupt grace period", async (failure) => {
     const { bots, group } = await room();
     vmState({ timeout: failure === "timeout" });
