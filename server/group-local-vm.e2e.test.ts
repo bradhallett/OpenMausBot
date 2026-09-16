@@ -377,6 +377,11 @@ describe("Group Local VM ownership on the real isolated server", () => {
       await api("PATCH", `/api/bots/${auto.id}`, { browser: false });
       await api("POST", `/api/bots/${holder.id}/messages`, { text: "Hold the VM" });
       await until(async () => (await api("GET", "/api/bots?messages=0")).bots.find((b: any) => b.id === holder.id)?.busy, Boolean);
+      // The dump file is shared with the holder's fake CLI. Consume the
+      // holder's dump and remove it, so the assertion below can only pass
+      // on the Auto turn's own mount, never the holder's leftover file.
+      await dump();
+      rmSync(dumpFile, { force: true });
       // The Auto attach mounts the computer MCP without claiming the VM, so
       // this dispatch must not block behind the holder's eager claim.
       await api("POST", `/api/bots/${auto.id}/messages`, { text: "No screen work today" });
