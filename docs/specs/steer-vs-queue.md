@@ -1,6 +1,7 @@
 # SPEC: steer-without-interrupt + double-Enter gesture (codex)
 
-Status: FROZEN for Phase 1 (research + spec only). Implementation lands in later dispatches.
+Status: FROZEN. Criterion (d) revised 2026-09-16 by user ruling: rooms and
+groups get the same steer treatment as 1:1 threads, not queue-only.
 
 ## Protocol verdict (codex-cli 0.154.0)
 
@@ -54,7 +55,12 @@ from steer, queue, and explicit Stop. Stop uses the graceful protocol interrupt
 (`turn/interrupt`) first, kill only as escalation, and the close handler must
 not surface raw SIGTERM as runtime.error for intentional stops (fix the
 stopRequested race).
-(d) Rooms and groups stay queue-only; no steering surfaces there.
+(d) Rooms and groups behave like 1:1 threads. Enter still queues in a room (a
+room send never live-steers on its own); a second Enter within the window
+steers the just-queued head message into the running room turn; the room Steer
+chip steers without interrupting. A room whose running driver cannot steer
+gets the same fallback treatment and honest interrupt copy as an incapable
+1:1 driver.
 
 ## Behavior matrix (rows to test)
 
@@ -64,7 +70,10 @@ stopRequested race).
 | double-Enter (busy 1:1) | second Enter steers queued msg via turn/steer; child alive; no SIGTERM error | same gesture via existing adapter.steer |
 | Steer chip | non-interrupting steer (turn/steer) | non-interrupting steer (existing) |
 | Stop | graceful turn/interrupt; clean end, no SIGTERM runtime.error; kill only escalation | unchanged |
-| Any action in rooms/groups | queue-only | queue-only |
+| Enter (busy room) | queue; no live-steer attempt, no latency added | queue; unchanged |
+| double-Enter (busy room) | second Enter steers the queued head into the running speaker's turn via turn/steer; child alive; no SIGTERM error | same gesture via the speaker's existing adapter.steer |
+| Steer chip (room) | non-interrupting steer when the running speaker is capable; honest interrupt fallback when it is not | non-interrupting steer (existing) |
+| Stop (room) | graceful interrupt; unchanged | unchanged |
 
 ## Test plan (one test per criterion)
 
@@ -76,9 +85,13 @@ child; killCliTree/terminate is not called; child still emits turn events after.
 (c) Driver test: explicit Stop sends turn/interrupt and the close handler
 reports a clean end (no runtime.error mentioning SIGTERM); escalation-kill only
 after interrupt fails/times out. Queue-drain test asserts no SIGTERM path.
-(d) UI test: no steer affordance or double-Enter steering in rooms/groups.
+(d) UI test: the double-Enter window opens on a busy room whose running
+speaker can steer, and the room chip routes to the group steer endpoint, not
+interruptGroup. E2E test: a queued room head is steered into the running codex
+speaker's turn (same child, no interrupt, steered message recorded, tail stays
+queued); an incapable room keeps its queue through the endpoint and drains it
+after Stop.
 
 ## Boundary
 
 Phase 1 adds this SPEC only: no driver, server, or UI changes.
-
