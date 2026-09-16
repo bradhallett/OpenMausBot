@@ -435,6 +435,34 @@ describe("Group Local VM ownership on the real isolated server", () => {
       await api("DELETE", `/api/bots/${auto.id}`); await api("DELETE", `/api/bots/${holder.id}`);
     }
   });
+
+  it("keeps refusing screen calls after a rejected lazy claim (issue #1361 F1)", async () => {
+    vmState(); rmSync(dumpFile, { force: true }); rmSync(finishFile, { force: true });
+    const { bot: auto } = await api("POST", "/api/bots", { name: "Rejected claim Auto" });
+    try {
+      await api("PATCH", `/api/bots/${auto.id}`, { browser: false });
+      await api("POST", `/api/bots/${auto.id}/messages`, { text: "Use the VM when it is ready" });
+      const autoComputer = computer(await dump());
+      expect(autoComputer).toBeTruthy();
+      // The VM dies between dispatch and the first screen call: the fired
+      // claim rejects inside readyLocalVmForTurn — after bindTurnComputer
+      // already left a turn-computer entry behind.
+      vmState({ failed: true });
+      const contention = { held: true, helpOpen: false,
+        blockedReason: "Another thread is using this computer. This call was not performed. Pause computer work until that thread finishes, then take a fresh screenshot before acting." };
+      expect(await (await gate(autoComputer)).json()).toEqual(contention);
+      // The mount is still live, but every later poll for this generation
+      // must keep refusing: falling through to held:false would let the
+      // bridge forward screen calls onto a VM this turn never claimed.
+      await new Promise(r => setTimeout(r, 150));
+      expect(await (await gate(autoComputer)).json()).toEqual(contention);
+      expect(await (await gate(autoComputer)).json()).toEqual(contention);
+    } finally {
+      writeFileSync(finishFile, "finish");
+      await api("POST", `/api/bots/${auto.id}/interrupt`, {}); await idle(auto.id);
+      await api("DELETE", `/api/bots/${auto.id}`);
+    }
+  });
   it.each(["timeout", "stall"])("releases %s bookkeeping after the interrupt grace period", async (failure) => {
     const { bots, group } = await room();
     vmState({ timeout: failure === "timeout" });

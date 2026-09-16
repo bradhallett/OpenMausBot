@@ -12117,13 +12117,27 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           const snapshot = botComputerControlSnapshot(botId, internalCapability.teamComputerId);
           const computer = turnComputerResources.get(internalCapability.threadId);
           const lazyClaim = autoVmClaims.get(internalCapability.threadId);
+          if (!snapshot.held && lazyClaim?.owner.generation === internalCapability.generation && lazyClaim.failed === true) {
+            // A rejected lazy claim (gate finding F1, issue #1361): the
+            // computer MCP mounted at dispatch is still live, and the claim
+            // may even have left a turn-computer entry behind (it can reject
+            // after bindTurnComputer succeeded — lease lost to a person,
+            // lifecycle busy, boot failure). Either way this turn owns no
+            // usable VM, so keep refusing every screen call for the rest of
+            // the generation; the bridge must never forward one onto a VM
+            // this turn never claimed. Turn settle GC clears the slot.
+            return json(res, 200, {
+              held: true, helpOpen: false,
+              blockedReason: "Another thread is using this computer. This call was not performed. Pause computer work until that thread finishes, then take a fresh screenshot before acting.",
+            });
+          }
           if (!snapshot.held && !computer && lazyClaim && lazyClaim.owner.generation === internalCapability.generation) {
             // First screen tools/call on a lazily-attached Auto VM (issue
             // #1361): fire the exclusive claim — once — and answer with the
             // same contention text a dispatched claim produces until it
             // lands. The fire-once slot means at most one claim attempt per
-            // turn; a failed claim clears the slot so later polls and the
-            // capability check fail closed instead of retrying forever.
+            // turn; a rejected claim keeps the slot and marks it failed so
+            // the branch above keeps answering held for this generation.
             startAutoVmClaim(autoVmClaims, internalCapability.threadId, internalCapability.generation);
             return json(res, 200, {
               held: true, helpOpen: false,
