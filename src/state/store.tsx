@@ -13,7 +13,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { CloudBackend, EffortLevel, ModelVariantOption, RuntimeEvent } from "../../server/contracts.ts";
+import type { CloudBackend, EffortLevel } from "../../shared/wire";
+import type { ModelVariantOption, RuntimeEvent } from "../../shared/runtime-events";
 import type { MausColor, MausMotion } from "@/lib/mascot";
 import type { BotAvatarCrop } from "../../shared/bot-avatar";
 import { approvalModeFor, type ApprovalMode } from "../../shared/approval-mode";

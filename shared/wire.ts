@@ -19,6 +19,10 @@ import type { SkillRequestCardData } from "./skill-request.ts";
 import type { QuestionRequestCardData } from "./ask-question.ts";
 import type { RoutineRunCardData } from "./routine-run.ts";
 import type { GroupGoalRunCardData } from "./group-goal-run.ts";
+import type { RuntimeEvent } from "./runtime-events.ts";
+import type { Notification } from "./notification.ts";
+import type { Routine, RoutineRun } from "./routines.ts";
+import type { WebhookAttempt, WebhookTrigger } from "./webhooks.ts";
 
 /** Reasoning-effort levels, ascending. A union of everything any engine
  * accepts; each driver declares the subset its CLI will take. Lives here
@@ -420,3 +424,38 @@ export interface WireGroup {
    * projection time, never persisted. */
   working: boolean;
 }
+
+// ── live wire frames ───────────────────────────────────────────────────
+// Derived from the client's frame switch (src/state/store.tsx handleFrame)
+// cross-checked against every server broadcast site: one member per kind
+// the app consumes, payload typed by the shape that actually goes over the
+// wire. Transport-owned frames (hello, ping) stay in src/lib/live-events.
+
+/** Pending steer-queue chips, as `queuedSteerSnapshot` emits them and the
+ * `bot.queued` frame carries them: threadId → queued items. */
+export type BotQueuedMessages = Record<string, Array<{ queueId: string; text: string; reason?: "capacity" }>>;
+
+export type ServerFrame =
+  | { kind: "sections"; sections: string[] }
+  | { kind: "bot.queued"; queues: BotQueuedMessages }
+  | { kind: "message"; threadId: string; message: WireMessage }
+  | { kind: "message.patch"; threadId: string; message: WireMessage }
+  | { kind: "thread"; threadId: string; activeLeafId: string }
+  | { kind: "bot"; bot: WireBot }
+  | { kind: "group"; group: WireGroup }
+  | { kind: "notify"; notification: Notification }
+  | { kind: "group.deleted"; groupId: string }
+  | { kind: "routine"; routine: Routine }
+  | { kind: "routine.deleted"; routineId: string }
+  | { kind: "routine.run"; run: RoutineRun }
+  | { kind: "webhook"; webhook: WebhookTrigger }
+  | { kind: "webhook.attempt"; attempt: WebhookAttempt }
+  | { kind: "webhook.deleted"; webhookId: string }
+  | { kind: "runtime"; event: RuntimeEvent }
+  | { kind: "screen"; botId: string; threadId: string; png: string; mime?: string }
+  | { kind: "computer"; botId: string; state: "provisioning" | "waking" }
+  | { kind: "computer-control"; botId: string; held: boolean; helpReason: string | null }
+  | { kind: "bot.deleted"; botId: string }
+  /** The config status object spread flat into the frame; its full typing
+   * is the deferred client-model extraction (see j1-phase-bc-progress). */
+  | ({ kind: "config" } & Record<string, unknown>);
