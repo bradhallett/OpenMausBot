@@ -90,6 +90,23 @@ describe("channel queue", () => {
     expect(_queuedChannelCount("thread-c")).toBe(0);
   });
 
+  it("refuses to lift the queue when the request names a later item, not the head", () => {
+    const head = queueChannelMessage("group-f", "thread-f", "the head must stay");
+    const later = queueChannelMessage("group-f", "thread-f", "named by the request");
+
+    // The steer path settles held.items[0]; a hold granted for a later id
+    // would steer and delete the head's words instead. Nothing may move.
+    expect(holdChannelQueue("group-f", "thread-f", later.id)).toBeNull();
+    expect(_queuedChannelCount("thread-f")).toBe(2);
+    const run = vi.fn();
+    drainChannelMessages(() => false, run);
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({ id: head.id, text: "the head must stay" }));
+    expect(run).toHaveBeenCalledTimes(1);
+    cancelChannelMessage("group-f", head.id);
+    cancelChannelMessage("group-f", later.id);
+    expect(_queuedChannelCount("thread-f")).toBe(0);
+  });
+
   it("restores a refused steer behind words that queued while the hold was open", () => {
     const first = queueChannelMessage("group-d", "thread-d", "refused head");
     const held = holdChannelQueue("group-d", "thread-d", first.id)!;

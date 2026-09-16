@@ -103,11 +103,14 @@ export interface HeldChannelQueue {
 
 /** Atomically lift a channel thread's whole queue out for a live steer. The
  * entry leaves first so a room that settles while the adapter is still
- * thinking can never also drain the same words as a follow-up turn. The
- * caller must either restore the held queue or settle its head. */
+ * thinking can never also drain the same words as a follow-up turn. Only
+ * the HEAD can be lifted: the success path steers and settles items[0], so
+ * a request naming a later item must not lift the queue at all (it would
+ * steer and delete a different message's words). The caller must either
+ * restore the held queue or settle its head. */
 export function holdChannelQueue(groupId: string, threadId: string, queueId: string): HeldChannelQueue | null {
   const entry = queues.get(threadId);
-  if (!entry || entry.groupId !== groupId || !entry.items.some((item) => item.id === queueId)) return null;
+  if (!entry || entry.groupId !== groupId || entry.items[0]?.id !== queueId) return null;
   queues.delete(threadId);
   return { groupId, threadId, items: entry.items };
 }
