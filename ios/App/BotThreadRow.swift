@@ -11,13 +11,14 @@ struct BotThreadRow: View {
     var queued = false
 
     private var runtime: (title: String, icon: String, color: Color)? {
-        switch task.activity {
-        case "waiting-on-you": return ("Waiting on you", "hand.raised.fill", .orange)
-        case "working", "running": return ("Working", "arrow.triangle.2.circlepath", .accentColor)
-        default:
-            if queued { return ("Queued", "clock", .secondary) }
-            return task.busy == true ? ("Working", "arrow.triangle.2.circlepath", .accentColor) : nil
-        }
+        // Ordered as the desktop orders its row: the person first, then a
+        // teammate wait as a quiet clock (never a spinner), then work.
+        if task.activity == "waiting-on-you" { return ("Waiting on you", "hand.raised.fill", .orange) }
+        if task.isWaitingOnTeammate { return ("Waiting on teammate", "clock", .secondary) }
+        if task.isWorking { return ("Working", "arrow.triangle.2.circlepath", .accentColor) }
+        // The queued flag is client state the harness reports out-of-band.
+        if task.activity == "queued" || queued { return ("Queued", "clock", .secondary) }
+        return nil
     }
 
     /// A closed or archived thread with nothing live in it reads quieter,

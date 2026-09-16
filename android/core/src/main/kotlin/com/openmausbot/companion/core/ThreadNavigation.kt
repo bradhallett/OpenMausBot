@@ -8,16 +8,26 @@ data class BotThreadGroup(val project: BotProject?, val tasks: List<BotTask>) {
 val BotTask.displayTitle: String
     get() = title.trim().ifEmpty { "Untitled thread" }
 
+/** The thread's own turn is running — the desktop's isWorking exactly.
+ * A run counts as work here exactly as its row labels it Working. */
+val BotTask.isWorking: Boolean
+    get() = activity == "working" || activity == "running" || busy == true
+
+/** Waiting on a dispatched teammate (#1223). The live #1228 wire paints busy
+ * and working during a coordination wait, so the flag outranks the painted
+ * work: the row shows the wait, never the work spinner. */
+val BotTask.isWaitingOnTeammate: Boolean
+    get() = waitingOnTeammate == true
+
 /** Running, needing the person, unread, or holding a queued send — client
  * state passed in, because the harness reports queues out-of-band, never as
  * task activity. */
 fun BotTask.demandsAttention(queued: Boolean = false): Boolean =
-    busy == true || unread == true || queued || activity in setOf(
-        // "queued" stays in the set: the harness reports client queues
-        // out-of-band (hence the flag), but main already surfaces a thread
-        // whose wire activity says queued, and dropping that would regress it.
-        "waiting-on-you", "waiting", "working", "running", "queued",
-    )
+    // The activity set is the BotActivity wire contract (working,
+    // waiting-on-you, waiting, idle, no-signal, dead) plus the queued wait;
+    // work states arrive through isWorking.
+    isWaitingOnTeammate || isWorking || busy == true || unread == true || queued ||
+        activity in setOf("waiting-on-you", "waiting", "queued")
 
 /**
  * Attention outranks recency within a bot: waiting-on-you needs the person
@@ -66,6 +76,7 @@ fun Bot.threadGroups(
         tasks == null -> listOf(BotTask(
             threadId = threadId, title = "", createdAt = createdAt,
             modelSelection = modelSelection, busy = busy, activity = activity, unread = unread,
+            waitingOnTeammate = waitingOnTeammate,
             approvalMode = approvalMode, autoApprove = autoApprove, alwaysAllow = alwaysAllow,
         ))
         includingClosed || search.isNotEmpty() -> visibleTasks

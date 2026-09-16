@@ -27,6 +27,18 @@ import com.openmausbot.companion.core.bylineLabel
 import com.openmausbot.companion.core.displayTitle
 import com.openmausbot.companion.core.isClosed
 import com.openmausbot.companion.core.isArchived
+import com.openmausbot.companion.core.isWaitingOnTeammate
+import com.openmausbot.companion.core.isWorking
+
+/** The quiet status under a title: waiting states are never painted as work.
+ * The queued flag is client state the harness reports out-of-band. */
+internal fun BotTask.runtimeLabel(queued: Boolean = false): String? = when {
+    activity == "waiting-on-you" -> "Waiting on you"
+    isWaitingOnTeammate -> "Waiting on teammate"
+    isWorking -> "Working"
+    activity == "queued" || queued -> "Queued"
+    else -> null
+}
 
 /** Shared by Home and the thread picker, with status taken from this thread alone. */
 @Composable
@@ -39,15 +51,7 @@ internal fun BotThreadRow(
      * it, so the row derives it here rather than parsing activity. */
     queued: Boolean = false,
 ) {
-    val runtime = when (task.activity) {
-        "waiting-on-you" -> "Waiting on you"
-        "working", "running" -> "Working"
-        else -> when {
-            queued -> "Queued"
-            task.busy == true -> "Working"
-            else -> null
-        }
-    }
+    val runtime = task.runtimeLabel(queued)
     val dimmed = (task.isClosed || task.isArchived) && runtime == null && task.unread != true
     val foldedState = when {
         task.isClosed -> "Closed"
@@ -84,6 +88,7 @@ internal fun BotThreadRow(
                             fontWeight = FontWeight.Medium,
                             color = when (runtime) {
                                 "Waiting on you" -> MaterialTheme.colorScheme.error
+                                "Waiting on teammate" -> secondaryTint
                                 "Queued" -> secondaryTint
                                 else -> MaterialTheme.colorScheme.primary
                             },

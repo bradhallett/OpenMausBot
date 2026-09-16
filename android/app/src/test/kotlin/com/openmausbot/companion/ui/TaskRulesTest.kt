@@ -59,6 +59,8 @@ class TaskRulesTest {
         // queues the harness reports out-of-band
         assertTrue(TaskRules.demandsAttention(task("t1").copy(activity = "queued")))
         assertTrue(TaskRules.demandsAttention(task("t1"), queued = true))
+        // main's teammate wait rides along through the shared core rule
+        assertTrue(TaskRules.demandsAttention(task("t1").copy(waitingOnTeammate = true)))
     }
 
     @Test
