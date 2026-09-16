@@ -54,9 +54,9 @@ export interface EventsRoutes {
 
 export function createEventsRoutes(options: EventsRoutesOptions): EventsRoutes {
   const sseClients = new Set<SseClient>();
-  // One idempotent cleanup per client: every termination path (request close,
-  // response close, session revocation, fan-out disconnect) must clear the
-  // heartbeat timer and drop the registration exactly once.
+  // One idempotent cleanup per client: every termination path (response
+  // close, session revocation, fan-out disconnect) must clear the heartbeat
+  // timer and drop the registration exactly once.
   const clientCleanups = new Map<SseClient, () => void>();
   const stopClient = (client: SseClient) => clientCleanups.get(client)?.();
   function closeSessionStreams(sessionId: string): void {
@@ -196,6 +196,8 @@ export function createEventsRoutes(options: EventsRoutesOptions): EventsRoutes {
       // A comment keeps intermediaries from idling the connection, while a
       // data frame is visible to EventSource clients and resets their own
       // liveness watchdog. Heartbeats carry no id and never advance replay.
+      // They ride the same buffered-byte bound as every other frame, so a
+      // client that stopped reading is cut loose rather than queued forever.
       const keepalive = setInterval(() => {
         // an expired session's stream ends at the next heartbeat
         if (client.sessionId && !options.isLive(client.sessionId)) {
@@ -204,9 +206,10 @@ export function createEventsRoutes(options: EventsRoutesOptions): EventsRoutes {
           res.end();
           return;
         }
-        try {
-          res.write(`: keepalive\n\ndata: ${JSON.stringify({ kind: "ping" })}\n\n`);
-        } catch {}
+        const heartbeat = `: keepalive\n\ndata: ${JSON.stringify({ kind: "ping" })}\n\n`;
+        if (deliverSseFrame(client, "ping", heartbeat) === "disconnected") {
+          stopClient(client);
+        }
       }, SSE_HEARTBEAT_MS);
       const cleanup = () => {
         clearInterval(keepalive);
@@ -214,8 +217,10 @@ export function createEventsRoutes(options: EventsRoutesOptions): EventsRoutes {
         clientCleanups.delete(client);
       };
       clientCleanups.set(client, cleanup);
-      req.on("close", cleanup);
-      res.on("close", cleanup);
+      // The response, not the request, owns this stream's lifetime: req
+      // "close" fires when the request completes (immediately for a bodyless
+      // GET), so only res "close" reliably means the client went away.
+      res.once("close", cleanup);
       return true;
     }
     return false;
