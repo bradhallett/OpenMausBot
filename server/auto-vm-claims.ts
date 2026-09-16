@@ -28,7 +28,9 @@ export type AutoVmClaimTable = Map<string, AutoVmClaimSlot>;
  * the bridge refuses every later screen call instead of forwarding it onto
  * a VM this turn never claimed. `begin` staying set means the claim never
  * re-fires; turn settle (releaseTurnResources / releaseLocalVmThread in
- * index.ts) clears the slot. */
+ * index.ts) clears the slot, fenced by owner generation. A rejection
+ * mutates only the slot it fired from, so a stale claim can never remove
+ * or mark a newer generation's slot on the same thread. */
 export function startAutoVmClaim(table: AutoVmClaimTable, threadId: string, generation: string): void {
   const slot = table.get(threadId);
   if (!slot || slot.owner.threadId !== threadId || slot.owner.generation !== generation || slot.begin) return;
