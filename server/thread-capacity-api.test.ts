@@ -229,6 +229,64 @@ describe("per-bot thread capacity through an isolated HTTP fixture", () => {
     }
   }, 90_000);
 
+  it("holds routine runs behind an active group turn and starts them once it ends", async () => {
+    const { botId } = await botWithThreads(1);
+    const createdRoom = await api("POST", "/api/groups", {
+      name: "Routine gate room",
+      memberIds: [botId],
+      setup: { bulletin: "Answer briefly.", defaultResponder: { kind: "member", botId } },
+    });
+    expect(createdRoom.status).toBe(201);
+    const room = createdRoom.body.group;
+    const created = await api("POST", "/api/routines", {
+      name: "Group gate probe",
+      prompt: "Write the deferred digest.",
+      target: "bot",
+      botId,
+      runOn: "maus",
+      enabled: true,
+      schedule: { type: "daily", time: "23:00" },
+    });
+    expect(created.status).toBe(201);
+    const routineId = created.body.routine.id;
+    const runState = async (id: string) =>
+      (await api("GET", "/api/routines")).body.runs.find((run: any) => run.id === id);
+    const roomWorking = async () =>
+      (await api("GET", "/api/bots?messages=0")).body.groups.find((group: any) => group.id === room.id)?.working;
+    try {
+      const sent = await api("POST", `/api/groups/${room.id}/messages`, { text: "Hold the room turn open." });
+      expect(sent.status).toBe(202);
+      expect(sent.body.queued).toBeUndefined();
+      // Room turns run in the member's shared workspace, so the gated fake
+      // provider dumps and holds under the bot id, not the room thread id.
+      await dump(botId);
+      await expect.poll(roomWorking, { timeout: 15_000 }).toBe(true);
+      const run = (await api("POST", `/api/routines/${routineId}/run`)).body.run;
+      // An active group turn blocks scheduled starts the same way it blocks
+      // every other turn kind, even with every capacity slot free: across
+      // scheduler ticks the run stays queued — deferred, not failed.
+      await new Promise((resolve) => setTimeout(resolve, 12_000));
+      const held = await runState(run.id);
+      expect(held?.status).toBe("queued");
+      expect(held?.deferredAt).toEqual(expect.any(Number));
+      // Ending the room turn releases the run into a thread of its own.
+      finish(botId);
+      await expect.poll(roomWorking, { timeout: 15_000 }).toBe(false);
+      await expect.poll(async () => (await runState(run.id))?.status, { timeout: 20_000 }).toBe("running");
+      const started = await runState(run.id);
+      expect(started.threadId).toBeTruthy();
+      expect(started.threadId).not.toBe(room.threadId);
+      await dump(started.threadId);
+    } finally {
+      finish(room.threadId);
+      for (const threadId of await busyThreads(botId)) finish(threadId);
+      await expect.poll(async () => (await busyThreads(botId)).length, { timeout: 15_000 }).toBe(0);
+      await api("DELETE", `/api/groups/${room.id}`).catch(() => undefined);
+      await api("DELETE", `/api/routines/${routineId}`).catch(() => undefined);
+      await api("DELETE", `/api/bots/${botId}`).catch(() => undefined);
+    }
+  }, 120_000);
+
   it("restores cancellable queued receipts from a fresh snapshot and broadcasts complete queue changes", async () => {
     await limit(1);
     const { botId, threads: [active, waiting, cancelled, deleted] } = await botWithThreads(4);
