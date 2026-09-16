@@ -1,7 +1,7 @@
 // OpenMausBot server — the harness host. Clients hold no transports
 // (upstream rule): the React app dispatches typed commands over HTTP and
 // folds one SSE event stream; every provider process runs here.
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { rm as removeDirectory } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -430,7 +430,7 @@ import { shouldMountLocalComputer } from "./local-routing.ts";
 import { autoLocalVmAttachable, type ContainerComputerStatus } from "./container-computer.ts";
 import { type AutoVmClaimTable } from "./auto-vm-claims.ts";
 import { modelContextWindow } from "./model-context-window.ts";
-import { parseSurface, resolveSurface, surfaceLabel, surfaceOfComputerKind, surfacePrompt, type Surface } from "./surface.ts";
+import { parseSurface, resolveSurface, surfaceLabel, surfaceOfComputerKind, surfacePrompt } from "./surface.ts";
 import {
   PendingTurnCancellations,
   ProviderTurnGenerationRegistry,
@@ -449,6 +449,19 @@ import { json, readBody, stderrOf } from "./http.ts";
 import { createEventsRoutes } from "./routes/events.ts";
 import { createRoutinesRoutes } from "./routes/routines.ts";
 import { createInternalRoutes, type AskBotOutcome, type InternalCapability } from "./routes/internal.ts";
+import {
+  activeInternalGenerationByThread,
+  beginInternalCapabilityGeneration,
+  bindInternalCapabilityToProviderTurn,
+  computerSelectionTurns,
+  internalCapabilities,
+  mintInternalCapability,
+  revokeAllInternalCapabilities,
+  revokeInternalCapabilitiesForThread,
+  revokeInternalCapabilityForProviderEvent,
+  revokeInternalCapabilityGeneration,
+} from "./internal-capabilities.ts";
+import { askMessageByRequest, requestBehavior, toolMessageByItem } from "./turn-fold.ts";
 import { applyPendingWorkspaceRestore, readLastWorkspaceRestore, type WorkspaceRestoreResult } from "./workspace-backup.ts";
 import { createCustomDomainVerifier, customDomainIpv4, normalizeCustomDomain } from "./custom-domain.ts";
 import { allowedScopes, createEmailSignIn, parseAllowList } from "./account-signin.ts";
@@ -751,86 +764,10 @@ utilityParentPort?.on("message", event => {
 });
 
 // ── peer-agent comms wiring ────────────────────────────────────────────
-// A capability lives for the exact provider-turn generation, including while
-// that turn is parked on a human approval. The long ceiling is only an orphan
-// backstop for an impossible-to-settle adapter; normal terminal paths revoke
-// synchronously and app restart destroys this in-memory set.
-const INTERNAL_CAPABILITY_ORPHAN_MS = 30 * 24 * 60 * 60_000;
-const internalCapabilities = new Map<string, InternalCapability>();
-const activeInternalGenerationByThread = new Map<string, string>();
-const internalGenerationByProviderTurn = new ProviderTurnGenerationRegistry();
-const computerSelectionTurns = new Map<string, {
-  generation: string;
-  botId: string;
-  source: Message;
-  text: string;
-  mounted?: Surface;
-  selected?: Surface;
-  previousSurface?: Surface;
-}>();
-
-function beginInternalCapabilityGeneration(threadId: string, generation = randomUUID()): string {
-  const previous = activeInternalGenerationByThread.get(threadId);
-  if (previous) revokeInternalCapabilityGeneration(threadId, previous);
-  activeInternalGenerationByThread.set(threadId, generation);
-  return generation;
-}
-
-function mintInternalCapability(capability: Omit<InternalCapability, "orphanExpiresAt">): string {
-  if (activeInternalGenerationByThread.get(capability.threadId) !== capability.generation) {
-    throw new Error("cannot mint an integration capability for an inactive turn");
-  }
-  const token = randomBytes(24).toString("hex");
-  internalCapabilities.set(token, {
-    ...capability,
-    orphanExpiresAt: Date.now() + INTERNAL_CAPABILITY_ORPHAN_MS,
-  });
-  return token;
-}
-
-function revokeInternalCapabilityGeneration(threadId: string, generation: string): void {
-  for (const [token, capability] of internalCapabilities) {
-    if (capability.threadId === threadId && capability.generation === generation) {
-      internalCapabilities.delete(token);
-    }
-  }
-  if (activeInternalGenerationByThread.get(threadId) === generation) {
-    activeInternalGenerationByThread.delete(threadId);
-  }
-  internalGenerationByProviderTurn.deleteGeneration(threadId, generation);
-}
-
-function revokeInternalCapabilitiesForThread(threadId: string): void {
-  computerSelectionTurns.delete(threadId);
-  const generation = activeInternalGenerationByThread.get(threadId);
-  if (generation) revokeInternalCapabilityGeneration(threadId, generation);
-  // Defensive cleanup for any generation orphaned before exact ownership was
-  // introduced. This force variant is used only by explicit stop/delete and
-  // before a brand-new generation is published, never by a stale async catch.
-  for (const [token, capability] of internalCapabilities) {
-    if (capability.threadId === threadId) internalCapabilities.delete(token);
-  }
-}
-
-function revokeAllInternalCapabilities(): void {
-  computerSelectionTurns.clear();
-  internalCapabilities.clear();
-  activeInternalGenerationByThread.clear();
-  internalGenerationByProviderTurn.clear();
-}
-
-function bindInternalCapabilityToProviderTurn(threadId: string, generation: string, turnId?: string): void {
-  if (turnId && !internalGenerationByProviderTurn.bind(threadId, generation, turnId)) {
-    revokeInternalCapabilityGeneration(threadId, generation);
-  }
-}
-
-function revokeInternalCapabilityForProviderEvent(event: RuntimeEvent): void {
-  if (!event.turnId) return;
-  const owner = internalGenerationByProviderTurn.complete(event.threadId, event.turnId);
-  if (!owner) return;
-  revokeInternalCapabilityGeneration(owner.threadId, owner.generation);
-}
+// The capability store, generation registries, and the mint/revoke helpers
+// live in ./internal-capabilities.ts. The bearer predicates stay here:
+// internalCapabilityIsActive also reads the team-computer turn table and
+// the local VM lease pool, which remain index-local.
 
 /** Resolve a high-entropy bearer to its immutable server-side claims.
  * Constant-time comparisons keep the check independent of matching prefix
@@ -3201,11 +3138,7 @@ onSteeredQueueChange(() => broadcast({ kind: "bot.queued", queues: publicBotQueu
 // ── server-side event folding (upstream's ingestion worker, miniature) ──
 // The canonical stream is the source of truth; the persisted transcript
 // and every client view are projections of it.
-// keyed by `${threadId}:${itemId}` / `${threadId}:${requestId}` — provider
-// item/request ids are only unique within a thread, so two bots acting at
-// once can collide on a bare id and patch each other's messages.
-const toolMessageByItem = new Map<string, string>(); // threadId:itemId -> messageId
-const askMessageByRequest = new Map<string, string>(); // threadId:requestId -> messageId
+// The in-flight item/request message-id maps live in ./turn-fold.ts.
 
 /** Deliver a person's answer to the engine that asked, and tell the truth
  * about what happened. `unavailable` — the turn ended, the ask timed out,
@@ -3308,9 +3241,6 @@ function closeOpenApprovals(threadId: string): void {
   }
 }
 
-function requestBehavior(value: unknown): "allow" | "deny" | "answer" | null {
-  return value === "allow" || value === "deny" || value === "answer" ? value : null;
-}
 // the last settled assistant text per thread, so a "finished" notification
 // can carry what the bot actually said
 const lastReply = new Map<string, string>();
