@@ -413,8 +413,14 @@ describe("Group Local VM ownership on the real isolated server", () => {
       await api("POST", `/api/bots/${auto.id}/messages`, { text: "Take a screenshot when free" });
       const autoComputer = computer(await dump());
       expect(autoComputer).toBeTruthy();
+      rmSync(dumpFile, { force: true });
       await api("POST", `/api/bots/${holder.id}/messages`, { text: "Hold the VM" });
-      await until(async () => (await api("GET", "/api/bots?messages=0")).bots.find((b: any) => b.id === holder.id)?.busy, Boolean);
+      // busy flips before setup claims the VM, so it is not a contention
+      // signal. Each fake CLI dumps once, on its first prompt, after the
+      // eager claim and mount: the fresh dump is the lease-held sync point.
+      const holderComputer = computer(await dump());
+      expect(holderComputer).toBeTruthy();
+      expect((await gate(holderComputer)).status).toBe(200);
       // First screen tools/call: the gate fires the deferred claim, answers
       // with the contention text, and the existing wait activity appears.
       const first = await (await gate(autoComputer)).json();
