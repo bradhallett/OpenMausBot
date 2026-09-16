@@ -61,9 +61,6 @@ export function isProjectEmoji(value: unknown): value is string {
  * wire shape; the extras below are server-private bookkeeping the wire
  * projection (toWireTask) strips. */
 export interface TaskRecord extends WireTask {
-  /** The first user message already drove a title attempt for this task,
-   * so a later one does not rename a thread the person may have retitled. */
-  titleFromFirstMessage?: true;
   /** provider-native continuation per instance, for THIS task only */
   resumeCursors: Record<string, unknown>;
   /** which instance dispatched the most recent turn. A cursor alone can't
