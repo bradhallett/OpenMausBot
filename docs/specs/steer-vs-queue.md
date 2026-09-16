@@ -13,8 +13,8 @@ Native mid-turn steering EXISTS; no child kill or restart is needed.
 - Live stdio probe of `codex.opencodex-real app-server` (transcript:
   /private/tmp/omb-steer-probe2.log on this machine): server identifies as
   `omb-probe/0.154.0`. `turn/steer`, `turn/interrupt`, and `thread/queue/add`
-  all exist as JSON-RPC methods (empty params -> `-32600 Invalid request:
-  missing field \`threadId\``; an unknown method would return -32601).
+  all exist as JSON-RPC methods (empty params -> error `-32600` "Invalid
+  request: missing field `threadId`"; an unknown method would return `-32601`).
   With a well-formed threadId, `turn/steer` dispatches without param errors.
 - Binary strings (`strings` on the Mach-O) show the surrounding protocol:
   methods `turn/start`, `turn/steer`, `turn/interrupt`, `thread/queue/add`,
