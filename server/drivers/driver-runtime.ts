@@ -1,4 +1,4 @@
-import type { RuntimeEvent, RuntimeEventListener } from "../contracts.ts";
+import type { ModelCatalog, RuntimeEvent, RuntimeEventListener } from "../contracts.ts";
 import { newEventId } from "../contracts.ts";
 
 /** What the runtime needs from a driver's per-turn bookkeeping. Drivers keep
@@ -27,6 +27,11 @@ interface DriverSessionRuntimeOptions<Turn extends DriverActiveTurn> {
    *  Return a promise only when the driver's contract waits for the turn to
    *  settle; a rejection never escapes stopAll()/dispose(). */
   stopTurn(turn: Turn): void | Promise<void>;
+  /** Runs after every running turn was stopped, with the operation that
+   *  triggered the teardown — a driver's hook for resources no running turn
+   *  owns (idle sessions). Like stopTurn, a rejection never escapes
+   *  stopAll()/dispose(). */
+  afterStopTurns?(source: "stopAll" | "dispose"): void | Promise<void>;
 }
 
 export interface DriverSessionRuntime<Turn extends DriverActiveTurn> {
@@ -94,15 +99,54 @@ export function createDriverSessionRuntime<Turn extends DriverActiveTurn>(
     listeners.add(listener);
     return () => listeners.delete(listener);
   };
-  const stopAll = async () => {
+  const stopTurns = async (source: "stopAll" | "dispose") => {
     // Snapshot: stopping one turn can settle (and remove) the others.
     const turns = Array.from(active.values());
     await Promise.all(turns.map((activeTurn) => Promise.resolve(options.stopTurn(activeTurn)).catch(() => {})));
+    await Promise.resolve(options.afterStopTurns?.(source)).catch(() => {});
   };
+  const stopAll = () => stopTurns("stopAll");
   const dispose = async () => {
-    await stopAll();
+    await stopTurns("dispose");
     listeners.clear();
   };
 
   return { emit, base, assertThreadIdle, setTurn, endTurn, turn, hasSession, onEvent, stopAll, dispose };
+}
+
+/** The mutable model catalog every driver instance serves: a static list
+ *  until discovery replaces it, and the Refresh action that re-runs
+ *  discovery. claude, codex, and the ACP core hand-rolled the same closure
+ *  (keep the last usable catalog when discovery fails or comes back empty)
+ *  and drifted while doing it. */
+export interface DriverModelCatalog<Models extends ModelCatalog = ModelCatalog> {
+  /** The catalog to serve; a refresh replaces it only when discovery
+   *  returned at least one option. */
+  readonly models: Models;
+  /** Re-run catalog discovery; keeps the last usable catalog on failure. */
+  readonly refreshModels: () => Promise<void>;
+}
+
+/** Build the shared refreshModels shape. The provider-specific catalog
+ *  fetching stays in each driver: `load` is exactly what the driver's old
+ *  closure ran inside its try block. */
+export function createRefreshModels<Models extends ModelCatalog>(options: {
+  /** The static catalog to serve until discovery returns one. */
+  initial: Models;
+  /** Provider-specific discovery. Omit it when the engine has no live
+   *  source (managed catalogs); a nullish or empty result keeps the
+   *  current catalog. */
+  load?: () => Models | undefined | null | Promise<Models | undefined | null>;
+}): DriverModelCatalog<Models> {
+  let models = options.initial;
+  const refreshModels = async () => {
+    if (!options.load) return;
+    try {
+      const resolved = await options.load();
+      if (resolved && resolved.options.length) models = resolved;
+    } catch {
+      // Keep the last usable catalog when discovery fails.
+    }
+  };
+  return { get models() { return models; }, refreshModels };
 }
