@@ -14,6 +14,7 @@ import type { TeamSetupRequest, TeamSetupResult } from "../../shared/team-setup.
 import type { MausColor } from "../../shared/wire.ts";
 import { sectionKey, UNTITLED_THREAD, type BotRecord } from "./records.ts";
 import type { StoreContext } from "./context.ts";
+import { clearPendingThreadDeletions, flushPendingThreadDeletions, stagePendingThreadDeletions } from "./messages.ts";
 
 const COLORS: MausColor[] = [
   "green",
@@ -173,6 +174,7 @@ export function applyTeamSetup(ctx: StoreContext, request: TeamSetupRequest): Te
 }
 
 export function deleteBot(ctx: StoreContext, id: string, setupRequest?: TeamSetupRequest): boolean {
+  flushPendingThreadDeletions(ctx, id);
   const record = ctx.bot(id);
   if (!record) return false;
   let nextBots = ctx.bots.filter((b) => b.id !== id);
@@ -186,13 +188,23 @@ export function deleteBot(ctx: StoreContext, id: string, setupRequest?: TeamSetu
   }
   // Persist removal and the review receipt before deleting conversation or
   // workspace data. A failed save must leave the bot recoverable in place.
-  ctx.saveBots(nextBots);
+  // The tombstone is durable before the association disappears, so a failed
+  // transcript cleanup can still be retried and never orphans files.
+  const threadIds = [record.threadId, ...(record.tasks ?? []).map((t) => t.threadId)];
+  stagePendingThreadDeletions(id, threadIds);
+  try {
+    ctx.saveBots(nextBots);
+  } catch (error) {
+    clearPendingThreadDeletions(id, threadIds);
+    throw error;
+  }
   ctx.bots = nextBots;
   ctx.legacyActivities.delete(id);
   // every task's transcript goes with the bot, not just the open one
-  for (const threadId of new Set([record.threadId, ...(record.tasks ?? []).map((t) => t.threadId)])) {
+  for (const threadId of new Set(threadIds)) {
     ctx.deleteThreadRecord(threadId);
   }
+  clearPendingThreadDeletions(id, threadIds);
   // the bot's workspace (files + memory) goes with it — same rule as its
   // transcripts: deleting a bot deletes what it knew
   try {

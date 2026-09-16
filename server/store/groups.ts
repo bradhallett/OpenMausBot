@@ -9,6 +9,7 @@ import {
   type GroupRecord,
 } from "./records.ts";
 import type { StoreContext } from "./context.ts";
+import { clearPendingThreadDeletions, flushPendingThreadDeletions, stagePendingThreadDeletions } from "./messages.ts";
 import { threadTitleFrom } from "./records.ts";
 
 export function group(ctx: StoreContext, id: string): GroupRecord | undefined {
@@ -266,18 +267,26 @@ export function retitleGroupTask(ctx: StoreContext, groupId: string, threadId: s
 }
 
 export function deleteGroupTask(ctx: StoreContext, groupId: string, threadId: string): GroupRecord | null {
+  flushPendingThreadDeletions(ctx, groupId);
   const record = ctx.group(groupId);
   if (!record || record.dm || !record.tasks || record.tasks.length < 2) return null;
   if (!record.tasks.some((task) => task.threadId === threadId)) return null;
   record.tasks = record.tasks.filter((task) => task.threadId !== threadId);
-  ctx.deleteThreadRecord(threadId);
   if (record.threadId === threadId) {
     const next = record.tasks[0]!;
     record.threadId = next.threadId;
     record.pinnedCwd = next.pinnedCwd;
     record.pinnedMessageId = next.pinnedMessageId;
   }
-  ctx.saveGroups();
+  stagePendingThreadDeletions(groupId, [threadId]);
+  try {
+    ctx.saveGroups();
+  } catch (error) {
+    clearPendingThreadDeletions(groupId, [threadId]);
+    throw error;
+  }
+  ctx.deleteThreadRecord(threadId);
+  clearPendingThreadDeletions(groupId, [threadId]);
   ctx.emit({ type: "group", groupId });
   return record;
 }

@@ -1712,6 +1712,13 @@ describe("bot settings section", () => {
     expect(overlayOpen(next, "appSettings")).toBe(false);
   });
 
+  it("openOverlay(appSettings) closes the new-bot dialog", () => {
+    const withNewBot = { ...initialState, overlays: { ...initialState.overlays, open: ["newBot"] as OverlayKind[] } };
+    const next = reducer(withNewBot, { type: "openOverlay", kind: "appSettings", open: true });
+    expect(overlayOpen(next, "appSettings")).toBe(true);
+    expect(overlayOpen(next, "newBot")).toBe(false);
+  });
+
   it("reopens the same section after a collapse without remounting settings", () => {
     const opened = reducer(initialState, { type: "openOverlay", kind: "settings", open: true, section: "usage" });
     const collapsed = reducer(opened, { type: "openOverlay", kind: "settings", open: true });

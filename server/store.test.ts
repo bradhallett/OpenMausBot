@@ -13,6 +13,7 @@ import type { ModelSelection } from "./contracts.ts";
 import * as mdb from "./message-db.ts";
 import { peerAllowKey } from "./peer-approval-key.ts";
 import { canAccessTeam } from "./peer-roster.ts";
+import { pendingThreadDeletions } from "./store/messages.ts";
 import { Store, type BotRecord } from "./store.ts";
 import type { TeamSetupRequest } from "../shared/team-setup.ts";
 import { SECTION_CONTEXTS_FILE } from "./section-context.ts";
@@ -941,6 +942,30 @@ describe("Store", () => {
     expect(new Store(selection).messagesFor(bot.threadId)).toHaveLength(0);
     expect(existsSync(skillState)).toBe(false);
     expect(store.deleteBot(bot.id)).toBe(false);
+  });
+  it("deleteBot retries pending thread deletions from a durable tombstone", () => {
+    const store = new Store(selection);
+    const bot = store.createBot();
+    const second = store.createTask(bot.id, "second", false)!;
+    store.appendMessage(second.threadId, { role: "user", kind: "text", text: "second transcript" });
+
+    const realPendingDelete = store.deleteThreadRecord.bind(store);
+    let unlinkFailed = false;
+    store.deleteThreadRecord = (threadId: string) => {
+      if (!unlinkFailed) {
+        unlinkFailed = true;
+        throw new Error("transcript unlink failed");
+      }
+      realPendingDelete(threadId);
+    };
+    expect(() => store.deleteBot(bot.id)).toThrow("transcript unlink failed");
+    store.deleteThreadRecord = realPendingDelete;
+
+    expect(pendingThreadDeletions()[bot.id]).toEqual([bot.threadId, second.threadId]);
+    expect(store.deleteBot(bot.id)).toBe(false);
+    expect(pendingThreadDeletions()[bot.id]).toBeUndefined();
+    expect(new Store(selection).messagesFor(bot.threadId)).toHaveLength(0);
+    expect(new Store(selection).messagesFor(second.threadId)).toHaveLength(0);
   });
   it("migrates a pre-branching flat transcript file", () => {
     const store = new Store(selection);

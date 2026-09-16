@@ -40,6 +40,21 @@ import { t } from "@/lib/i18n";
 import { createBotPatchQueue, type BotUpdatePatch } from "./bot-patch-queue";
 import type { OnboardingStatus } from "@/lib/onboarding";
 import { openLiveEvents } from "@/lib/live-events";
+import {
+  overlaysReducer,
+  VIEW_SWITCH_OVERLAYS,
+  withoutOverlays,
+  type OverlayKind,
+  type OverlaySection,
+  type OverlaysState,
+} from "./overlays";
+import { createStreamDeltaBuffer, EMPTY_STREAM, StreamContext, type StreamState } from "./stream-context";
+
+// Wave 4 split: the overlays slice and the stream context now live in their
+// own modules. Re-exported here so the store's public API stays unchanged.
+export { overlayOpen } from "./overlays";
+export type { OverlayKind, OverlaySection, OverlaysState } from "./overlays";
+export { createStreamDeltaBuffer, useStreaming } from "./stream-context";
 
 const MAX_ROUTINE_RUNS = 2_000;
 const ACTIVE_ROUTINE_RUN_STATUSES = new Set<RoutineRun["status"]>(["queued", "running", "waiting"]);
@@ -693,36 +708,6 @@ export type BotSettingsSection =
   | "history"
   | "usage";
 
-/** Every modal/panel surface the shell tracks. Several can be open at once —
- *  bot settings deliberately keeps the computer and inspector panels up, and
- *  the shortcuts sheet stacks over anything — so the slice keeps an ordered
- *  list rather than a single value. */
-export type OverlayKind =
-  | "settings"
-  | "plugins"
-  | "newBot"
-  | "computer"
-  | "inspector"
-  | "appSettings"
-  | "shortcuts"
-  | "welcome"
-  | "tour";
-
-/** The section (or plugins surface) an openOverlay action names. */
-export type OverlaySection = AppSettingsSection | BotSettingsSection | "apps" | "mcp";
-
-export interface OverlaysState {
-  /** Open overlays in open order, most recent last. */
-  open: OverlayKind[];
-  /** Which tab the Plugins panel opens on; "mcp" when a bot's tools
-   *  sent the user there to add a server. Remembered across close/reopen. */
-  pluginsSurface: "apps" | "mcp";
-  appSettingsSection: AppSettingsSection;
-  botSettingsSection: BotSettingsSection;
-  /** True only when the open action named a section — accordion expands that row. */
-  botSettingsExpandAccordion: boolean;
-}
-
 export interface ModelVariantSession {
   instanceId: string;
   model: string;
@@ -1185,35 +1170,6 @@ function optimisticUserMessage(
     sendId,
     channelMode,
   };
-}
-
-/** Whether an overlay is currently open. */
-export function overlayOpen(state: AppState, kind: OverlayKind): boolean {
-  return state.overlays.open.includes(kind);
-}
-
-/** Overlays each kind closes when it opens — exactly the exclusivity the old
- *  per-flag toggles enforced. Bot settings deliberately leaves the computer
- *  and inspector panels open (their own controls open bot settings); the
- *  shortcuts sheet closes nothing and only welcome/plugins/newBot dismiss it. */
-const OVERLAY_EXCLUDES: Record<OverlayKind, readonly OverlayKind[]> = {
-  settings: ["appSettings"],
-  plugins: ["settings", "appSettings", "newBot", "shortcuts"],
-  newBot: ["settings", "appSettings", "plugins", "shortcuts"],
-  computer: ["settings", "inspector", "appSettings"],
-  inspector: ["settings", "computer", "appSettings"],
-  appSettings: ["settings", "computer", "inspector", "plugins"],
-  shortcuts: [],
-  tour: ["appSettings"],
-  welcome: ["appSettings", "shortcuts"],
-};
-
-/** showRoutines/showTeamMap replace the chat surface, so the panels living in
- *  it close; the modals (new bot, shortcuts, welcome, tour) do not. */
-const VIEW_SWITCH_OVERLAYS: readonly OverlayKind[] = ["settings", "computer", "inspector", "appSettings", "plugins"];
-
-function withoutOverlays(overlays: OverlaysState, kinds: readonly OverlayKind[]): OverlaysState {
-  return { ...overlays, open: overlays.open.filter((kind) => !kinds.includes(kind)) };
 }
 
 export function reducer(state: AppState, action: Action): AppState {
@@ -1691,73 +1647,16 @@ export function reducer(state: AppState, action: Action): AppState {
         // or marking its conversations read, even when another panel is open.
         if (action.botId !== undefined && !state.bots.some((bot) => bot.id === action.botId && !bot.hidden)) return state;
         const selectedId = action.botId ?? state.selectedId;
-        const open = action.open ?? (action.botId !== undefined || !overlayOpen(state, "settings"));
-        if (!open) {
-          // Closing only folds the accordion; the remembered section and the
-          // computer/inspector panels stay as they are.
-          return {
-            ...state,
-            selectedId,
-            overlays: {
-              ...state.overlays,
-              open: state.overlays.open.filter((kind) => kind !== "settings"),
-              botSettingsSection:
-                (action.section as BotSettingsSection | undefined) ??
-                (selectedId !== state.selectedId ? "overview" : state.overlays.botSettingsSection),
-              botSettingsExpandAccordion: false,
-            },
-          };
-        }
         return {
           ...state,
           selectedId,
-          overlays: {
-            ...state.overlays,
-            // Preserve the computer and inspector surfaces; their own controls
-            // can open bot settings. App settings are mutually exclusive.
-            open: [...state.overlays.open.filter((kind) => kind !== "settings" && kind !== "appSettings"), "settings"],
-            botSettingsSection:
-              (action.section as BotSettingsSection | undefined) ??
-              (selectedId !== state.selectedId ? "overview" : state.overlays.botSettingsSection),
-            // Mascot / bare open omits `section` → accordion stays fully collapsed.
-            // Deep links expand that row even when the panel is already open.
-            botSettingsExpandAccordion: action.section !== undefined,
-          },
+          overlays: overlaysReducer(state.overlays, action, selectedId !== state.selectedId),
         };
       }
-      const open = action.open ?? !overlayOpen(state, action.kind);
-      if (!open) {
-        return {
-          ...state,
-          overlays: { ...state.overlays, open: state.overlays.open.filter((kind) => kind !== action.kind) },
-        };
-      }
-      const excluded = OVERLAY_EXCLUDES[action.kind];
-      const openList = state.overlays.open.filter((kind) => !excluded.includes(kind));
-      return {
-        ...state,
-        overlays: {
-          ...state.overlays,
-          open: openList.includes(action.kind) ? openList : [...openList, action.kind],
-          ...(action.kind === "plugins" && action.section !== undefined
-            ? { pluginsSurface: action.section as "apps" | "mcp" }
-            : {}),
-          ...(action.kind === "appSettings" && action.section !== undefined
-            ? { appSettingsSection: action.section as AppSettingsSection }
-            : {}),
-        },
-      };
+      return { ...state, overlays: overlaysReducer(state.overlays, action) };
     }
     case "closeOverlay": {
-      return {
-        ...state,
-        overlays: {
-          ...state.overlays,
-          open: state.overlays.open.filter((kind) => kind !== action.kind),
-          // Only the settings accordion has close-time side effects.
-          ...(action.kind === "settings" ? { botSettingsExpandAccordion: false } : {}),
-        },
-      };
+      return { ...state, overlays: overlaysReducer(state.overlays, action) };
     }
     case "closeAllOverlays":
       return { ...state, overlays: { ...state.overlays, open: [] } };
@@ -2263,76 +2162,6 @@ export async function loadSnapshotBoundary<Key extends string>(
     }
   });
   return chat.status === "fulfilled";
-}
-
-/** Per-frame stream state lives in its OWN context: token frames update only
- * the components that read this hook (the chat's streaming tail), while every
- * useStore consumer — sidebar, mascots, pickers, the settled transcript —
- * keeps its render tree untouched during a stream. */
-interface StreamState {
-  /** in-flight assistant text per threadId */
-  streaming: Record<string, string>;
-  /** in-flight extended thinking per threadId (ephemeral) */
-  reasoning: Record<string, string>;
-}
-const EMPTY_STREAM: StreamState = { streaming: {}, reasoning: {} };
-const StreamContext = createContext<StreamState>(EMPTY_STREAM);
-
-type PendingDelta = { text: string; reasoning: string };
-
-/** Paint once per frame, but keep draining when a hidden tab pauses rAF.
- * Flush pending chunks at 64 Ki UTF-16 characters or a 100ms fallback timer.
- * Accumulated output remains intact and unbounded; this is not a memory cap. */
-export function createStreamDeltaBuffer(onFlush: (entries: Array<[string, PendingDelta]>) => void) {
-  const buffer = new Map<string, PendingDelta>();
-  let frame: number | null = null;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let characters = 0;
-  const cancel = () => {
-    if (frame !== null) cancelAnimationFrame(frame);
-    frame = null;
-    clearTimeout(timer);
-    timer = undefined;
-  };
-  const flush = () => {
-    cancel();
-    if (!buffer.size) return;
-    const entries = [...buffer];
-    buffer.clear();
-    characters = 0;
-    onFlush(entries);
-  };
-  return {
-    push(threadId: string, kind: string, delta: string) {
-      if (kind !== "assistant_text" && kind !== "reasoning_text") return;
-      const entry = buffer.get(threadId) ?? { text: "", reasoning: "" };
-      if (kind === "assistant_text") entry.text += delta;
-      else entry.reasoning += delta;
-      buffer.set(threadId, entry);
-      characters += delta.length;
-      if (characters >= 64 * 1024) flush();
-      else if (frame === null) {
-        frame = requestAnimationFrame(flush);
-        timer = setTimeout(flush, 100);
-      }
-    },
-    clear(threadId: string) {
-      const entry = buffer.get(threadId);
-      if (entry) characters -= entry.text.length + entry.reasoning.length;
-      buffer.delete(threadId);
-      if (!buffer.size) cancel();
-    },
-    flush,
-    dispose() {
-      cancel();
-      buffer.clear();
-      characters = 0;
-    },
-  };
-}
-
-export function useStreaming() {
-  return useContext(StreamContext);
 }
 
 const StoreContext = createContext<{

@@ -3,9 +3,10 @@
 // the durable source of truth; legacy messages-<threadId>.json files are
 // imported lazily on first read.
 import { createHash } from "node:crypto";
-import { existsSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
+import { writeFileAtomic } from "../atomic.ts";
 import { DATA_DIR, EVENTS_DIR, NATIVE_DIR } from "../config.ts";
 import * as mdb from "../message-db.ts";
 import { newId } from "../contracts.ts";
@@ -432,6 +433,7 @@ export function toggleReaction(ctx: StoreContext, threadId: string, messageId: s
 export function deleteThreadRecord(ctx: StoreContext, threadId: string) {
   ctx.threads.delete(threadId);
   mdb.deleteThread(threadId);
+  let failure: unknown = null;
   for (const file of [
     messagesFile(threadId),
     `${messagesFile(threadId)}.imported`,
@@ -440,9 +442,59 @@ export function deleteThreadRecord(ctx: StoreContext, threadId: string) {
   ]) {
     try {
       unlinkSync(file);
-    } catch {}
+    } catch (e) {
+      // A missing file is already gone; any other failure (permissions,
+      // I/O) can leave user data on disk, so deletion did not succeed.
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") failure ??= e;
+    }
   }
+  if (failure) throw failure;
   ctx.emit({ type: "thread.deleted", threadId });
+}
+
+/** Thread deletions whose owning bot/task/group record is already durably
+ * gone but whose transcript cleanup has not fully succeeded yet. Keyed by
+ * the deleted owner's id; delete paths flush their key before anything
+ * else and clear it only once every listed thread is really gone, so a
+ * crash or unlink failure can never orphan transcript files. */
+export type PendingThreadDeletions = Record<string, string[]>;
+
+const PENDING_THREAD_DELETIONS_FILE = join(DATA_DIR, "pending-thread-deletions.json");
+
+export function pendingThreadDeletions(): PendingThreadDeletions {
+  try {
+    return JSON.parse(readFileSync(PENDING_THREAD_DELETIONS_FILE, "utf8")) as PendingThreadDeletions;
+  } catch {
+    return {};
+  }
+}
+
+function savePendingThreadDeletions(record: PendingThreadDeletions): void {
+  writeFileAtomic(PENDING_THREAD_DELETIONS_FILE, `${JSON.stringify(record, null, 2)}\n`);
+}
+
+export function stagePendingThreadDeletions(key: string, threadIds: string[]): void {
+  const record = pendingThreadDeletions();
+  record[key] = [...new Set([...(record[key] ?? []), ...threadIds])];
+  savePendingThreadDeletions(record);
+}
+
+export function clearPendingThreadDeletions(key: string, threadIds: string[]): void {
+  const record = pendingThreadDeletions();
+  if (!record[key]) return;
+  const remaining = record[key]!.filter((threadId) => !threadIds.includes(threadId));
+  if (remaining.length > 0) record[key] = remaining;
+  else delete record[key];
+  savePendingThreadDeletions(record);
+}
+
+export function flushPendingThreadDeletions(ctx: StoreContext, key: string): void {
+  const threadIds = pendingThreadDeletions()[key];
+  if (!threadIds?.length) return;
+  for (const threadId of threadIds) {
+    ctx.deleteThreadRecord(threadId);
+  }
+  clearPendingThreadDeletions(key, threadIds);
 }
 
 /** The first thing the human asked in a thread — a task's natural name. */

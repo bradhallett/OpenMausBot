@@ -10,6 +10,7 @@ import {
   UNTITLED_TASK, UNTITLED_THREAD, type BotRecord, type TaskPatch, type TaskRecord,
 } from "./records.ts";
 import type { StoreContext } from "./context.ts";
+import { clearPendingThreadDeletions, flushPendingThreadDeletions, stagePendingThreadDeletions } from "./messages.ts";
 
 export function tasks(ctx: StoreContext, botId: string): TaskRecord[] {
   return ctx.bot(botId)?.tasks ?? [];
@@ -284,12 +285,13 @@ export function titleTaskFromFirstMessage(ctx: StoreContext, botId: string, text
 export function retitleTask(ctx: StoreContext, botId: string, threadId: string, machineTitle: string, title: string): TaskRecord | null {
   const task = ctx.taskByThread(botId, threadId);
   if (!task || task.title !== machineTitle) return null;
-  return renameTask(ctx, botId, threadId, threadTitleFrom(title));
+  return ctx.renameTask(botId, threadId, threadTitleFrom(title));
 }
 
 /** Delete a task and its transcript, retaining generated project files.
  * When no visible tasks remain, replace it with a fresh conversation. */
 export function deleteTask(ctx: StoreContext, botId: string, threadId: string): BotRecord | null {
+  flushPendingThreadDeletions(ctx, botId);
   const record = ctx.bot(botId);
   if (!record?.tasks) return null;
   if (!record.tasks.some((t) => t.threadId === threadId)) return null;
@@ -301,8 +303,15 @@ export function deleteTask(ctx: StoreContext, botId: string, threadId: string): 
   }
   record.unread = record.tasks.some((task) => task.unread);
   refreshBotActivity(ctx, record);
-  ctx.saveBots();
+  stagePendingThreadDeletions(botId, [threadId]);
+  try {
+    ctx.saveBots();
+  } catch (error) {
+    clearPendingThreadDeletions(botId, [threadId]);
+    throw error;
+  }
   ctx.deleteThreadRecord(threadId);
+  clearPendingThreadDeletions(botId, [threadId]);
   ctx.emit({ type: "bot", botId });
   return record;
 }
