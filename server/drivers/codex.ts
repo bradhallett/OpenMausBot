@@ -25,6 +25,7 @@ import type {
   RuntimeEvent,
   RuntimeEventListener,
   SendTurnInput,
+  SteerOutcome,
 } from "../contracts.ts";
 import { newEventId, newId } from "../contracts.ts";
 import { decodeCodexSelection, readCodexModelCatalog, STATIC_CODEX_MODELS } from "./codex-catalog.ts";
@@ -589,8 +590,10 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
     interface Turn {
       stop: () => Promise<boolean>;
       /** Fold new user input into the running native turn (turn/steer).
-       * False when this attempt has nothing steerable; the caller queues. */
-      steer?: (text: string) => Promise<boolean>;
+       * "refused" when this attempt has nothing steerable; the caller
+       * queues. "indeterminate" when delivery happened but the answer did
+       * not come back — the caller must not re-queue those words. */
+      steer?: (text: string) => Promise<SteerOutcome>;
       turnId: string;
       asks: Map<string, (behavior: "allow" | "deny" | "answer", message?: string, source?: "user" | "timeout" | "system") => void>;
     }
@@ -834,21 +837,27 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
 
       // Live steering folds new input into the running turn without ending
       // it. expectedTurnId is the protocol's precondition: a turn that moved
-      // on (or a CLI without turn/steer) answers with an RPC error, which
-      // becomes false here so the caller queues for the next turn — the
-      // child is never killed to steer.
-      const steerActiveTurn = async (text: string): Promise<boolean> => {
-        if (state.settled || abandoned || stopRequested || !codexThreadId || !codexTurnId) return false;
-        if (child.exitCode !== null || child.signalCode !== null) return false;
+      // on (or a CLI without turn/steer) answers with an explicit RPC error,
+      // which becomes "refused" here so the caller queues for the next turn —
+      // the child is never killed to steer. A timeout after delivery, a dead
+      // transport, or a turn that settles while the answer is in flight is
+      // "indeterminate": the words may already be running, so the caller must
+      // not re-queue them.
+      const steerActiveTurn = async (text: string): Promise<SteerOutcome> => {
+        if (state.settled || abandoned || stopRequested || !codexThreadId || !codexTurnId) return "refused";
+        if (child.exitCode !== null || child.signalCode !== null) return "refused";
         try {
+          const steerTimeoutMs = Math.max(1, Number(process.env.FAKE_CODEX_STEER_TIMEOUT_MS ?? 10_000) || 10_000);
           await request("turn/steer", {
             threadId: codexThreadId,
             input: [{ type: "text", text }],
             expectedTurnId: codexTurnId,
-          }, 10_000);
-          return true;
-        } catch {
-          return false;
+          }, steerTimeoutMs);
+          return "steered";
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (state.settled || message.includes("timed out")) return "indeterminate";
+          return "refused";
         }
       };
 
@@ -1573,7 +1582,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       },
       steer: async (threadId, text) => {
         const turn = active.get(threadId);
-        return turn?.steer ? await turn.steer(text) : false;
+        return turn?.steer ? await turn.steer(text) : "refused";
       },
       respondToRequest: async (threadId, requestId, decision) => {
         const turn = active.get(threadId);

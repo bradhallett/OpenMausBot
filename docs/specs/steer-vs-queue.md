@@ -34,6 +34,20 @@ Native mid-turn steering EXISTS; no child kill or restart is needed.
   codex driver already runs one app-server per turn, so `turn/steer` rides the
   live request instance that owns the running turn.
 
+### Adapter.steer contract (tri-state)
+
+`steer(threadId, text)` resolves to exactly one of:
+
+- `"steered"` — the engine accepted the input into the live turn.
+- `"refused"` — provably NOT delivered (no live turn, explicit RPC refusal,
+  failed stdin write). The caller may queue the words for a later turn
+  without risk of running them twice.
+- `"indeterminate"` — delivered, but the outcome is unknown: the RPC timed
+  out after the request was sent, the transport died, or the turn settled
+  while the answer was in flight. The caller must NOT re-queue these words;
+  the engine may already be running them, and a replay would execute them
+  twice. Callers record them once (transcript + queue settled) instead.
+
 Open items to pin down in Phase 2 (not blockers): exact `turn/steer` param
 fields beyond threadId (input items, approval/effort passthrough, turn-id
 guard), its response/event sequence (`turn/aborted` -> resumed items?), and

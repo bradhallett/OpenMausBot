@@ -155,6 +155,7 @@ import {
   type ModelSelection,
   type RequestOutcome,
   type RuntimeEvent,
+  type SteerOutcome,
   newId,
 } from "./contracts.ts";
 import { RETRY_MAX_ATTEMPTS } from "./drivers/retry.ts";
@@ -13495,7 +13496,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const replyTo = resolveHeldReplyTarget(held, resolveReplyTarget);
       const steered = await instance.adapter
         .steer(targetThreadId, promptWithReply(head.text, replyTo, cfg.profile?.name?.trim() || "User"))
-        .catch(() => false);
+        .catch((): SteerOutcome => "indeterminate");
       // The steer was awaited adapter work: re-read every ownership
       // invariant before writing anything, exactly like the 1:1 path. A
       // speaker change, a channel switch, or a settled room restores the
@@ -13505,7 +13506,13 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         ? groupSpeakers.get(targetThreadId)?.botId ??
           (targetThreadId === after.threadId ? after.busyBotId : undefined)
         : undefined;
-      if (steered && after && afterSpeakerBotId === speakerBotId) {
+      // "indeterminate" (timeout after delivery, lost transport, a settle
+      // race) never restores: the words may already be folded into the turn
+      // that was live when they were sent, and replaying them into a new
+      // turn would run them twice. Record them once — even under a new
+      // speaker — and settle the head.
+      const delivered = steered !== "refused";
+      if (after && delivered && (steered === "indeterminate" || afterSpeakerBotId === speakerBotId)) {
         const message = store.appendMessage(targetThreadId, {
           role: "user",
           kind: "text",
@@ -13525,6 +13532,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           messages: [message],
           queueIds: [head.id],
         });
+      }
+      if (steered === "indeterminate" && !after) {
+        // The room vanished while the answer was lost: settle the head so a
+        // restart cannot replay words the dead turn may already have run.
+        settleHeldChannelQueueHead(held);
+        return json(res, 404, { error: "no such room" });
       }
       restoreHeldChannelQueue(held);
       // The room may have settled while the steer was refused; a queue that
@@ -14816,7 +14829,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           // existing server-side queue records it atomically for the next turn.
           if (currentAtStart.busy) {
             const instance = runningTurnInstance(currentAtStart, threadId);
-            let steered = false;
+            let steered: SteerOutcome = "refused";
             // A live text steer has no image side channel. Keep an attachment
             // message intact for the next ordinary turn, where central image
             // admission can hand it to the provider natively.
@@ -14824,7 +14837,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             if (!carriesImages && !computerSelectionTurns.get(threadId)?.selected && instance?.adapter.capabilities.queueing && instance.adapter.steer) {
               steered = await instance.adapter
                 .steer(threadId, promptWithReply(text, replyTo, cfg.profile?.name?.trim() || "User"))
-                .catch(() => false);
+                .catch((): SteerOutcome => "indeterminate");
             }
             // steer() is awaited adapter work. The turn can settle, the task can
             // switch, or the whole bot can be deleted before its acknowledgement
@@ -14837,13 +14850,18 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             if (!store.taskByThread(bot.id, threadId)) {
               throw Object.assign(new Error("the target task no longer exists"), { status: 409 });
             }
-            if (steered) {
-              if (!current.busy) {
+            const delivered = steered !== "refused";
+            if (delivered) {
+              if (steered === "steered" && !current.busy) {
                 throw Object.assign(
                   new Error("the running turn ended before the steered message could be recorded"),
                   { status: 409 },
                 );
               }
+              // "indeterminate" falls through to the same record: the words
+              // may already be folded into a turn whose acknowledgement was
+              // lost, and handing them back for a resend could run them
+              // twice. Recording them once is the honest outcome.
               // A person steering a webhook turn is present, and auto mode may
               // follow them again. But this route is also reachable from the
               // bot's own shell on a headless server (loopback is the owner
@@ -14913,14 +14931,24 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const currentAtStart = store.projectBotForTask(bot.id, bot.threadId);
       const instance = currentAtStart?.busy ? runningTurnInstance(currentAtStart, bot.threadId) : undefined;
       const prompt = held.items.map((item) => item.prompt).join("\n\n");
-      let steered = false;
+      let steered: SteerOutcome = "refused";
       if (currentAtStart?.busy && instance?.adapter.capabilities.queueing && instance.adapter.steer) {
-        steered = await instance.adapter.steer(bot.threadId, prompt).catch(() => false);
+        steered = await instance.adapter
+          .steer(bot.threadId, prompt)
+          .catch((): SteerOutcome => "indeterminate");
       }
       // The steer was awaited adapter work: re-read every ownership
       // invariant before writing anything, exactly like the live-send path.
       const current = store.projectBotForTask(bot.id, bot.threadId);
-      if (steered && current?.busy && store.taskByThread(bot.id, bot.threadId)) {
+      // "indeterminate" never restores: the words may already be folded into
+      // the turn that was live when they were sent, and replaying them into
+      // a fresh follow-up turn would run them twice. Record them whenever
+      // the destination still exists, busy or not.
+      if (
+        (steered === "steered" && current?.busy ||
+          steered === "indeterminate" && current) &&
+        store.taskByThread(bot.id, bot.threadId)
+      ) {
         if (auth.kind === "session" || DESKTOP_MANAGED) clearUnattended(bot.threadId);
         const messages = held.items.map((item) => store.appendMessage(bot.threadId, {
           role: "user",
@@ -14935,6 +14963,15 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         const queueIds = held.items.map((item) => item.messageId);
         settleHeldSteeredQueue(held);
         return json(res, 200, { ok: true, steered: true, threadId: bot.threadId, messages, queueIds });
+      }
+      if (steered === "indeterminate") {
+        // No destination is left: settle so a restart cannot replay words a
+        // dead turn may already have run.
+        settleHeldSteeredQueue(held);
+        if (!store.taskByThread(bot.id, bot.threadId)) {
+          throw Object.assign(new Error("the target task no longer exists"), { status: 409 });
+        }
+        throw Object.assign(new Error("no such bot"), { status: 404 });
       }
       restoreHeldSteeredQueue(held);
       // The turn may have settled while the steer was refused; a queue that

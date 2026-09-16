@@ -34,6 +34,8 @@
 //   FAKE_CODEX_RESTORED_USAGE report 100/50/10 tokens already used before turn/start, as a resumed thread can
 //   FAKE_CODEX_STEER_ERROR  JSON-RPC error object to reject turn/steer (queue fallback)
 //   FAKE_CODEX_STEER_ERROR_FILE  gate file path: reject turn/steer only while the file exists
+//   FAKE_CODEX_STEER_HANG  accept turn/steer and never answer (delivery happened, the
+//                          reply is lost — the driver must report indeterminate)
 //   FAKE_CODEX_INTERRUPT_SILENT  ignore turn/interrupt entirely (wedged server; driver must escalate)
 //   FAKE_CODEX_INTERRUPT_GRACE_MS  driver-side grace before escalating an interrupt (tests)
 //
@@ -305,6 +307,7 @@ process.stdin.on("data", (chunk) => {
           refused("active turn is not steerable");
           break;
         }
+        if (process.env.FAKE_CODEX_STEER_HANG) break; // accepted, never answered
         if (msg.params?.expectedTurnId !== nativeTurnId) {
           refused("active turn is not steerable");
           break;
