@@ -1688,15 +1688,21 @@ class Session(
      * [offline], cancellation is not an error and propagates, and anything
      * else is reported as the action error and also yields [offline]. Each
      * method differs only in its endpoint and the frame that commits its
-     * result, so no Bot-versus-Room copy can drift again.
+     * result, so no Bot-versus-Room copy can drift again. Internal rather
+     * than private only so SessionTaskCrudTest can pin the cancellation
+     * contract directly.
      */
-    private suspend fun <T> mutateTask(offline: T, mutation: suspend (CompanionClient) -> T): T {
+    internal suspend fun <T> mutateTask(offline: T, mutation: suspend (CompanionClient) -> T): T {
         val activeClient = client ?: return offline
         return try {
             mutation(activeClient)
         } catch (error: Throwable) {
             if (error is CancellationException) throw error
             _actionError.value = error.message
+            // Cancellation that lands while the failure is being reported
+            // still wins: a cancelled caller throws instead of observing the
+            // offline value.
+            currentCoroutineContext().ensureActive()
             offline
         }
     }

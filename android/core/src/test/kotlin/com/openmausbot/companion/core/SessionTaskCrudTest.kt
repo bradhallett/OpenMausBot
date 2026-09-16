@@ -91,6 +91,32 @@ class SessionTaskCrudTest {
         assertEquals("task-2", session.state.value.rooms.single().threadId)
     }
 
+    @Test
+    fun cancellationAfterTheErrorWriteStillThrowsRatherThanYieldingTheFallback() = runTest {
+        val session = session()
+        val caller = Job()
+        val callerScope = CoroutineScope(coroutineContext + caller)
+
+        // The failure is real and reported, but the caller's job is cancelled
+        // mid-mutation with no suspension between the two — exactly the
+        // window mutateTask must close. The await alone cannot tell the two
+        // apart (a cancelled async discards a normal result), so the test
+        // also proves the policy itself threw instead of returning offline.
+        // Null until mutateTask returns: the policy must throw, so this must
+        // still be null after the cancellation surfaces.
+        var offlineValueObserved: Boolean? = null
+        val deferred = callerScope.async(start = CoroutineStart.UNDISPATCHED) {
+            offlineValueObserved = session.mutateTask(offline = false) {
+                    caller.cancel()
+                    throw IllegalStateException("late failure")
+            }
+        }
+
+        assertFailsWith<CancellationException> { deferred.await() }
+        assertNull(offlineValueObserved)
+        assertEquals("late failure", session.actionError)
+    }
+
     private suspend fun TestScope.session(): Session = session { Fleet(emptyList(), emptyList()) }
 
     private suspend fun TestScope.session(
