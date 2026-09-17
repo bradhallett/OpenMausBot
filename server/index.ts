@@ -11,7 +11,6 @@ import { z } from "zod";
 import { SharedComputers, sharedComputerRegistration } from "./shared-computers.ts";
 import { SharedComputerControl } from "./shared-computer-control.ts";
 import { RoomHandoffs } from "./room-handoffs.ts";
-import { BOT_PROFILE_LIMITS } from "../shared/bot-profile.ts";
 import { CLOUD_COMPUTER_BUSY_ERROR } from "../shared/computer-contention.ts";
 import {
   approvalModeFor,
@@ -25,13 +24,11 @@ import {
   requireBrowserCleanupAcknowledged,
   type BrowserCleanupWireRequest,
 } from "./browser-lifecycle-cleanup.ts";
-import * as checkpoints from "./checkpoints.ts";
 import { appendDecision, flushDecisionLog } from "./decision-log.ts";
 import { validateBotCwd } from "./bot-cwd.ts";
 import {
   cleanupStaleAttachmentPartials,
 } from "./attachments.ts";
-import { parseBotProfilePatch } from "./bot-profile.ts";
 import * as box from "./box.ts";
 import { computerBackendFor } from "./computer-backend.ts";
 import { TeamComputers, teamComputerOwner } from "./team-computers.ts";
@@ -107,40 +104,15 @@ import {
   type Message,
 } from "./store.ts";
 import type { TurnOwner } from "./turn-resources.ts";
-import { isMemoryTopicName } from "./workspace.ts";
-import { readMemoryTopic } from "./workspace.ts";
-import { MEMORY_INDEX, MemoryStoreError, memoryCapacity, memoryOverview, openMemoryLocation, readMemoryDoc } from "./memory-store.ts";
-import {
-  flushAllMemoryJournals,
-  flushMemoryJournal,
-  journalMemoryDelete,
-  journalMemoryWrite,
-  readMemoryJournal,
-  revertMemoryChange,
-  type MemoryJournalEntry,
-} from "./memory-journal.ts";
-import {
-  readSectionContext,
-  readSections,
-  sectionContextKey,
-  sectionContextLabel,
-  writeSectionContext,
-  SECTION_CONTEXT_MAX_BYTES,
-} from "./section-context.ts";
+import { flushAllMemoryJournals } from "./memory-journal.ts";
+import { readSections } from "./section-context.ts";
 import {
   applyStagedSkillWrite,
   getStagedSkillWrite,
-  installSkill,
-  listSkills,
   listStagedSkillWrites,
-  readSkillFile,
   rejectStagedSkillWrite,
-  removeSkill,
-  setSkillEnabled,
 } from "./skills.ts";
-import { fetchSkillFromSource } from "./skill-fetch.ts";
 import type { SkillRequestCardData } from "../shared/skill-request.ts";
-import { readSoulDrift, soulFile, writeSoulMirror } from "./bot-folder.ts";
 import { discoverExistingPerBotLocalVms, shouldArmLocalVmIdle } from "./local-vm-inventory.ts";
 import { redactSecretsInText } from "./redact.ts";
 import * as vps from "./vps-computer.ts";
@@ -157,8 +129,7 @@ import { RoutineRequestService } from "./routine-requests.ts";
 import { ProfileRequestService } from "./profile-requests.ts";
 import { TeamSetupError, TeamSetupRequestService } from "./team-setup-requests.ts";
 import type { TeamSetupRequest } from "../shared/team-setup.ts";
-import { profileRevision, profileSnapshot } from "./profile-revision.ts";
-import { flushAllProfileHistory, flushProfileHistory, readHistory, recordProfileChange } from "./profile-versions.ts";
+import { flushAllProfileHistory } from "./profile-versions.ts";
 import { listenWebhookIngress, type WebhookIngress } from "./webhook-ingress.ts";
 import { WebhookManager } from "./webhooks.ts";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
@@ -221,6 +192,8 @@ import { createBotRoutes } from "./routes/bots.ts";
 import { createBotManagementRoutes } from "./routes/bot-management.ts";
 import { createBotThreadOpsRoutes } from "./routes/bot-thread-ops.ts";
 import { createBotTasksRoutes } from "./routes/bot-tasks.ts";
+import { createBotProfileRoutes } from "./routes/bot-profile.ts";
+import { createBotMemoryRoutes } from "./routes/bot-memory.ts";
 import { createAuthSessionRoutes } from "./routes/auth-session.ts";
 import { createComputersRoutes } from "./routes/computers.ts";
 import { createSystemRoutes } from "./routes/system.ts";
@@ -254,7 +227,6 @@ import {
   directTurnBots,
   directTurnDispatchClaims,
   hasDirectDispatch,
-  requestedTaskBot,
   threadBusy,
   turnComputerResources,
   turnResourceOwners,
@@ -3179,27 +3151,6 @@ function serveStatic(res: ServerResponse, path: string): boolean {
   }
 }
 
-/** A store refusal is a client error with a status of its own (400 path,
- * 409 conflict, 413 too large); a 409 also carries what is on disk now so
- * the editor can show the bot's version instead of guessing. Anything else
- * is a real failure and goes to the handler's catch-all. */
-function replyMemoryError(res: ServerResponse, error: unknown) {
-  if (!(error instanceof MemoryStoreError)) throw error;
-  if (error.code === "conflict") {
-    return json(res, error.status, { error: error.message, code: error.code, currentHash: error.currentHash, current: error.current });
-  }
-  return json(res, error.status, { error: error.message, code: error.code });
-}
-
-/** The journal row as the panel shows it: the full prior text stays on
- * the server (a revert needs it there, the list does not), and the thread
- * id becomes the chat title people recognise. */
-function journalEntryForClient(botId: string, entry: MemoryJournalEntry) {
-  const { before: _before, ...visible } = entry;
-  const threadTitle = entry.threadId ? store.taskByThread(botId, entry.threadId)?.title : undefined;
-  return threadTitle ? { ...visible, threadTitle } : visible;
-}
-
 // Loopback-only enforcement: the harness runs on 127.0.0.1 but accepts
 // requests from any loopback connection and any web page that DNS-rebinds
 // onto it. Reject non-loopback Hosts outright (defeats rebinding) and
@@ -3417,6 +3368,16 @@ const handleBotTasks = createBotTasksRoutes({
   cancelTeamSetupResumesForThread,
   settleDirectFollowup,
   directTurnGenerationByThread,
+});
+const handleBotProfile = createBotProfileRoutes({
+  broadcast,
+  wireBot,
+  previewSystemPrompt,
+  botOverview,
+  stagedSkillListing,
+});
+const handleBotMemory = createBotMemoryRoutes({
+  checkpointRestoreLeases,
 });
 const handleAuthSession = createAuthSessionRoutes({
   sessions,
@@ -3860,421 +3821,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     if (await handleBots(req, res, rctx)) return;
     if (await handleBotManagement(req, res, rctx)) return;
 
-    // ── bot skills: imported Agent Skills (SKILL.md) ────────────────────
-    // Import lands DISABLED; the UI shows SKILL.md + scan warnings and a
-    // person enables after reading. See server/skills.ts for the policy.
-    m = path.match(/^\/api\/bots\/([\w-]+)\/skills$/);
-    if (m && method === "GET") {
-      if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
-      return json(res, 200, {
-        skills: listSkills(m[1]),
-        staged: listStagedSkillWrites(m[1]).map(stagedSkillListing),
-      });
-    }
-    if (m && method === "POST") {
-      if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
-      const parsed = z.object({ source: z.string().min(1).max(2000) }).safeParse(await readBody(req));
-      if (!parsed.success) return json(res, 400, { error: "source must be a GitHub URL or owner/repo" });
-      const fetched = await fetchSkillFromSource(parsed.data.source);
-      if ("error" in fetched) return json(res, 422, { error: fetched.error });
-      const results = fetched.skills.map((skill) => installSkill(m![1]!, skill.source, skill.files));
-      const installed = results.filter((entry): entry is Exclude<typeof entry, { error: string }> => !("error" in entry));
-      const errors = results.flatMap((entry) => ("error" in entry ? [entry.error] : []));
-      if (!installed.length) return json(res, 422, { error: errors.join("; ") || "nothing importable found" });
-      return json(res, 201, { installed, errors });
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/skills\/([a-z0-9-]+)$/);
-    if (m && method === "GET") {
-      const text = readSkillFile(m[1]!, m[2]!);
-      if (text === null) return json(res, 404, { error: "no such skill" });
-      return json(res, 200, { text });
-    }
-    if (m && method === "PATCH") {
-      const parsed = z.object({ enabled: z.boolean() }).safeParse(await readBody(req));
-      if (!parsed.success) return json(res, 400, { error: "enabled must be true or false" });
-      const result = setSkillEnabled(m[1]!, m[2]!, parsed.data.enabled);
-      if ("error" in result) return json(res, 404, { error: result.error });
-      return json(res, 200, { skill: result });
-    }
-    if (m && method === "DELETE") {
-      const result = removeSkill(m[1]!, m[2]!);
-      if ("error" in result) return json(res, 404, { error: result.error });
-      return json(res, 200, { ok: true });
-    }
+    if (await handleBotProfile(req, res, rctx)) return;
 
-    // ── section context: a user-owned team brief ────────────────────────
-    // Bots receive this in their system context, but no agent tool can write
-    // it. That keeps one bot from silently changing every teammate's future
-    // turns. The section query parameter is required even for General (""),
-    // so a malformed client cannot accidentally read or replace that brief.
-    if (path === "/api/section-context" && (method === "GET" || method === "PUT")) {
-      if (!url.searchParams.has("section")) return json(res, 400, { error: "section is required" });
-      const requested = url.searchParams.get("section") ?? "";
-      const section = sectionContextKey(requested);
-      if (section.length > 60) return json(res, 400, { error: "section must be at most 60 characters" });
-      const exists =
-        section === "" ||
-        store.sections.includes(section) ||
-        store.bots.some((bot) => !bot.hidden && sectionKey(bot.section) === section) ||
-        store.groups.some((group) => sectionKey(group.section) === section);
-      if (!exists) return json(res, 404, { error: "no such team" });
+    if (await handleBotMemory(req, res, rctx)) return;
 
-      if (method === "GET") {
-        const context = readSectionContext(section);
-        return json(res, 200, {
-          section,
-          label: sectionContextLabel(section),
-          text: context?.text ?? "",
-          updatedAt: context?.updatedAt ?? null,
-          maxBytes: SECTION_CONTEXT_MAX_BYTES,
-        });
-      }
-
-      const parsed = z.object({ text: z.string() }).safeParse(await readBody(req));
-      if (!parsed.success) return json(res, 400, { error: "text must be a string" });
-      if (Buffer.byteLength(parsed.data.text, "utf8") > SECTION_CONTEXT_MAX_BYTES) {
-        return json(res, 400, { error: `section context is capped at ${SECTION_CONTEXT_MAX_BYTES / 1000}KB` });
-      }
-      const context = writeSectionContext(section, parsed.data.text);
-      return json(res, 200, {
-        ok: true,
-        section,
-        label: sectionContextLabel(section),
-        text: context?.text ?? "",
-        updatedAt: context?.updatedAt ?? null,
-        maxBytes: SECTION_CONTEXT_MAX_BYTES,
-      });
-    }
-
-    m = path.match(/^\/api\/bots\/([\w-]+)\/soul$/);
-    if (m && method === "GET") {
-      const bot = store.bot(m[1]);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      const soul = bot.soul ?? "";
-      const drift = readSoulDrift(bot.id, soul, bot.soulHash ?? "");
-      return json(res, 200, {
-        soul,
-        revision: profileRevision(bot),
-        bytes: Buffer.byteLength(soul, "utf8"),
-        limit: BOT_PROFILE_LIMITS.soul,
-        file: soulFile(bot.id),
-        drift: drift.drift,
-        ...(drift.drift ? { fileText: drift.fileText } : {}),
-      });
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/soul\/apply-file$/);
-    if (m && method === "POST") {
-      const body = await readBody(req);
-      const bot = store.bot(m[1]);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      if (body?.expectedRevision !== profileRevision(bot)) {
-        return json(res, 409, { error: "This bot's profile changed; reload and look again" });
-      }
-      const drift = readSoulDrift(bot.id, bot.soul ?? "", bot.soulHash ?? "");
-      if (!drift.drift) return json(res, 409, { error: "SOUL.md matches the record; nothing to apply" });
-      if (typeof body?.fileText !== "string" || body.fileText !== drift.fileText) {
-        return json(res, 409, { error: "SOUL.md changed since you read it; reload and look again" });
-      }
-      // The file is user input like any other: same cap, same error copy.
-      const parsed = parseBotProfilePatch({ soul: drift.fileText });
-      if (!parsed.ok) return json(res, 400, { error: parsed.error });
-      // store.bot() returns the live record and setSoul mutates it in place,
-      // so the snapshot must be taken before the call — after, `bot` and
-      // `updated` are the same object and the diff would always be empty.
-      const beforeProfile = profileSnapshot(bot);
-      const updated = store.setSoul(bot.id, parsed.patch.soul ?? "");
-      if (!updated) return json(res, 404, { error: "no such bot" });
-      recordProfileChange(bot.id, "file", "ui", beforeProfile, profileSnapshot(updated));
-      const visible = wireBot(updated);
-      broadcast({ kind: "bot", bot: visible });
-      return json(res, 200, { bot: visible });
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/soul\/discard-file$/);
-    if (m && method === "POST") {
-      const body = await readBody(req);
-      const bot = store.bot(m[1]);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      if (body?.expectedRevision !== profileRevision(bot)) {
-        return json(res, 409, { error: "This bot's profile changed; reload and look again" });
-      }
-      const drift = readSoulDrift(bot.id, bot.soul ?? "", bot.soulHash ?? "");
-      if (!drift.drift || typeof body?.fileText !== "string" || body.fileText !== drift.fileText) {
-        return json(res, 409, { error: "SOUL.md changed since you read it; reload and look again" });
-      }
-      writeSoulMirror(bot.id, bot.soul ?? "");
-      const updated = store.patchBot(bot.id, { soulDrift: false }) ?? bot;
-      const visible = wireBot(updated);
-      broadcast({ kind: "bot", bot: visible });
-      return json(res, 200, { bot: visible });
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/system-prompt$/);
-    if (m && method === "GET") {
-      const bot = store.bot(m[1]);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      return json(res, 200, previewSystemPrompt(bot));
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/overview$/);
-    if (m && method === "GET") {
-      const bot = store.bot(m[1]);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      return json(res, 200, await botOverview(bot));
-    }
-
-    m = path.match(/^\/api\/bots\/([\w-]+)\/history$/);
-    if (m && method === "GET") {
-      if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
-      // Writes queue in profile-versions.ts and land asynchronously; a client
-      // reading history right after causing a change must see its own row.
-      await flushProfileHistory(m[1]);
-      const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit")) || 100));
-      // A soul row's full before/after can be the entire standing
-      // instructions (up to 24,000 bytes) — fine for a rollback, which
-      // reads the file server-side, but not for a client that only asked
-      // to see what changed. Strip the bodies (keep the byte-count
-      // summary) unless the caller explicitly wants them.
-      const full = url.searchParams.get("full") === "1";
-      const rows = readHistory(m[1], limit).map((row) => {
-        if (full || row.field !== "soul") return row;
-        const rest: typeof row = { ...row };
-        delete rest.before;
-        delete rest.after;
-        return rest;
-      });
-      const bot = store.bot(m[1]);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      return json(res, 200, { rows, revision: profileRevision(bot) });
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/history\/rollback$/);
-    if (m && method === "POST") {
-      const body = await readBody(req);
-      // Same flush as the GET route: the row this rollback targets may have
-      // been recorded moments ago and not yet reached disk.
-      await flushProfileHistory(m[1]);
-      const bot = store.bot(m[1]);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      if (body?.expectedRevision !== profileRevision(bot)) {
-        return json(res, 409, { error: "This bot's profile changed; reload history before undoing" });
-      }
-      const row = typeof body?.id === "string"
-        ? readHistory(bot.id, Number.MAX_SAFE_INTEGER).find((r) => r.id === body.id && r.field === "soul")
-        : undefined;
-      if (!row || row.field !== "soul" || typeof row.before !== "string") {
-        return json(res, 400, { error: "rollback is available for SOUL.md entries only" });
-      }
-      if (!row.canRestore) {
-        return json(res, 400, { error: row.restoreUnavailableReason });
-      }
-      const parsed = parseBotProfilePatch({ soul: row.before });
-      if (!parsed.ok) return json(res, 400, { error: parsed.error });
-      const before = profileSnapshot(bot);
-      const updated = store.setSoul(bot.id, parsed.patch.soul ?? "");
-      if (!updated) return json(res, 404, { error: "no such bot" });
-      recordProfileChange(bot.id, "user", "rollback", before, profileSnapshot(updated));
-      const visible = wireBot(updated);
-      broadcast({ kind: "bot", bot: visible });
-      return json(res, 200, { bot: visible });
-    }
-
-    // ── bot memory: MEMORY.md + memory/ topic and log files ──────────────
-    // The files already belong to the person (plain markdown in the bot's
-    // workspace). server/memory-store.ts decides which paths can be reached
-    // and refuses a save whose expectedHash no longer matches the file;
-    // server/memory-journal.ts records every change made here so it can be
-    // read back and reverted. Reads never create the workspace — a bot that
-    // has not run yet simply has nothing to show. Admin scope by default
-    // (request-auth.ts), like the profile routes above.
-    m = path.match(/^\/api\/bots\/([\w-]+)\/memory$/);
-    if (m && method === "GET") {
-      if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
-      try {
-        const overview = memoryOverview(m[1]);
-        // `text` and `truncated` ride along one release for clients of the
-        // old whole-file shape; the panel reads the file through /memory/file
-        return json(res, 200, { ...overview, text: readMemoryDoc(m[1], MEMORY_INDEX).text, truncated: overview.index.truncated });
-      } catch (error) {
-        return replyMemoryError(res, error);
-      }
-    }
-    if (m && method === "PUT") {
-      // The pre-panel whole-file write, kept one release: no hash check, so
-      // it can still overwrite a note the bot just wrote — journaled as the
-      // person's so at least the journal can undo it.
-      if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
-      const parsed = z.object({ text: z.string() }).safeParse(await readBody(req));
-      if (!parsed.success) return json(res, 400, { error: "text must be a string" });
-      try {
-        const { doc } = journalMemoryWrite(m[1], MEMORY_INDEX, parsed.data.text, { actor: "person", via: "api" });
-        return json(res, 200, { ok: true, hash: doc.hash, truncated: memoryCapacity(doc.text).truncated });
-      } catch (error) {
-        // the old route answered 400 for an oversized body; keep that for
-        // its callers while the new route says 413
-        if (error instanceof MemoryStoreError && error.code === "too-large") return json(res, 400, { error: error.message });
-        return replyMemoryError(res, error);
-      }
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/memory\/file$/);
-    if (m && method === "GET") {
-      if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
-      try {
-        return json(res, 200, readMemoryDoc(m[1], url.searchParams.get("path") ?? MEMORY_INDEX));
-      } catch (error) {
-        return replyMemoryError(res, error);
-      }
-    }
-    if (m && method === "PUT") {
-      if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
-      const parsed = z
-        .object({ path: z.string().default(MEMORY_INDEX), text: z.string(), expectedHash: z.string().optional() })
-        .safeParse(await readBody(req));
-      if (!parsed.success) return json(res, 400, { error: "text must be a string; path and expectedHash are optional strings" });
-      try {
-        const { doc, entry } = journalMemoryWrite(m[1], parsed.data.path, parsed.data.text, {
-          actor: "person",
-          via: "ui",
-          expectedHash: parsed.data.expectedHash,
-        });
-        return json(res, 200, { ok: true, ...doc, entry: entry ? journalEntryForClient(m[1], entry) : null, overview: memoryOverview(m[1]) });
-      } catch (error) {
-        return replyMemoryError(res, error);
-      }
-    }
-    if (m && method === "DELETE") {
-      if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
-      const file = url.searchParams.get("path") ?? "";
-      try {
-        const entry = journalMemoryDelete(m[1], file, { actor: "person", via: "ui" });
-        return json(res, 200, { ok: true, path: file, entry: entry ? journalEntryForClient(m[1], entry) : null, overview: memoryOverview(m[1]) });
-      } catch (error) {
-        return replyMemoryError(res, error);
-      }
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/memory\/journal$/);
-    if (m && method === "GET") {
-      if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
-      // the row a save queued a moment ago may not have reached disk yet
-      await flushMemoryJournal(m[1]);
-      const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit") ?? 50) || 50));
-      const botId = m[1];
-      return json(res, 200, { entries: readMemoryJournal(botId, limit).map((entry) => journalEntryForClient(botId, entry)) });
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/memory\/journal\/([\w-]+)\/revert$/);
-    if (m && method === "POST") {
-      if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
-      await flushMemoryJournal(m[1]);
-      const result = revertMemoryChange(m[1], m[2]);
-      if (!result.ok) return json(res, result.status, { error: result.error });
-      return json(res, 200, { ok: true, ...result.doc, entry: result.entry ? journalEntryForClient(m[1], result.entry) : null, overview: memoryOverview(m[1]) });
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/memory\/open$/);
-    if (m && method === "POST") {
-      if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
-      const parsed = z.object({ target: z.enum(["obsidian", "folder"]) }).safeParse(await readBody(req));
-      if (!parsed.success) return json(res, 400, { error: "target must be obsidian or folder" });
-      // The folder is on this machine's disk; opening it only makes sense
-      // from this machine. A paired phone or a remote browser gets the path
-      // to open by hand instead.
-      const workspacePath = memoryOverview(m[1]).workspacePath;
-      if (auth.kind !== "loopback") {
-        return json(res, 403, { error: `This only works on the computer running OpenMausBot. The memory folder there is ${workspacePath}`, workspacePath });
-      }
-      const opened = await openMemoryLocation(m[1], parsed.data.target);
-      if (!opened.ok) return json(res, 500, { error: opened.error, workspacePath: opened.workspacePath });
-      return json(res, 200, opened);
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/memory\/topics\/([^/]+)$/);
-    if (m && method === "GET") {
-      if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
-      // Decode before validating: a UI-sent name arrives percent-encoded
-      // ("my notes.md" → "my%20notes.md"), and an encoded traversal
-      // ("..%2F..") must be judged by what it decodes TO, not slip through
-      // as an opaque token. The name gate then rejects anything that is not
-      // a single plain-markdown path segment.
-      let name: string;
-      try {
-        name = decodeURIComponent(m[2]);
-      } catch {
-        return json(res, 400, { error: "invalid topic name" });
-      }
-      if (!isMemoryTopicName(name)) return json(res, 400, { error: "invalid topic name" });
-      const text = readMemoryTopic(m[1], name);
-      if (text === null) return json(res, 404, { error: "no such topic file" });
-      return json(res, 200, { name, text });
-    }
-
-    // ── workspace checkpoints: per-turn shadow-git snapshots ────────────
-    // The list endpoint is the source of truth (turns store nothing), and
-    // `enabled` tells the UI whether snapshots can happen here at all —
-    // false for refused folders (home, Desktop…), a missing git, or a bot
-    // whose checkpoints failed earlier this session.
-    m = path.match(/^\/api\/bots\/([\w-]+)\/checkpoints$/);
-    if (m && method === "GET") {
-      if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
-      const cwd = url.searchParams.get("cwd") ?? "";
-      if (!cwd.trim()) return json(res, 400, { error: "cwd query parameter required" });
-      return json(res, 200, {
-        checkpoints: await checkpoints.listCheckpoints(m[1]!, cwd),
-        enabled: await checkpoints.checkpointsEnabled(m[1]!, cwd),
-      });
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/checkpoints\/restore$/);
-    if (m && method === "POST") {
-      const bot = store.bot(m[1]);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      const parsed = z
-        .object({ cwd: z.string().min(1), hash: z.string().regex(/^[0-9a-f]{40}$/) })
-        .safeParse(await readBody(req));
-      if (!parsed.success) {
-        return json(res, 400, { error: "cwd (absolute path) and hash (full 40-character checkpoint hash) required" });
-      }
-      // Claim synchronously with the busy check. startTurn checks the same
-      // lease before reserving the bot, so no turn can enter during the
-      // awaited Git operation.
-      if (bot.busy) return json(res, 409, { error: "the bot is working — stop the turn before restoring files" });
-      if (checkpointRestoreLeases.has(bot.id)) {
-        return json(res, 409, { error: "this bot's project files are already being restored" });
-      }
-      checkpointRestoreLeases.add(bot.id);
-      let result: checkpoints.RestoreResult;
-      try {
-        result = await checkpoints.restore(bot.id, parsed.data.cwd, parsed.data.hash);
-      } finally {
-        checkpointRestoreLeases.delete(bot.id);
-      }
-      if (!result.ok) return json(res, 400, { error: result.error });
-      return json(res, 200, { ok: true });
-    }
-
-    // onboarding/ask cards persist their answered/dismissed state
-    m = path.match(/^\/api\/bots\/([\w-]+)\/cards\/([\w-]+)$/);
-    if (m && method === "PATCH") {
-      const body = await readBody(req);
-      if (!body || typeof body !== "object" || Array.isArray(body)) {
-        return json(res, 400, { error: "body must be a JSON object" });
-      }
-      const bot = requestedTaskBot(m[1], body.threadId);
-      const existing = store.messagesFor(bot.threadId).find((msg) => msg.id === m![2]);
-      if (!existing?.card) return json(res, 404, { error: "no such card" });
-      if (existing.card.requestId) {
-        return json(res, 409, { error: "request cards must be answered through the approval endpoint" });
-      }
-      if (Object.keys(body).some((key) => key !== "answered" && key !== "dismissed" && key !== "threadId")) {
-        return json(res, 400, { error: "only answered and dismissed may be changed" });
-      }
-      if (body.answered !== undefined && typeof body.answered !== "string") {
-        return json(res, 400, { error: "answered must be a string" });
-      }
-      if (body.dismissed !== undefined && typeof body.dismissed !== "boolean") {
-        return json(res, 400, { error: "dismissed must be true or false" });
-      }
-      const patched = store.patchMessage(bot.threadId, m[2], {
-        card: {
-          ...existing.card,
-          ...(body.answered !== undefined ? { answered: body.answered } : {}),
-          ...(body.dismissed !== undefined ? { dismissed: body.dismissed } : {}),
-        },
-      });
-      return json(res, 200, { message: patched });
-    }
     if (await handleBotThreadOps(req, res, rctx)) return;
 
     if (await handleBotTasks(req, res, rctx)) return;
