@@ -15,7 +15,7 @@ export const EMPTY_STREAM: StreamState = { streaming: {}, reasoning: {} };
 
 export const StreamContext = createContext<StreamState>(EMPTY_STREAM);
 
-type PendingDelta = { text: string; reasoning: string };
+export type PendingDelta = { text: string; reasoning: string };
 
 /** Paint once per frame, but keep draining when a hidden tab pauses rAF.
  * Flush pending chunks at 64 Ki UTF-16 characters or a 100ms fallback timer.
@@ -66,6 +66,29 @@ export function createStreamDeltaBuffer(onFlush: (entries: Array<[string, Pendin
       characters = 0;
     },
   };
+}
+
+/** Merge one batched frame of stream deltas into the stream state. Pure:
+ * StoreProvider calls this inside setStream's updater so token frames never
+ * touch the main tree. */
+export function mergeStreamDeltas(prev: StreamState, entries: Array<[string, PendingDelta]>) {
+  const streaming = { ...prev.streaming };
+  const reasoning = { ...prev.reasoning };
+  for (const [threadId, d] of entries) {
+    if (d.text) streaming[threadId] = (streaming[threadId] ?? "") + d.text;
+    if (d.reasoning) reasoning[threadId] = (reasoning[threadId] ?? "") + d.reasoning;
+  }
+  return { streaming, reasoning };
+}
+
+/** Drop one thread from the stream state — a settled message or a rewind.
+ * Pure counterpart of the ghost-tail cleanup in StoreProvider: returning
+ * prev unchanged keeps never-streamed consumers from re-rendering. */
+export function clearThreadStream(prev: StreamState, threadId: string) {
+  if (!(threadId in prev.streaming) && !(threadId in prev.reasoning)) return prev;
+  const { [threadId]: _s, ...streaming } = prev.streaming;
+  const { [threadId]: _r, ...reasoning } = prev.reasoning;
+  return { streaming, reasoning };
 }
 
 export function useStreaming() {

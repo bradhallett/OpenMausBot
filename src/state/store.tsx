@@ -5,21 +5,21 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import type { ServerFrame } from "../../shared/wire";
-import { approvalModeFor } from "../../shared/approval-mode";
 import { reviewedSkillSha256, skillRequestBehavior } from "../../shared/skill-request";
 import { answerResponse, dismissResponse } from "@/lib/card-answer";
 import { currentCall } from "@/lib/call";
 import { showNotification } from "@/lib/notify";
 import { speaker } from "@/lib/tts";
 import { t } from "@/lib/i18n";
-import { createBotPatchQueue } from "./bot-patch-queue";
+import { createBotPatchQueue, type BotPatchQueue } from "./bot-patch-queue";
 import { openLiveEvents } from "@/lib/live-events";
-import { createStreamDeltaBuffer, EMPTY_STREAM, StreamContext, type StreamState } from "./stream-context";
-import { configStatusFromFrame, currentTaskBot, taskPatchFields } from "./model";
-import type { Bot, BotAnnouncement, ConfigStatusFrame, Group, Message, OptionCardData, TaskUpdatePatch } from "./model";
+import { clearThreadStream, createStreamDeltaBuffer, EMPTY_STREAM, mergeStreamDeltas, StreamContext, type StreamState } from "./stream-context";
+import { configStatusFromFrame, currentTaskBot } from "./model";
+import type { Bot, BotAnnouncement, ConfigStatusFrame, Group, Message, OptionCardData } from "./model";
 import { initialState, openNotificationTarget, openOnboardingCard, pinBotThreadAction, reducer, visibleNotificationThread } from "./reducer";
 import type { Action, AppState } from "./reducer";
 import { api, createBotWithRole, loadSnapshotBoundary, normalizeSnapshotFailure, persistBotUpdate, persistTaskApproval, requestConfirmedBotDeletion } from "./api";
+import { createTaskWriteQueue } from "./task-writes";
 
 // Wave 4 split: the overlays slice and the stream context now live in their
 // own modules. Wave 5 moves the domain model to model.ts and the reducer
@@ -49,11 +49,6 @@ const StoreContext = createContext<{
 } | null>(null);
 
 export function StoreProvider({ children }: { children: ReactNode }) {
-  const taskWrites = useRef(new Map<string, { botId: string; updatesDefault: boolean; promise: Promise<BotAnnouncement>; execution: Promise<unknown>; patch: TaskUpdatePatch }>()).current;
-  const withTaskWrites = (bot: BotAnnouncement): BotAnnouncement => ({
-    ...bot,
-    tasks: bot.tasks?.map((task) => ({ ...task, ...taskPatchFields(taskWrites.get(task.threadId)?.patch ?? {}) })),
-  });
   const [state, rawDispatch] = useReducer(reducer, initialState);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -62,15 +57,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // only StreamContext consumers
   const [stream, setStream] = useState<StreamState>(EMPTY_STREAM);
   const deltaBuffer = useMemo(() => createStreamDeltaBuffer((entries) => {
-    setStream((prev) => {
-      const streaming = { ...prev.streaming };
-      const reasoning = { ...prev.reasoning };
-      for (const [threadId, d] of entries) {
-        if (d.text) streaming[threadId] = (streaming[threadId] ?? "") + d.text;
-        if (d.reasoning) reasoning[threadId] = (reasoning[threadId] ?? "") + d.reasoning;
-      }
-      return { streaming, reasoning };
-    });
+    setStream((prev) => mergeStreamDeltas(prev, entries));
   }), []);
   const flushDeltas = deltaBuffer.flush;
   const clearStream = (threadId: string) => {
@@ -82,13 +69,43 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     // is actually waiting, and the next block's deltas append onto the
     // duplicated tail instead of starting a fresh bubble.
     deltaBuffer.clear(threadId);
-    setStream((prev) => {
-      if (!(threadId in prev.streaming) && !(threadId in prev.reasoning)) return prev;
-      const { [threadId]: _s, ...streaming } = prev.streaming;
-      const { [threadId]: _r, ...reasoning } = prev.reasoning;
-      return { streaming, reasoning };
-    });
+    setStream((prev) => clearThreadStream(prev, threadId));
   };
+
+  // The task-write queue is created before the bot-patch queue because its
+  // overlay feeds the patch queue's fold-back; the profile-lane flush it
+  // needs in return is resolved through botLaneRef at call time, so neither
+  // factory has to be constructed after the other.
+  const botLaneRef = useRef<BotPatchQueue | null>(null);
+  const taskWrites = useMemo(
+    () =>
+      createTaskWriteQueue({
+        send: (botId, threadId, patch) => {
+          // The private path is required for Custom; use it for every
+          // confirmed desktop switch so optimistic Ask cannot hide the
+          // original mode while a pending write waits its turn.
+          if (patch.resetApprovalToAsk && window.ogb?.approvals) {
+            return window.ogb.approvals.setMode(botId, "ask", {
+              threadId, modelSelection: patch.modelSelection, updateBotDefault: Boolean(patch.updateBotDefault),
+            });
+          }
+          return persistTaskApproval(botId, threadId, patch, window.ogb?.approvals);
+        },
+        reconcile: async (botId) => {
+          const result: { bots: BotAnnouncement[] } = await api("/api/bots");
+          return result.bots.find((candidate) => candidate.id === botId) ?? null;
+        },
+        onAuthoritative: (bot) => {
+          rawDispatch({ type: "botPatched", bot });
+        },
+        onError: (error) => {
+          rawDispatch({ type: "error", message: error instanceof Error ? error.message : String(error) });
+          setTimeout(() => rawDispatch({ type: "error", message: null }), 6000);
+        },
+        flushBotLane: (botId) => botLaneRef.current?.flush(botId) ?? Promise.resolve(null),
+      }),
+    [],
+  );
 
   const botPatchQueue = useMemo(
     () =>
@@ -100,15 +117,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           return result.bots.find((candidate) => candidate.id === botId) ?? null;
         },
         onAuthoritative: (bot, optimisticOverlay) => {
-          rawDispatch({ type: "botPatched", bot: withTaskWrites({ ...bot, ...optimisticOverlay }) });
+          rawDispatch({ type: "botPatched", bot: taskWrites.overlayBot({ ...bot, ...optimisticOverlay }) });
         },
         onError: (error) => {
           rawDispatch({ type: "error", message: error.message });
           setTimeout(() => rawDispatch({ type: "error", message: null }), 6000);
         },
       }),
-    [],
+    [taskWrites],
   );
+  botLaneRef.current = botPatchQueue;
 
   useEffect(() => {
     // StrictMode's dev probe runs this cleanup once against the same memoized
@@ -116,6 +134,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     botPatchQueue.revive();
     return () => botPatchQueue.dispose();
   }, [botPatchQueue]);
+
+  useEffect(() => {
+    taskWrites.revive();
+    return () => taskWrites.dispose();
+  }, [taskWrites]);
 
   const dispatch = useMemo(() => {
     const navigation = new Map<string, number>();
@@ -139,77 +162,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(patch),
       }).catch(() => {});
-    };
-
-    const waitForExecutionSettings = async (expectedBots: Bot[], threadId?: string) => {
-      // Capture this send's task save before waiting on slower profile saves.
-      // Reconciliation may clear a failed lane meanwhile; that must not turn
-      // an already-waiting send into work under reverted settings.
-      const taskWrite = threadId ? taskWrites.get(threadId)?.execution : undefined;
-      const defaultWrites = [...taskWrites.values()].filter((write) => write.updatesDefault && expectedBots.some((bot) => bot.id === write.botId));
-      await Promise.all([taskWrite, ...defaultWrites.map((write) => write.execution), ...expectedBots.map(async (expected) => {
-        const persisted = await botPatchQueue.flush(expected.id);
-        if (!persisted) return;
-        const expectedSelection = expected.modelSelection;
-        if (
-          approvalModeFor(persisted) !== approvalModeFor(expected) ||
-          persisted.modelSelection.instanceId !== expectedSelection.instanceId ||
-          persisted.modelSelection.model !== expectedSelection.model ||
-          persisted.modelSelection.effort !== expectedSelection.effort ||
-          persisted.modelSelection.variant !== expectedSelection.variant
-        ) {
-          throw new Error("The approval level or model could not be saved, so this work was not started");
-        }
-      })]);
-      if (threadId) await taskWrites.get(threadId)?.execution;
-    };
-
-    const persistTaskPatch = (botId: string, threadId: string, patch: TaskUpdatePatch) => {
-      const previous = taskWrites.get(threadId);
-      // A quick tab switch may queue two default changes on different threads.
-      // Keep their order, and don't let a group send race either pending save.
-      const defaults = patch.updateBotDefault || patch.approvalMode !== undefined
-        ? [...taskWrites.values()].filter((write) => write.botId === botId) : [];
-      const promise = Promise.all([previous?.promise, ...defaults.map((write) => write.promise)].map((save) => save?.catch(() => {})))
-        .then(async () => {
-          // The private path is required for Custom; use it for every
-          // confirmed desktop switch so optimistic Ask cannot hide the
-          // original mode while a pending write waits its turn.
-          if (patch.resetApprovalToAsk && window.ogb?.approvals) {
-            return window.ogb.approvals.setMode(botId, "ask", {
-              threadId, modelSelection: patch.modelSelection, updateBotDefault: Boolean(patch.updateBotDefault),
-            });
-          }
-          return persistTaskApproval(botId, threadId, patch, window.ogb?.approvals);
-        });
-      // Later edits still get saved after an earlier failure, but a send
-      // awaiting this batch must observe every rejected setting in it. A
-      // successful folder move is not confirmation of a failed model change.
-      const execution = Promise.all([previous?.execution, promise]);
-      void execution.catch(() => {}); // handled by the write and send paths
-      const pending = { botId, updatesDefault: Boolean(patch.updateBotDefault || previous?.updatesDefault), patch: { ...previous?.patch, ...patch }, promise, execution };
-      taskWrites.set(threadId, pending);
-      void pending.promise.then((bot) => {
-        if (taskWrites.get(threadId) !== pending) return;
-        taskWrites.delete(threadId);
-        if (bot) rawDispatch({ type: "botPatched", bot: withTaskWrites(bot) });
-      }).catch((error) => {
-        showError(error);
-        // Block sends until authoritative settings have been restored. Do
-        // not clear the failed write if reconciliation also fails or a newer
-        // write supersedes it: those settings are still unconfirmed.
-        if (taskWrites.get(threadId) === pending) {
-          pending.patch = {};
-          void api("/api/bots").then(({ bots }) => {
-            if (taskWrites.get(threadId) !== pending) return;
-            const bot = bots.find((candidate: Bot) => candidate.id === botId);
-            if (bot) {
-              rawDispatch({ type: "botPatched", bot: withTaskWrites(bot) });
-              taskWrites.delete(threadId);
-            }
-          }).catch(() => {});
-        }
-      });
     };
 
     /** Resolve every bot whose execution context belongs to this thread. A
@@ -237,8 +189,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // Pin before any await or optimistic state change, including legacy
       // callers such as keyboard shortcuts and voice controls.
       action = pinBotThreadAction(action, stateRef.current.bots);
-      if (action.type === "taskSwitched") action = { ...action, bot: withTaskWrites(action.bot) as Bot };
-      if (action.type === "botPatched") action = { ...action, bot: withTaskWrites(action.bot) };
+      if (action.type === "taskSwitched") action = { ...action, bot: taskWrites.overlayBot(action.bot) as Bot };
+      if (action.type === "botPatched") action = { ...action, bot: taskWrites.overlayBot(action.bot) };
       // One identity drives the optimistic row, HTTP retry protection, and
       // canonical SSE reconciliation. Callers may omit it; the store may not.
       if ((action.type === "send" || action.type === "sendGroup") && !action.sendId) {
@@ -311,7 +263,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           api(`/api/routines/${action.routineId}`, { method: "DELETE" }).catch(showError);
           break;
         case "runRoutine":
-          void waitForExecutionSettings(executionBotsBeforeAction)
+          void taskWrites.waitForExecutionSettings(executionBotsBeforeAction)
             .then(() => api(`/api/routines/${action.routineId}/run`, { method: "POST" }))
             .then(({ run }) => action.onStarted?.(run))
             .catch((error) => {
@@ -382,7 +334,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           const threadId =
             action.threadId ?? stateRef.current.bots.find((bot) => bot.id === action.botId)?.threadId;
           const sendId = action.sendId ?? crypto.randomUUID();
-          void waitForExecutionSettings(botBeforeSend ? [botBeforeSend] : [], threadId)
+          void taskWrites.waitForExecutionSettings(botBeforeSend ? [botBeforeSend] : [], threadId)
             .then(() => api(`/api/bots/${action.botId}/messages`, {
                 method: "POST",
                 body: JSON.stringify({ text: action.text, replyToId: action.replyToId, threadId, sendId }),
@@ -420,7 +372,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           break;
         }
         case "editMessage":
-          void waitForExecutionSettings(executionBotsBeforeAction, action.threadId)
+          void taskWrites.waitForExecutionSettings(executionBotsBeforeAction, action.threadId)
             .then(() => api(`/api/bots/${action.botId}/messages/${action.messageId}/edit`, {
               method: "POST",
               body: JSON.stringify({ text: action.text, threadId: action.threadId }),
@@ -445,7 +397,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 always: action.always,
               }),
             });
-          void waitForExecutionSettings(executionBotsBeforeAction, action.threadId)
+          void taskWrites.waitForExecutionSettings(executionBotsBeforeAction, action.threadId)
             .then(async () => {
               if (action.alwaysAllow) {
                 const bot = stateRef.current.bots.find((candidate) => candidate.id === action.alwaysAllow?.botId);
@@ -478,7 +430,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         }
         case "answerCard": {
           const { host, card, inRoom } = cardTarget(action);
-          void waitForExecutionSettings(executionBotsBeforeAction, action.threadId)
+          void taskWrites.waitForExecutionSettings(executionBotsBeforeAction, action.threadId)
             .then(() => {
               if (card?.requestId && host) {
                 // allow/deny for a permission, the chosen text for a question
@@ -633,7 +585,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           const threadId =
             action.threadId ?? stateRef.current.groups.find((group) => group.id === action.groupId)?.threadId;
           const sendId = action.sendId ?? crypto.randomUUID();
-          void waitForExecutionSettings(executionBotsBeforeAction)
+          void taskWrites.waitForExecutionSettings(executionBotsBeforeAction)
             .then(() => api(`/api/groups/${action.groupId}/messages`, {
               method: "POST",
               body: JSON.stringify({
@@ -686,7 +638,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           break;
         case "setModel":
           if (action.threadId) {
-            persistTaskPatch(action.botId, action.threadId, {
+            taskWrites.persist(action.botId, action.threadId, {
               modelSelection: action.selection,
               ...(action.updateBotDefault ? { updateBotDefault: true } : {}),
               ...(action.resetApprovalToAsk ? { resetApprovalToAsk: true } : {}),
@@ -702,7 +654,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }
           break;
         case "updateTask":
-          persistTaskPatch(action.botId, action.threadId, action.patch);
+          taskWrites.persist(action.botId, action.threadId, action.patch);
           break;
         case "createProject":
           api(`/api/bots/${action.botId}/projects`, { method: "POST", body: JSON.stringify({ name: action.name, emoji: action.emoji }) })
@@ -806,7 +758,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
     };
     return wrapped;
-  }, [botPatchQueue]);
+  }, [botPatchQueue, taskWrites]);
 
   // ── initial load + SSE fold ──────────────────────────────────────────
   useEffect(() => {
@@ -1040,7 +992,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }
           rawDispatch({
             type: "botPatched",
-            bot: withTaskWrites({ ...bot, ...botPatchQueue.overlayFor(bot.id) }),
+            bot: taskWrites.overlayBot({ ...bot, ...botPatchQueue.overlayFor(bot.id) }),
           });
           break;
         }
