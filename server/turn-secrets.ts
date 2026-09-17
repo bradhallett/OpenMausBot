@@ -1,38 +1,40 @@
 // The phone-secret provisioning helpers — extracted verbatim from
-// index.ts: the idempotency submission key, the provided/resumed card
-// state read, and provideSecretFromPhone, which walks a phone credential
-// submission through the encrypted store, the submission registry and the
-// card resume. index.ts wires createTurnSecrets at the helpers' original
-// site, after the phoneSecrets bridge const, the phoneSecretSubmissions
-// registry and the createDeferredResumes destructure have produced
-// connectorThread, secretMessage and resumeSecretCard by value; every
-// caller is an HTTP route evaluated long after that wiring.
+// index.ts: the submission registry with its bot-deletion mutation claim,
+// the desktop handoff prompt, the idempotency submission key, the
+// provided/resumed card state read, and provideSecretFromPhone, which walks
+// a phone credential submission through the encrypted store, the submission
+// registry and the card resume. index.ts wires createTurnSecrets at the
+// helpers' original site, after the phoneSecrets bridge const and the
+// createDeferredResumes destructure have produced connectorThread,
+// secretMessage and resumeSecretCard by value; every caller is an HTTP
+// route evaluated long after that wiring.
 import { credentialIsConfigured } from "../shared/credential-request.ts";
 import {
   PhoneSecretError,
+  PhoneSecretSubmissionRegistry,
   assertPhoneSecretRequestMatches,
   phoneSecretOperationId,
   type PhoneSecretBridge,
   type PhoneSecretContext,
-  type PhoneSecretSubmissionRegistry,
 } from "./phone-secret.ts";
 import { cfg, store } from "./runtime.ts";
 import type { BotRecord, GroupRecord, Message } from "./store.ts";
 
 /** Everything the phone-secret provisioning helpers read from their
- * host. All five are values index.ts binds before the wiring site:
- * phoneSecrets and phoneSecretSubmissions are consts there, and the card
- * helpers come from the createDeferredResumes destructure further up. */
+ * host. All four are values index.ts binds before the wiring site:
+ * phoneSecrets is a const there, and the card helpers come from the
+ * createDeferredResumes destructure further up. The submission registry is
+ * constructed here: only this factory and the names it returns see it. */
 export interface TurnSecretsDeps {
   connectorThread(botId: string, threadId: string): { bot: BotRecord; group: GroupRecord | undefined } | null;
   secretMessage(botId: string, threadId: string, messageId: string): Message | null;
   resumeSecretCard(botId: string, threadId: string, messageId: string, outcome: "provided" | "dismissed"): boolean;
   phoneSecrets: PhoneSecretBridge;
-  phoneSecretSubmissions: PhoneSecretSubmissionRegistry;
 }
 
 export function createTurnSecrets(deps: TurnSecretsDeps) {
-  const { connectorThread, secretMessage, resumeSecretCard, phoneSecrets, phoneSecretSubmissions } = deps;
+  const { connectorThread, secretMessage, resumeSecretCard, phoneSecrets } = deps;
+  const phoneSecretSubmissions = new PhoneSecretSubmissionRegistry();
 
   function phoneSecretSubmissionKey(threadId: string, messageId: string, requestKey: string): string {
     return `${threadId}:${messageId}:${requestKey}`;
@@ -143,5 +145,33 @@ export function createTurnSecrets(deps: TurnSecretsDeps) {
     return settled;
   }
 
-  return { phoneSecretSubmissionKey, currentSecretState, provideSecretFromPhone };
+  function claimPhoneSecretBotDeletion(botId: string): (() => void) | null {
+    const scopes = [
+      { botId },
+      ...store.groups
+        .filter((group) => group.memberIds.includes(botId))
+        .map((group) => ({ groupId: group.id })),
+    ];
+    const releases: Array<() => void> = [];
+    for (const scope of scopes) {
+      const release = phoneSecretSubmissions.claimMutation(scope);
+      if (!release) {
+        for (const undo of releases.reverse()) undo();
+        return null;
+      }
+      releases.push(release);
+    }
+    return () => {
+      for (const release of releases.reverse()) release();
+    };
+  }
+
+  function credentialDesktopHandoff(label: string): string {
+    return `Securely provide the ${label} from OpenMausBot on your phone or computer. It is never added to chat.`;
+  }
+
+  return {
+    phoneSecretSubmissionKey, currentSecretState, provideSecretFromPhone,
+    phoneSecretSubmissions, claimPhoneSecretBotDeletion, credentialDesktopHandoff,
+  };
 }

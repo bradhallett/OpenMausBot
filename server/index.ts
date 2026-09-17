@@ -1,9 +1,8 @@
 // OpenMausBot server — the harness host. Clients hold no transports
 // (upstream rule): the React app dispatches typed commands over HTTP and
 // folds one SSE event stream; every provider process runs here.
-import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { extname, join } from "node:path";
+import { join } from "node:path";
 
 import { SharedComputers } from "./shared-computers.ts";
 
@@ -12,14 +11,8 @@ import { createDesktopBridge } from "./desktop-bridge.ts";
 import { flushDecisionLog } from "./decision-log.ts";
 import * as composio from "./composio.ts";
 import {
-  containerComputerStatus,
-  containerRuntimeStatus,
-  SHARED_LOCAL_VM_TARGET,
-} from "./container-computer.ts";
-import {
   instanceConfigs,
   loadConfig,
-  localVmMode,
   saveConfig,
   sharedComputersEnabled,
   DATA_DIR,
@@ -35,13 +28,9 @@ import { entitled } from "./enterprise.ts";
 
 
 import { closeMessageDb } from "./message-db.ts";
-import { drainDelegations } from "./delegations.ts";
 import { EventBus } from "./harness/bus.ts";
 import { ManagedDesktopProviders } from "./managed-desktop.ts";
-import { withPeerProvenance } from "./peer-provenance.ts";
-import type { Message } from "./store.ts";
 import { flushAllMemoryJournals } from "./memory-journal.ts";
-import { discoverExistingPerBotLocalVms, shouldArmLocalVmIdle } from "./local-vm-inventory.ts";
 
 import { createBotLifecycle } from "./bot-lifecycle.ts";
 import { createCalendarRooms } from "./calendar-rooms.ts";
@@ -53,7 +42,7 @@ import { createGroupState } from "./group-state.ts";
 import { createRoutineLifecycle } from "./routine-lifecycle.ts";
 import { createSkillLifecycle } from "./skill-lifecycle.ts";
 import { createTeamSetupLifecycle } from "./team-setup-lifecycle.ts";
-import { createTurnDispatch } from "./turn-dispatch.ts";
+import { createRunDelegatedTurn, createTurnDispatch } from "./turn-dispatch.ts";
 import { RoutineManager } from "./routines.ts";
 import { CalendarCallManager } from "./calendar-calls.ts";
 import {
@@ -66,7 +55,7 @@ import {
 
 
 import { flushAllProfileHistory } from "./profile-versions.ts";
-import { listenWebhookIngress, type WebhookIngress } from "./webhook-ingress.ts";
+import type { WebhookIngress } from "./webhook-ingress.ts";
 import { WebhookManager } from "./webhooks.ts";
 import { loadBundledSkills, loadUserSkills, mergeSkills } from "./skill-library.ts";
 import { createDelegationWatch } from "./delegation-watch.ts";
@@ -90,7 +79,7 @@ import {
 } from "./enterprise.ts";
 import { serverVersion } from "./environment.ts";
 import { createWorkspaceBackupRoutes, isWorkspaceBackupSessionControl } from "./workspace-backup-http.ts";
-import { json, readBody } from "./http.ts";
+import { createServeStatic, json, readBody } from "./http.ts";
 import { createInternalRoutes } from "./routes/internal.ts";
 import { createRoutinesRoutes } from "./routes/routines.ts";
 import { createCalendarCallRoutes } from "./routes/calendar-calls.ts";
@@ -154,26 +143,11 @@ import {
 } from "./request-auth.ts";
 import { cookieMaxAgeSeconds, SessionRegistry } from "./sessions.ts";
 import { loadBrand } from "./brand.ts";
-import {
-  PhoneSecretBridge,
-  PhoneSecretSubmissionRegistry,
-} from "./phone-secret.ts";
+import { PhoneSecretBridge } from "./phone-secret.ts";
 
 const PORT = Number(process.env.OMB_PORT || process.env.OGB_PORT || 8799);
 const WEBHOOK_PORT = Number(process.env.OMB_WEBHOOK_PORT || PORT + 1);
-// Behind a proxy or tunnel, the base URL senders should use (docs/self-hosting.md).
-const WEBHOOK_PUBLIC_URL = process.env.OMB_WEBHOOK_PUBLIC_URL || undefined;
 const STATIC_DIR = process.env.OMB_STATIC_DIR || null;
-const MIME: Record<string, string> = {
-  ".html": "text/html",
-  ".js": "text/javascript",
-  ".css": "text/css",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".ico": "image/x-icon",
-  ".json": "application/json",
-  ".woff2": "font/woff2",
-};
 
 function signInAllowList() {
   const current = loadConfig().signIn;
@@ -704,111 +678,10 @@ let localVmImageBusy = false;
 let localVmProvisionBusy = false;
 let localVmModeChangeBusy = false;
 
-// A running VM may have survived an app/server restart. Start its idle
-// backstop even if nobody opens Settings or begins a turn this session. The
-// bot's current destination is intentionally ignored: moving a bot to Cloud,
-// Browser, This computer, Auto, or Off does not delete its old Local VM.
-void (async () => {
-  if (localVmMode(cfg) !== "per-bot") {
-    const status = await containerComputerStatus(undefined, undefined, SHARED_LOCAL_VM_TARGET).catch(() => null);
-    noteLocalVmSeen(SHARED_LOCAL_VM_TARGET, status);
-    if (shouldArmLocalVmIdle(status)) localVmIdleFor(SHARED_LOCAL_VM_TARGET).touch();
-    return;
-  }
-  const runtime = await containerRuntimeStatus().catch(() => null);
-  if (!runtime?.runtime || !runtime.daemonUp) return;
-  const existing = await discoverExistingPerBotLocalVms(store.bots, runtime.runtime).catch(() => []);
-  const statuses = await Promise.all(existing.map(({ target }) =>
-    containerComputerStatus(undefined, undefined, target).catch(() => null),
-  ));
-  existing.forEach(({ target }, index) => {
-    noteLocalVmSeen(target, statuses[index]);
-    if (shouldArmLocalVmIdle(statuses[index])) localVmIdleFor(target).touch();
-  });
-})().catch(() => {
-  // Startup inspection is a backstop, not a reason to keep the app offline.
-  // The Settings inventory remains available for a later explicit retry.
+const runDelegatedTurn = createRunDelegatedTurn({
+  helpers: { store, isUnattended, delegationWatch, activeRoutineRunForThread, finalizeDelegationWatch },
+  lateBound: { startTurn: (botId, text, opts) => startTurn(botId, text, opts) },
 });
-
-
-// Drain queued delegations for a source thread after its turn settles.
-// Run as a separate subscriber so the drain logic stays out of the main
-// fold (which has its own switch/case noise) and its approval + startTurn
-// calls never have to share locals with the fold's state machine.
-/** How a drained delegation becomes a real turn on the target. Shared by
- * the settle-time drain and the boot-time drain of what a previous process
- * left queued. */
-const runDelegatedTurn: Parameters<typeof drainDelegations>[3] = (toBotId, rawText, commsDepth, sourceThreadId, channel, taskId, sourceBotId, openedThreadId) => {
-    // startTurn REJECTS on an ordinary condition — busy target, deleted bot,
-    // unavailable provider. Unhandled, that rejection is fatal to the
-    // harness (Node's default), which in the packaged app kills the server
-    // child. Every delegation failure has to land as a chip instead.
-    // A fresh-thread handoff runs in the thread the opener created — the
-    // drain already dropped it if that thread is gone — never in whatever
-    // the person is looking at.
-    const targetThreadId = openedThreadId ?? store.bot(toBotId)?.threadId;
-    const target = store.bot(toBotId);
-    const opener = store.bot(sourceBotId);
-    const unattended = isUnattended(sourceBotId, sourceThreadId);
-    // The inbound line is another bot's words whichever way it arrived: an
-    // opened thread's first line carries the shared provenance note, a
-    // classic handoff the "[Delegated by @X" prefix from the drain. Both
-    // record the author structurally (peerAsk) as well as in the text, so
-    // a renderer never has to take the line for the person's own message.
-    const peerAsk: Message["peerAsk"] | undefined = opener
-      ? { botId: opener.id, name: opener.name, unattended: unattended || undefined }
-      : undefined;
-    const text = openedThreadId && opener
-      ? withPeerProvenance(rawText, { botName: opener.name, delivery: "start_thread", unattended })
-      : rawText;
-    if (targetThreadId) {
-      delegationWatch.set(targetThreadId, {
-        channelId: channel?.id,
-        toBotId,
-        toBotName: target?.name,
-        taskId,
-        sourceThreadId,
-        sourceBotId,
-        routineRunId: activeRoutineRunForThread(sourceThreadId)?.id,
-        startedAtMs: Date.now(),
-      });
-    }
-    let failureReported = false;
-    const reportStartFailure = (error: unknown) => {
-      if (failureReported) return;
-      failureReported = true;
-      const bot = store.bot(toBotId);
-      const why = error instanceof Error ? error.message : String(error);
-      if (targetThreadId) {
-        const finalized = finalizeDelegationWatch(
-          targetThreadId,
-          false,
-          "",
-          `Delegated turn could not start — ${why.slice(0, 120)}`,
-        );
-        if (finalized) return;
-      }
-      const source = store.botByThread(sourceThreadId);
-      if (!source) return;
-      store.appendMessage(sourceThreadId, {
-        role: "bot",
-        kind: "activity",
-        tool: { name: `error: delegation to @${bot?.name ?? toBotId} could not start — ${why.slice(0, 120)}`, ok: false },
-      });
-    };
-    return startTurn(toBotId, text, {
-      threadId: targetThreadId,
-      commsDepth,
-      unattended,
-      peerAsk,
-      // startTurn schedules provider/integration setup after marking the bot
-      // busy. Those asynchronous setup failures do not emit turn.completed,
-      // so clear the watch and report them through this callback too.
-      onDispatchError: reportStartFailure,
-    }).then(() => undefined).catch((err) => {
-      reportStartFailure(err);
-    });
-};
 
 // ── turn dispatch (delegations, queued sends, direct turns) ───────────────────────────────────
 // drainThreadDelegations, the delegation sweep and retry hooks, the queued
@@ -1004,9 +877,6 @@ const { profileRequests, teamSetupTeams, teamSetupRequests, resolveAndSendTeamSe
   limits: { maxWorkspaceBots: MAX_WORKSPACE_BOTS },
 });
 
-// Webhook definitions are independent from calendar schedules, but every
-// delivery joins the same RoutineManager queue. That keeps unattended work
-// ordered behind a busy MAUS and gives webhook runs the same durable receipts.
 const webhooks = new WebhookManager({
   emit: broadcast,
   botState: unattendedDispatchState,
@@ -1018,17 +888,6 @@ const webhooks = new WebhookManager({
 
 let webhookIngress: WebhookIngress | null = null;
 let webhookIngressError: string | null = null;
-try {
-  webhookIngress = await listenWebhookIngress(webhooks, {
-    port: WEBHOOK_PORT, publicBaseUrl: WEBHOOK_PUBLIC_URL,
-    claimRequest: () => workspaceMaintenance.request(),
-  });
-  const advertised = WEBHOOK_PUBLIC_URL ? ` (advertised as ${webhookIngress.baseUrl})` : "";
-  console.log(`openmausbot webhook receiver on http://${webhookIngress.host}:${webhookIngress.port}${advertised}`);
-} catch (error) {
-  webhookIngressError = error instanceof Error ? error.message : String(error);
-  console.error(`openmausbot webhook receiver unavailable: ${webhookIngressError}`);
-}
 
 const webhookIngressStatus = () => ({
   available: Boolean(webhookIngress),
@@ -1061,39 +920,16 @@ const {
   helpers: { connectorThread, fullAccessForSource },
 });
 
-const phoneSecretSubmissions = new PhoneSecretSubmissionRegistry();
-
-function claimPhoneSecretBotDeletion(botId: string): (() => void) | null {
-  const scopes = [
-    { botId },
-    ...store.groups
-      .filter((group) => group.memberIds.includes(botId))
-      .map((group) => ({ groupId: group.id })),
-  ];
-  const releases: Array<() => void> = [];
-  for (const scope of scopes) {
-    const release = phoneSecretSubmissions.claimMutation(scope);
-    if (!release) {
-      for (const undo of releases.reverse()) undo();
-      return null;
-    }
-    releases.push(release);
-  }
-  return () => {
-    for (const release of releases.reverse()) release();
-  };
-}
-
-function credentialDesktopHandoff(label: string): string {
-  return `Securely provide the ${label} from OpenMausBot on your phone or computer. It is never added to chat.`;
-}
-
 // The phone-secret provisioning helpers live in ./turn-secrets.ts: the
-// submission key, the card state read, and provideSecretFromPhone. Wired
-// at their original site, after phoneSecrets, phoneSecretSubmissions and
-// the deferred-resumes card helpers exist; every caller is a route below.
-const { phoneSecretSubmissionKey, currentSecretState, provideSecretFromPhone } = createTurnSecrets({
-  connectorThread, secretMessage, resumeSecretCard, phoneSecrets, phoneSecretSubmissions,
+// submission registry, the bot-deletion mutation claim, the desktop handoff
+// prompt, the submission key, the card state read, and provideSecretFromPhone.
+// Wired at their original site, after phoneSecrets and the deferred-resumes
+// card helpers exist; every caller is a route below.
+const {
+  phoneSecretSubmissionKey, currentSecretState, provideSecretFromPhone,
+  phoneSecretSubmissions, claimPhoneSecretBotDeletion, credentialDesktopHandoff,
+} = createTurnSecrets({
+  connectorThread, secretMessage, resumeSecretCard, phoneSecrets,
 });
 
 // The config/instance settings views live in ./config-views.ts:
@@ -1144,27 +980,7 @@ const { stopCompanyInstances, persistProviderInstance, reloadProviders, provider
  * bundle anyone can download, holds no secrets, and a remote browser must be
  * able to load /pair before it has a session. Returns false when there is
  * nothing to serve so the caller can answer 404. */
-function serveStatic(res: ServerResponse, path: string): boolean {
-  if (!STATIC_DIR) return false;
-  const safe = path === "/" ? "/index.html" : path.replace(/\.\./g, "");
-  const file = join(STATIC_DIR, safe);
-  try {
-    const data = readFileSync(file);
-    res.writeHead(200, { "content-type": MIME[extname(file)] ?? "application/octet-stream" });
-    res.end(data);
-    return true;
-  } catch {
-    // SPA fallback
-    try {
-      const data = readFileSync(join(STATIC_DIR, "index.html"));
-      res.writeHead(200, { "content-type": "text/html" });
-      res.end(data);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-}
+const serveStatic = createServeStatic(STATIC_DIR);
 
 // Loopback-only enforcement: the harness runs on 127.0.0.1 but accepts
 // requests from any loopback connection and any web page that DNS-rebinds
@@ -1660,7 +1476,10 @@ await runBootSequence({
   handleRequest,
   calendarCalls: () => calendarCalls,
   routines: () => routines,
-  webhookIngress: () => webhookIngress,
+  webhookIngress: { get: () => webhookIngress, set: (value) => { webhookIngress = value; } },
+  webhookIngressError: { get: () => webhookIngressError, set: (value) => { webhookIngressError = value; } },
+  webhooks,
+  WEBHOOK_PORT,
   workspaceAccess: { get: () => workspaceAccess, set: (value) => { workspaceAccess = value; } },
   companyShutdown: { get: () => companyShutdown, set: (value) => { companyShutdown = value; } },
   sessions,
@@ -1679,6 +1498,8 @@ await runBootSequence({
   sharedComputerControl,
   browserLive,
   localVmIdles,
+  noteLocalVmSeen,
+  localVmIdleFor,
   watchdog,
   managedDesktop,
   temporaryBrowserSessions,
