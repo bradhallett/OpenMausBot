@@ -190,24 +190,19 @@ import {
 import type { GroupGoalRunCardData, GroupGoalRunStatus } from "../shared/group-goal-run.ts";
 
 import { BUILT_IN_DRIVERS } from "./drivers/builtIn.ts";
-import { getOrCreateChannel, mirrorActivity, mirrorReply, type CommsBus } from "./comms-visibility.ts";
+import type { CommsBus } from "./comms-visibility.ts";
 import { searchMessages, closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups } from "./message-db.ts";
 import { briefCrossingLabel, claimRecallCrossings } from "./recall-disclosure.ts";
 import { recentWork, recentWorkPrompt } from "./recent-work.ts";
 
 import { promptWithReply, transcriptText } from "./replies.ts";
 import {
-  buildDelegationFailurePrompt,
-  buildDelegationRevivalPrompt,
-  DelegationWakeBudget,
   discardDelegations,
   drainDelegations,
   expireStaleDelegations,
   pendingDelegationSnapshot,
   pendingThreads,
-  recordDelegationReceipt,
   releaseDelegationsWaitingOn,
-  type DelegationReceipt,
 } from "./delegations.ts";
 import {
   cancelSteeredMessage,
@@ -255,7 +250,7 @@ import {
 import * as tts from "./tts/index.ts";
 import { toUtterances } from "./tts/speech-text.ts";
 import { extractTurnImages } from "./turn-images.ts";
-import { Handoffs, recordHanded } from "./delta-context.ts";
+import { recordHanded } from "./delta-context.ts";
 import type { TurnOwner } from "./turn-resources.ts";
 import {
   ensureWorkspace,
@@ -341,8 +336,6 @@ import {
   browserSessionId,
   describeBrowserEngine,
 } from "./browser-engine.ts";
-import { createScreenFrameSource, type ScreenCapture } from "./screen-frame-source.ts";
-import { screenFrameHash, settledFrameIsNews } from "./screen-frame-gate.ts";
 import { RoutineRequestService } from "./routine-requests.ts";
 import { buildBotOverview, type BotOverview, connectedAppsFacts } from "./bot-overview.ts";
 import { ProfileRequestService } from "./profile-requests.ts";
@@ -371,12 +364,13 @@ import { autoLocalVmAttachable, type ContainerComputerStatus } from "./container
 import { parseSurface, resolveSurface, surfaceLabel, surfacePrompt } from "./surface.ts";
 import {
   PendingTurnCancellations,
-  ProviderTurnGenerationRegistry,
   RetiredTurnRegistry,
   guardTurnDispatch,
   isTurnAdmissionBlocked,
   isTurnEventQuarantined,
 } from "./turn-dispatch-guard.ts";
+import { createDelegationWatch } from "./delegation-watch.ts";
+import { createScreenPollers } from "./screen-pollers.ts";
 import { createGracefulShutdown } from "./graceful-shutdown.ts";
 import {
   createWorkspaceAccess,
@@ -464,7 +458,6 @@ import {
   type PhoneSecretContext,
 } from "./phone-secret.ts";
 import { computerFreeText, computerStillBusyText, computerWaitEndedText, computerWaitingText, type ComputerHolder } from "./computer-wait.ts";
-import { INCIDENTS_THREAD_TITLE, IncidentLedger, chiefForBot, incidentChip, incidentText, type Incident, type IncidentKind } from "./incidents.ts";
 
 const PORT = Number(process.env.OMB_PORT || process.env.OGB_PORT || 8799);
 const WEBHOOK_PORT = Number(process.env.OMB_WEBHOOK_PORT || PORT + 1);
@@ -808,29 +801,50 @@ function agentsIntegration(
 class DirectTurnSetupCancelled extends Error {}
 const directTurnGenerationByThread = new Map<string, string>();
 // Stop revokes credentials before completion, but the receipt must retain its
-// exact provider-turn owner until that completion or explicit failure cleanup.
-type DirectTurnOutcome = { ok: boolean; text: string };
-const directFollowupTurns = new ProviderTurnGenerationRegistry<DirectTurnOutcome>();
-const directFollowupSettlers = new Map<string, { threadId: string; settle?: () => void }>();
-const directCoordinationSettlers = new Map<string, (outcome: DirectTurnOutcome) => void>();
-function settleDirectCoordination(generation: string | undefined, outcome: DirectTurnOutcome) {
-  if (!generation) return;
-  roomHandoffs.sourceSettled(generation, outcome.ok);
-  const settle = directCoordinationSettlers.get(generation);
-  directCoordinationSettlers.delete(generation);
-  settle?.(outcome);
-}
-function settleDirectFollowup(generation: string | undefined): void {
-  if (!generation) return;
-  settleDirectCoordination(generation, { ok: false, text: "The coordinated turn was interrupted" });
-  const pending = directFollowupSettlers.get(generation);
-  if (!pending) return;
-  directFollowupSettlers.delete(generation);
-  // Failure/Stop can precede the adapter's terminal event. Quarantine only
-  // this generation's bound ids, including after the watchdog frees its slot.
-  for (const turnId of directFollowupTurns.deleteGeneration(pending.threadId, generation)) retireProviderTurn(turnId);
-  pending.settle?.();
-}
+// exact provider-turn owner until that completion or explicit failure
+// cleanup. The direct-followup registries, the delegation watch map and the
+// peer-wake machinery live in ./delegation-watch.ts, wired here at the old
+// declaration site; thunks cover the consts declared further below.
+const {
+  directFollowupTurns, directFollowupSettlers, directCoordinationSettlers,
+  settleDirectCoordination, settleDirectFollowup,
+  delegationWatch, delegationWakeBudget, pendingDelegationWakes,
+  activeRoutineRunForThread, wakeUndispatchedDelegation, drainDelegationWakes,
+  finalizeDelegationWatch, isExternalContextMarker, markTaskContextExternallyUpdated,
+  reportIncident, handoffs, isContextMessage,
+} = createDelegationWatch({
+  lateBound: {
+    roomHandoffs: () => roomHandoffs,
+    routines: () => routines,
+    startTurn: (botId, text, opts) => startTurn(botId, text, opts),
+    commsBus: () => commsBus,
+  },
+  helpers: {
+    retireProviderTurn,
+    isUnattended,
+    activeGroupTurnForBot,
+    turnInstance,
+    notify,
+  },
+});
+
+// The live-screen pollers live in ./screen-pollers.ts. Their functions were
+// hoisted declarations here — usable from module start — so the factory is
+// wired before the first consumer (turnCleanup below) with thunks for the
+// consts declared after this site.
+const {
+  screenPollers, SCREEN_SETTLE_TIMEOUT_MS,
+  startScreenPoller, pokeScreenPoller, stopScreenPoller, finalScreenFrame,
+} = createScreenPollers({
+  lateBound: {
+    broadcast: () => broadcast,
+    computerControlRevision: () => computerControlRevision,
+  },
+  helpers: {
+    currentBrowserSession,
+    botComputerControlSnapshot,
+  },
+});
 const sharedComputerControl = new SharedComputerControl(turnResources, () => store.bots.some(bot => botComputerControlSnapshot(bot.id).held));
 const turnCleanup = createTurnCleanup({
   store,
@@ -3531,375 +3545,6 @@ async function localVmInventoryPayload() {
 }
 
 
-/** A delegated turn's terminal state belongs in the A⇄B channel:
- * the request was mirrored there when the delegation drained, and a
- * channel that only ever shows requests is half a record. Mirror the
- * reply on success; mirror a failed/stopped terminal chip otherwise. */
-const delegationWatch = new Map<string, {
-  channelId?: string;
-  toBotId: string;
-  toBotName?: string;
-  taskId?: string;
-  sourceThreadId?: string;
-  sourceBotId?: string;
-  /** Bind a late peer result to the run that requested it, not later user
-   * work that happens to reuse that run's execution conversation. */
-  routineRunId?: string;
-  /** when the delegated turn was dispatched — elapsed time for status checks */
-  startedAtMs?: number;
-}>();
-
-// Peer wake: when a delegated reply lands, resume the source bot so it can
-// fold the result in and answer the user instead of sitting idle. Mirrors
-// the cardContinuation resume pattern used for connector/credential cards.
-const delegationWakeBudget = new DelegationWakeBudget();
-const pendingDelegationWakes = new Map<string, { botId: string; targetName: string; failureReason?: string; routineRunId?: string; budgetAcquired?: boolean }>();
-
-function activeRoutineRunForThread(threadId: string): RoutineRun | null {
-  const run = routines?.runForThread(threadId);
-  return run && ["running", "waiting"].includes(run.status) ? run : null;
-}
-
-function routineDelegationCanResume(threadId: string, routineRunId?: string): boolean {
-  return !routineRunId || activeRoutineRunForThread(threadId)?.id === routineRunId;
-}
-
-function dispatchDelegationWake(botId: string, threadId: string, targetName: string, failureReason?: string, routineRunId?: string, budgetAcquired = false): void {
-  if (!store.taskByThread(botId, threadId)) return;
-  if (!routineDelegationCanResume(threadId, routineRunId)) return;
-  if (!budgetAcquired && !delegationWakeBudget.tryAcquire(threadId)) {
-    routines?.failThread(threadId, "Delegation follow-up limit reached; review the run before retrying");
-    return;
-  }
-  const prompt = failureReason
-    ? buildDelegationFailurePrompt(targetName, failureReason)
-    : buildDelegationRevivalPrompt(targetName);
-  void startTurn(botId, prompt, {
-    threadId,
-    cardContinuation: true,
-    unattended: isUnattended(botId, threadId),
-  })
-    .then(() => undefined)
-    .catch((error) => {
-      if (!store.taskByThread(botId, threadId)) return;
-      const message = error instanceof Error ? error.message : String(error);
-      // Raced with a user turn claiming the bot — retry once it settles.
-      // This is the same logical wake, so keep its original budget charge.
-      if (isTurnAdmissionBlocked(error)) {
-        pendingDelegationWakes.set(threadId, { botId, targetName, failureReason, routineRunId, budgetAcquired: true });
-        return;
-      }
-      store.appendMessage(threadId, {
-        role: "bot",
-        kind: "activity",
-        tool: {
-          name: `error: could not resume after delegation — ${message.slice(0, 120)}`,
-          ok: false,
-        },
-      });
-      routines?.failThread(threadId, `Could not resume after delegation: ${message}`);
-    });
-}
-
-function wakeDelegationSource(source: BotRecord, threadId: string, targetName: string, failureReason?: string, routineRunId?: string): void {
-  if (!store.taskByThread(source.id, threadId)) return;
-  if (!routineDelegationCanResume(threadId, routineRunId)) return;
-  // Busy? Hold the wake until the source settles, then drain it — the
-  // delegated reply is already in the thread, so nothing is lost, and the
-  // source processes it the moment it is free rather than only on a later
-  // user nudge.
-  if (threadBusy(source.id, threadId) || activeGroupTurnForBot(source.id)) {
-    pendingDelegationWakes.set(threadId, { botId: source.id, targetName, failureReason, routineRunId });
-    return;
-  }
-  dispatchDelegationWake(source.id, threadId, targetName, failureReason, routineRunId);
-}
-
-// ── incidents: a broken run reaches the Chief of Staff ──────────────────
-// A failed, stalled or unstartable run used to leave one chip in the thread
-// it died in and nothing anywhere else; the person found it hours later,
-// from a phone, by opening the desktop and reading every thread. The team
-// already has a role for this — the Chief coordinates the section — so the
-// incident becomes a turn of the Chief's, in its "Team incidents" thread,
-// with a link to the broken thread and retry_thread to act on it. The person
-// reads one place. Policy in server/incidents.ts.
-const incidentLedger = new IncidentLedger();
-
-/** What the broken thread was about: the last line the person (or the
- * requester) sent there, and the last thing the bot said. */
-function incidentContext(threadId: string): { lastRequest: string | null; lastReply: string | null } {
-  const messages = [...store.messagesFor(threadId)].reverse();
-  return {
-    lastRequest: messages.find((message) => message.role === "user" && message.kind === "text" && message.text)?.text ?? null,
-    lastReply: messages.find((message) => message.role === "bot" && message.kind === "text" && message.text)?.text ?? null,
-  };
-}
-
-function reportIncident(input: { kind: IncidentKind; bot: BotRecord; threadId: string; detail: string }): void {
-  const { bot, threadId } = input;
-  const task = store.taskByThread(bot.id, threadId);
-  // A thread another bot opened and is watching is that bot's to handle:
-  // the delegator is woken with the failure already (wakeDelegationSource).
-  if (task?.openedBy?.delegationId || delegationWatch.has(threadId) || roomHandoffs.activeDirect(threadId)) return;
-  const group = store.groupByThread(threadId);
-  const incident: Incident = {
-    kind: input.kind,
-    bot,
-    threadId,
-    title: task?.title ?? null,
-    room: group?.name ?? null,
-    detail: redactSecretsInText(input.detail),
-    ...incidentContext(threadId),
-  };
-  const count = incidentLedger.note(threadId);
-  // a crash loop is one incident, not a storm
-  if (count.muted) return;
-  const chief = chiefForBot(store.bots, bot);
-  // A run that could not start and a failed routine have already buzzed
-  // the person (turn-failed, routine-failed) by the time they get here; a
-  // failure or stall mid-run has not. One notification per failure, never two.
-  const alreadyNotified = input.kind === "could-not-start" || input.kind === "routine-failed";
-  const tellThePerson = () => {
-    if (alreadyNotified) return;
-    notify(buildNotification("incident", bot, threadId, incidentChip(incident), {
-      avatarUrl: bot.avatarUrl,
-      ...(group ? { group: { id: group.id, name: group.name } } : {}),
-    }));
-  };
-  // no Chief on duty, or the Chief itself broke: the person is next
-  if (!chief) {
-    tellThePerson();
-    return;
-  }
-  const incidents = store.tasks(chief.id).find((candidate) => candidate.title === INCIDENTS_THREAD_TITLE && !candidate.archivedAt)
-    ?? store.createTask(chief.id, INCIDENTS_THREAD_TITLE, false, undefined, { botId: chief.id, name: chief.name, at: Date.now() });
-  if (!incidents || incidents.threadId === threadId) {
-    tellThePerson();
-    return;
-  }
-  store.appendMessage(incidents.threadId, {
-    role: "bot",
-    kind: "activity",
-    tool: { name: incidentChip(incident), ok: false },
-    threadRef: { botId: bot.id, threadId, title: task?.title ?? (group ? group.name : `${bot.name}'s conversation`) },
-  });
-  const text = incidentText(incident, count);
-  // the report carries the broken bot's name as its provenance: it is about
-  // that bot's work and nobody was at the keyboard
-  const peerAsk = { botId: bot.id, name: bot.name, unattended: true };
-  if (botAtThreadCapacity(chief.id) || activeGroupTurnForBot(chief.id)) {
-    queueSteeredMessage(chief.id, incidents.threadId, text, { reason: "capacity", unattended: true, peerAsk });
-    return;
-  }
-  void startTurn(chief.id, text, { threadId: incidents.threadId, unattended: true, peerAsk }).catch((error) => {
-    const why = error instanceof Error ? error.message : String(error);
-    store.appendMessage(incidents.threadId, {
-      role: "bot",
-      kind: "activity",
-      tool: { name: `error: the incident could not reach ${chief.name} — ${why.slice(0, 120)}`, ok: false },
-    });
-    tellThePerson();
-  });
-}
-
-function drainDelegationWakes(): void {
-  for (const [threadId, entry] of pendingDelegationWakes) {
-    if (!store.taskByThread(entry.botId, threadId) || !routineDelegationCanResume(threadId, entry.routineRunId)) {
-      pendingDelegationWakes.delete(threadId);
-      continue;
-    }
-    if (threadBusy(entry.botId, threadId) || activeGroupTurnForBot(entry.botId)) continue;
-    pendingDelegationWakes.delete(threadId);
-    dispatchDelegationWake(entry.botId, threadId, entry.targetName, entry.failureReason, entry.routineRunId, entry.budgetAcquired);
-  }
-}
-
-function wakeUndispatchedDelegation(receipt: DelegationReceipt, routineRunId?: string): void {
-  const source = store.botByThread(receipt.sourceThreadId);
-  if (!source) return;
-  markTaskContextExternallyUpdated(source, receipt.sourceThreadId);
-  wakeDelegationSource(source, receipt.sourceThreadId, receipt.toBotName, receipt.result || "the handoff did not run", routineRunId);
-}
-
-// Provider-native sessions only know about messages produced inside their
-// own turns. A delegated result is appended later by the harness, so mark the
-// source task with a persisted, impossible-to-resume owner. Its next turn
-// will replay the active branch once before replacing this marker with the
-// real provider instance id. A unique suffix also closes the setup race: if
-// another result arrives while that replay is launching, the newer marker is
-// left intact for one more replay instead of being accidentally consumed.
-const EXTERNAL_CONTEXT_MARKER_PREFIX = "__openmaus_external_context__:";
-
-function isExternalContextMarker(value: string | undefined): boolean {
-  return Boolean(value?.startsWith(EXTERNAL_CONTEXT_MARKER_PREFIX));
-}
-
-function markTaskContextExternallyUpdated(bot: BotRecord, threadId: string): void {
-  const task = store.taskByThread(bot.id, threadId);
-  if (!task) return;
-  // An engine that records which messages its current session was handed
-  // keeps that session: its next turn is sent what it has not seen. Without a
-  // record for that exact session (another engine, one switched in since, a
-  // replaced session, or a task from before records existed) the next turn
-  // replays once, as before.
-  const owner = task.lastInstanceId;
-  const record = owner ? task.handedMessages?.[owner] : undefined;
-  if (owner && record?.session !== undefined && record.session === task.resumeCursors[owner] &&
-    turnInstance(botForThread(bot.id, threadId) ?? bot, undefined, threadId)?.instanceId === owner &&
-    registry.get(owner)?.adapter.capabilities.strictResume) {
-    store.patchTask(bot.id, threadId, { unread: true });
-    return;
-  }
-  store.patchTask(bot.id, threadId, {
-    resumeCursors: {},
-    lastInstanceId: `${EXTERNAL_CONTEXT_MARKER_PREFIX}${randomUUID()}`,
-    unread: true,
-  });
-}
-
-/** Active-branch messages a provider reads as conversation context. */
-function isContextMessage(m: Message): boolean {
-  return Boolean((m.kind === "text" && m.text) || m.roomRequest?.phase === "result");
-}
-
-const handoffs = new Handoffs({
-  order: (threadId) => store.activePath(threadId).filter(isContextMessage).map((m) => m.id),
-  read: (botId, threadId, instanceId) => store.taskByThread(botId, threadId)?.handedMessages?.[instanceId],
-  write: (botId, threadId, instanceId, state) => store.setHandedMessages(botId, threadId, instanceId, state),
-  replies: (threadId, turnId) => store.activePath(threadId)
-    .filter((m) => m.role === "bot" && m.kind === "text" && !m.from && m.turnId === turnId).map((m) => m.id),
-});
-
-/** Consume one delegated-turn watch and mirror exactly one terminal state.
- * Some harness paths settle a busy bot without a provider turn.completed
- * event, so they call this same finalizer explicitly. */
-function finalizeDelegationWatch(
-  threadId: string,
-  ok: boolean,
-  reply = "",
-  failureName = "Delegated turn did not finish",
-): boolean {
-  const watched = delegationWatch.get(threadId);
-  if (!watched) return false;
-  delegationWatch.delete(threadId);
-  const target = store.bot(watched.toBotId);
-  const targetName = target?.name ?? watched.toBotName ?? watched.toBotId;
-  const source = watched.sourceBotId
-    ? store.bot(watched.sourceBotId)
-    : (watched.sourceThreadId ? store.botByThread(watched.sourceThreadId) : undefined);
-  if (source && target && !canReachPeer(source, target)) {
-    ok = false;
-    reply = "";
-    failureName = "Result withheld: team or peer access changed while the teammate was working";
-  }
-  // The receipt is written before any mirror short-circuits: the delegating
-  // bot's check/wait_delegation must see a terminal state even when the
-  // channel or target is gone.
-  if (watched.taskId && watched.sourceThreadId) {
-    recordDelegationReceipt({
-      id: watched.taskId,
-      sourceThreadId: watched.sourceThreadId,
-      toBotId: watched.toBotId,
-      toBotName: store.bot(watched.toBotId)?.name ?? watched.toBotId,
-      status: ok ? "done" : "failed",
-      result: ok ? reply : failureName,
-    });
-  }
-  let channel: GroupRecord | undefined = watched.channelId ? store.group(watched.channelId) : undefined;
-  let terminalThreadId: string | undefined = watched.sourceThreadId;
-
-  if (source && watched.sourceThreadId) {
-    const sourceGroup = store.groupByThread(watched.sourceThreadId);
-    if (sourceGroup) {
-      // Shared-channel (or DM) source: revalidate membership, since a roster
-      // change while the target ran must not force a result into a group
-      // that no longer contains both bots.
-      const sourceStillMember = sourceGroup.memberIds.includes(source.id);
-      const targetStillMember = target ? sourceGroup.memberIds.includes(target.id) : false;
-      if (!sourceStillMember || !targetStillMember) {
-        if (target) {
-          channel = getOrCreateChannel(store, source, target);
-          terminalThreadId = channel.threadId;
-        } else {
-          // Target is gone: the source may still see the original group, but
-          // there is no peer to share a DM with. Keep the group for source.
-          terminalThreadId = sourceStillMember ? watched.sourceThreadId : undefined;
-          channel = undefined;
-        }
-      }
-      if (terminalThreadId) {
-        if (ok && reply.trim()) {
-          const sourceReply: Omit<Message, "id" | "at"> = {
-            role: "bot",
-            kind: "text",
-            text: `@${targetName} replied to the delegated task:\n\n${reply.trim()}`,
-          };
-          if (target) sourceReply.from = { botId: target.id, name: target.name, color: target.color };
-          store.appendMessage(terminalThreadId, sourceReply);
-        } else {
-          store.appendMessage(terminalThreadId, {
-            role: "bot",
-            kind: "activity",
-            tool: {
-              name: ok
-                ? `Delegation to @${targetName} completed without a text reply`
-                : `Delegation to @${targetName} failed — ${failureName}`,
-              ok,
-            },
-          });
-        }
-        if (channel && terminalThreadId === channel.threadId && !channel.dm) {
-          store.patchGroup(channel.id, { unread: true });
-        }
-      }
-      // Group/DM sources do not have a single direct task to mark or wake.
-      // The delegated result is already in the shared transcript; a group
-      // continuation is the responsibility of the room's own turn engine.
-    } else if (store.taskByThread(source.id, watched.sourceThreadId)) {
-      // 1:1 source: the source thread is the delegating bot's own task.
-      if (ok && reply.trim()) {
-        const sourceReply: Omit<Message, "id" | "at"> = {
-          role: "bot",
-          kind: "text",
-          text: `@${targetName} replied to the delegated task:\n\n${reply.trim()}`,
-        };
-        if (target) sourceReply.from = { botId: target.id, name: target.name, color: target.color };
-        store.appendMessage(watched.sourceThreadId, sourceReply);
-      } else {
-        store.appendMessage(watched.sourceThreadId, {
-          role: "bot",
-          kind: "activity",
-          tool: {
-            name: ok
-              ? `Delegation to @${targetName} completed without a text reply`
-              : `Delegation to @${targetName} failed — ${failureName}`,
-            ok,
-          },
-        });
-      }
-      markTaskContextExternallyUpdated(source, watched.sourceThreadId);
-      // Peer wake: a settled delegated turn resumes the source bot so it
-      // folds the result in and answers the user, instead of sitting idle
-      // with the reply only visible in the thread (the "delegated and went
-      // silent" gap). Failures wake it too — the user must hear the task did
-      // not finish. Idle-checked and burst-capped so a busy source or a
-      // re-delegating loop cannot spin up runs.
-      if (ok) {
-        wakeDelegationSource(source, watched.sourceThreadId, targetName, undefined, watched.routineRunId);
-      } else if (!ok) {
-        wakeDelegationSource(source, watched.sourceThreadId, targetName, failureName || "the delegated turn did not finish", watched.routineRunId);
-      }
-    }
-  }
-
-  if (target && channel) {
-    if (ok && reply.trim()) mirrorReply(commsBus, target, reply, channel);
-    else if (ok) mirrorActivity(commsBus, target, channel, "Delegated turn completed", true);
-    else mirrorActivity(commsBus, target, channel, failureName, false);
-  }
-  return true;
-}
-
 // Drain queued delegations for a source thread after its turn settles.
 // Run as a separate subscriber so the drain logic stays out of the main
 // fold (which has its own switch/case noise) and its approval + startTurn
@@ -4109,152 +3754,6 @@ async function startOrQueueOpenedThread(
   }
 }
 
-// ── live screen: poll the bot's computer while it works ───────────────
-// Frames stream to clients as SSE {kind:'screen'} (the "Bot's screen"
-// panel); the final frame is folded into the transcript on turn end.
-type Frame = { png: string; mime: string };
-const screenPollers = new Map<
-  string,
-  {
-    botId: string;
-    timer: ReturnType<typeof setInterval> | null;
-    capture: (fresh?: boolean) => Promise<void>;
-    /** Which surface the last screen-touching tool acted on. A bot with both
-     * a computer and a browser must be pictured on the one it just used. */
-    surface: "browser" | "computer";
-    last: Frame | null;
-    /** Did this turn actually reach for the screen? A bot that merely HAS
-     * a computer would otherwise end every reply — a one-word "yes"
-     * included — with the same picture of an idle desktop. The flag lives
-     * on the poller entry, which is created and dropped per turn, so it
-     * cannot leak into a later one. */
-    touched: boolean;
-  }
->();
-
-/** The preview shares the box's single command endpoint with the agent's
- * own actions, so every frame we take is latency stolen from the work the
- * user is waiting on. Hence: a slow interval, a floor between captures,
- * and never two in flight. */
-const SCREEN_POLL_MS = 6000;
-const SCREEN_MIN_GAP_MS = 3000;
-const SCREEN_SETTLE_TIMEOUT_MS = 10_000;
-
-/** `screenIsTheWork` starts the turn already counting as screen usage: a
- * boxAgent's whole session runs ON the box, so every tool it calls acts on
- * that screen even though none of them is named like a computer tool. Its
- * shell-only turns are kept honest by the settle-time hash gate instead. */
-function startScreenPoller(
-  botId: string,
-  threadId: string,
-  captures: { computer?: ScreenCapture; browser?: ScreenCapture },
-  { screenIsTheWork = false } = {},
-) {
-  if (!captures.computer && !captures.browser) return;
-  if (screenPollers.has(threadId)) return;
-  const owner = turnResourceOwners.get(threadId);
-  const computer = turnComputerResources.get(threadId);
-  const browserSession = currentBrowserSession(botId, botForThread(botId, threadId)?.browserProfile);
-  const guarded = (capture: ScreenCapture | undefined, resource: string | undefined): ScreenCapture | undefined =>
-    capture && owner && resource ? async () => {
-      const isCurrent = () => turnResourceOwners.get(threadId)?.generation === owner.generation &&
-        turnResources.owns(resource, owner) && Boolean(store.taskByThread(botId, threadId) || store.groupByThread(threadId));
-      if (!isCurrent()) throw new Error("this thread does not own that screen");
-      const frame = await capture();
-      if (!isCurrent()) throw new Error("this thread no longer owns that screen");
-      return frame;
-    } : undefined;
-  // Assign rather than spread: the source's last-frame getter deliberately
-  // hides a stale frame as soon as the selected surface changes.
-  const entry = Object.assign(createScreenFrameSource({
-    captures: {
-      computer: guarded(captures.computer, computer?.resource),
-      browser: guarded(captures.browser, browserSession ? `browser:${browserSession}` : undefined),
-    },
-    control: () => ({
-      held: botComputerControlSnapshot(botId, teamComputerTurns.get(threadId)?.computerId).held,
-      revision: computerControlRevision.get(botId) ?? 0,
-    }),
-    onFrame: (frame) => broadcast({ kind: "screen", botId, threadId, ...frame }),
-    minGapMs: SCREEN_MIN_GAP_MS,
-  }), {
-    timer: null as ReturnType<typeof setInterval> | null,
-    botId,
-    touched: screenIsTheWork,
-  });
-  entry.timer = setInterval(() => void entry.capture(), SCREEN_POLL_MS);
-  screenPollers.set(threadId, entry);
-}
-
-/** Event-driven refresh: capture NOW (the bot just acted on its screen)
- * instead of waiting for the next interval tick. Rate-limited inside
- * capture() — a tool-heavy turn used to fire one full REST chain per
- * completed tool, competing with the agent for the same endpoint. */
-function pokeScreenPoller(threadId: string, touches: boolean, surface?: "browser" | "computer") {
-  const entry = screenPollers.get(threadId);
-  if (!entry) return;
-  // the same signal, read twice: a completed computer tool is both the
-  // reason to refresh the preview NOW and — when it acted on or looked at
-  // the screen — the proof that this turn's final frame is worth settling
-  // into the transcript. A shell command or a status read earns only the
-  // refresh: under the Claude driver every tool of the computer server is
-  // named mcp__computer__*, and matching that alone used to append an
-  // untouched desktop to every curl-and-answer reply.
-  if (touches) entry.touched = true;
-  // Picture the surface the tool acted on. Only a touching tool moves this:
-  // a status read on the computer must not redirect the picture away from a
-  // page the browser is still showing.
-  if (touches && surface) entry.surface = surface;
-  void entry.capture();
-}
-
-function stopScreenPoller(botId: string, threadId?: string) {
-  for (const [id, entry] of screenPollers) {
-    if (entry.botId !== botId || (threadId && id !== threadId)) continue;
-    if (entry.timer) clearInterval(entry.timer);
-    screenPollers.delete(id);
-  }
-}
-
-/** sha256 of the frame each bot last settled into a transcript — the
- * comparison the hash gate needs is "this turn's end state against what
- * the reader can already see". Keyed per bot (one physical screen, however
- * many threads it reports into); a cold entry is seeded from the thread's
- * newest screen message so a restart does not re-picture the same idle
- * desktop either. */
-const settledScreenHashes = new Map<string, string>();
-
-function shownScreenHash(threadId: string): string | undefined {
-  const known = settledScreenHashes.get(threadId);
-  if (known) return known;
-  const shown = store.messagesFor(threadId).findLast((m) => m.kind === "screen" && Boolean(m.png));
-  return shown?.png ? screenFrameHash(shown.png) : undefined;
-}
-
-/** Turn end: stop polling, then take ONE last fresh frame (awaiting any
- * in-flight poke first) so the settled screenshot shows the screen's actual
- * end state, not the previous action's. A turn that never touched the
- * screen settles nothing — and skips the capture, which is one less
- * command on the box's single endpoint. A frame the reader can already see
- * settles nothing either: the boxAgent pre-touch counts every turn as
- * screen work, so without this its shell-only replies would all end in the
- * same idle desktop. Either way the poller is torn down here, so no
- * per-turn state survives the turn. */
-async function finalScreenFrame(_botId: string, threadId: string): Promise<Frame | null> {
-  const entry = screenPollers.get(threadId);
-  const owner = turnResourceOwners.get(threadId);
-  if (!entry) return null;
-  if (entry.timer) clearInterval(entry.timer);
-  screenPollers.delete(threadId);
-  if (!entry.touched) return null;
-  await entry.capture(true);
-  if (!owner || turnResourceOwners.get(threadId)?.generation !== owner.generation ||
-      !store.taskByThread(_botId, threadId)) return null;
-  const frame = entry.last;
-  if (!frame || !settledFrameIsNews(shownScreenHash(threadId), frame.png)) return null;
-  settledScreenHashes.set(threadId, screenFrameHash(frame.png));
-  return frame;
-}
 
 /** A short title for a fresh thread, from the provider's cheap one-shot
  * (generateText — Haiku on Claude, the chat completion endpoint's text
@@ -7444,15 +6943,6 @@ function drainSecretResumes() {
     dispatchSecretResume(entry);
   }
 }
-
-bus.subscribe((event: RuntimeEvent) => {
-  if (shouldIgnoreProviderEvent(event)) return;
-  if (event.type === "turn.completed") {
-    drainConnectorResumes();
-    drainSecretResumes();
-    drainTeamSetupResumes();
-  }
-});
 
 /** Pre-save probe for a CLI path override: run `<cli> --version` with the
  * same environment a real turn gets (augmented PATH). Returns ok + the

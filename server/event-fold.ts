@@ -993,6 +993,19 @@ export function createEventFold(deps: EventFoldDeps) {
       drainQueuedSends();
       drainDelegationWakes();
     });
+
+    // Connector/secret/team-setup resume drains — unlike every subscriber
+    // above, these project nothing into the store or broadcast; they only
+    // restart the turn that was parked on a card once the thread settles.
+    // Registered last, as it was the final bus registration in index.ts.
+    bus.subscribe((event: RuntimeEvent) => {
+      if (shouldIgnoreProviderEvent(event)) return;
+      if (event.type === "turn.completed") {
+        drainConnectorResumes();
+        drainSecretResumes();
+        drainTeamSetupResumes();
+      }
+    });
   }
 
   return {
