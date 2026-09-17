@@ -9,22 +9,17 @@ import { extname, join } from "node:path";
 import { z } from "zod";
 import { SharedComputers } from "./shared-computers.ts";
 import { SharedComputerControl } from "./shared-computer-control.ts";
-import { RoomHandoffs } from "./room-handoffs.ts";
-import { escapeAttribute } from "../shared/attachments.ts";
 
 import {
   BrowserCleanupCoordinator,
   type BrowserCleanupWireRequest,
 } from "./browser-lifecycle-cleanup.ts";
 import { flushDecisionLog } from "./decision-log.ts";
-import { validateBotCwd } from "./bot-cwd.ts";
 import {
   cleanupStaleAttachmentPartials,
 } from "./attachments.ts";
 import { TeamComputers } from "./team-computers.ts";
-import type { WireGroup } from "../shared/wire.ts";
 import * as composio from "./composio.ts";
-import { canAccessTeam } from "./peer-roster.ts";
 import {
   containerComputerStatus,
   containerRuntimeStatus,
@@ -66,27 +61,23 @@ import { restoreChannelMessages } from "./channel-queue.ts";
 import { SendSequencer } from "./send-idempotency.ts";
 import { EventBus } from "./harness/bus.ts";
 import { ManagedDesktopProviders } from "./managed-desktop.ts";
-import { dismissStalePeerCards, type ApprovalBus } from "./peer-approval.ts";
 import { withPeerProvenance } from "./peer-provenance.ts";
-import {
-  type BotRecord,
-  type GroupDefaultResponder,
-  type GroupRecord,
-  type Message,
-} from "./store.ts";
+import type { Message } from "./store.ts";
 import type { TurnOwner } from "./turn-resources.ts";
 import { flushAllMemoryJournals } from "./memory-journal.ts";
 import { discoverExistingPerBotLocalVms, shouldArmLocalVmIdle } from "./local-vm-inventory.ts";
 
 import * as vps from "./vps-computer.ts";
 import { createBotLifecycle } from "./bot-lifecycle.ts";
+import { createCalendarRooms } from "./calendar-rooms.ts";
 import { createEventsPipeline } from "./events-pipeline.ts";
+import { createGroupState } from "./group-state.ts";
 import { createRoutineLifecycle } from "./routine-lifecycle.ts";
 import { createSkillLifecycle } from "./skill-lifecycle.ts";
 import { createTeamSetupLifecycle } from "./team-setup-lifecycle.ts";
 import { createTurnDispatch } from "./turn-dispatch.ts";
 import { RoutineManager } from "./routines.ts";
-import { CalendarCallManager, type CalendarCall } from "./calendar-calls.ts";
+import { CalendarCallManager } from "./calendar-calls.ts";
 import {
   browserEngineEncryptionKey,
   clearBrowserSessionState,
@@ -101,36 +92,21 @@ import { listenWebhookIngress, type WebhookIngress } from "./webhook-ingress.ts"
 import { WebhookManager } from "./webhooks.ts";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 import { loadBundledSkills, loadUserSkills, mergeSkills } from "./skill-library.ts";
-import { createDeferredResumes } from "./deferred-resumes.ts";
 import { createDelegationWatch } from "./delegation-watch.ts";
 import { createTurnIntegrations } from "./turn-integrations.ts";
 import {
-  addGroupGoalCoordinatorTurn,
-  createGroupCoordination,
-  GROUP_GOAL_COORDINATOR_GUARD_MS,
   groupGoalCoordinatorTurns,
   groupIsWorking,
-  groupQueues,
   hasUnboundDiscardedGroupGoalTurn,
   removeGroupGoalCoordinatorTurn,
 } from "./group-coordination.ts";
-import { createBotViews, setActiveCoordinationForThread } from "./bot-views.ts";
-import {
-  checkedGroupResponder,
-  checkedMemberIds,
-  createCheckedInputs,
-} from "./checked-inputs.ts";
+import { createBotViews } from "./bot-views.ts";
+import { createCheckedInputs } from "./checked-inputs.ts";
 import { createDesktopApproval } from "./desktop-approval.ts";
 import { createScreenPollers } from "./screen-pollers.ts";
 import { createComputerLifecycle } from "./computer-lifecycle.ts";
-import { createGroupTurn } from "./group-turn.ts";
-import {
-  createGroupTurnOperations,
-  groupProviderHandshakeStarted,
-  updateGroupGoalRunProgress,
-} from "./group-turn-operations.ts";
+import { createGroupTurnOperations } from "./group-turn-operations.ts";
 import { createConfigViews } from "./config-views.ts";
-import { createLocalVmTurnPrep } from "./local-vm-turn-prep.ts";
 import { createTurnSecrets } from "./turn-secrets.ts";
 import { createGracefulShutdown } from "./graceful-shutdown.ts";
 import {
@@ -200,7 +176,6 @@ import {
   turnResources,
 } from "./turn-admission.ts";
 import { createProviderFleet } from "./provider-fleet.ts";
-import { roomHandoffHandlers } from "./room-handoff-wiring.ts";
 import { createTurnCleanup } from "./turn-cleanup.ts";
 import { createCustomDomainVerifier, customDomainIpv4, normalizeCustomDomain } from "./custom-domain.ts";
 import { allowedScopes, createEmailSignIn, parseAllowList } from "./account-signin.ts";
@@ -397,7 +372,8 @@ const browserCleanup: BrowserCleanupCoordinator = new BrowserCleanupCoordinator(
 // The group-turn operation lifecycle — begin/finish, goal-run cards, member
 // waits, cancellation, handshake flags, activeGroupTurnForBot — lives in
 // ./group-turn-operations.ts; updateGroupGoalRunProgress and
-// groupProviderHandshakeStarted are imported from it directly. The factory is
+// groupProviderHandshakeStarted are imported from it directly by
+// ./group-state.ts. The factory is
 // wired here because createCheckedInputs just below is the earliest
 // module-level by-value consumer (activeGroupTurnForBot); every other input
 // is a thunk over consts this file declares further down.
@@ -420,7 +396,7 @@ const {
     clearCancelledProviderHandshake: (threadId, ownerId) => clearCancelledProviderHandshake(threadId, ownerId),
   },
   helpers: {
-    publicGroupState,
+    publicGroupState: (group) => publicGroupState(group),
     notify: (notification) => notify(notification),
     routineSourceOwner: (run) => routineSourceOwner(run),
     routineSourceThread: (run) => routineSourceThread(run),
@@ -862,8 +838,9 @@ function askBotAndWait(targetBotId: string, message: string, depth: number, from
   });
 }
 // The checked-input validators live in ./checked-inputs.ts: the pure ones
-// (checkedExportSkillNames, collectExportSkills, checkedGroupResponder,
-// checkedMemberIds) are imported directly, while checkedModelSelection and
+// (checkedExportSkillNames, collectExportSkills) are imported directly,
+// checkedGroupResponder and checkedMemberIds by ./group-state.ts, while
+// checkedModelSelection and
 // checkedTaskModelSwitch come from the createCheckedInputs factory wired near
 // the top of this file — they read the providerInstancesChanging set this
 // file destructures from providerFleet far below. askBotAndWait stays here:
@@ -922,432 +899,71 @@ const {
 });
 
 // ── group coordination ─────────────────────────────────────────────────
-// The group-coordination registry and coordination copy/policy helpers
-// live in ./group-coordination.ts: the groupTurnOperations and
-// groupGoalCoordinatorTurns maps, groupQueues and groupIsWorking are
-// module state there; the helpers that read host state come from
-// createGroupCoordination, wired at this, the registry's original site —
-// after createTurnIntegrations supplies retireProviderTurn by value and
-// before createGroupTurn, the room-handoff handlers and the event fold
-// consume its results — with roomHandoffs, declared just below, arriving
-// as a thunk.
+// The group state cluster -- channel CRUD, the deferred-resume queues,
+// Local VM turn prep, the room/goal turn engine, the room-handoff registry
+// with the store change fold, and the message pages -- lives in
+// ./group-state.ts; index.ts wires the factory at the region's original
+// site and rebinds its names below. The helpers crossed by value from the
+// factories wired above; the lateBound slice reads names this file declares
+// further down (events pipeline, turn dispatch, provider fleet) plus the
+// calendar-room helpers from ./calendar-rooms.ts, all resolved at call time.
 const {
   groupGoalCoordinatorTurnForEvent, channelTaskBlocked, roomHandoffProblem,
-  coordinationSystemInstructions, coordinationTurnText,
-} = createGroupCoordination({
-  lateBound: { roomHandoffs: () => roomHandoffs },
-  helpers: { retireProviderTurn, roomSetupPending },
-});
-
-// The public and Chief room tools use the same synchronous validation and write.
-// Keep authorization at each ingress; no internal caller gains public admin scope.
-function createChannel(value: unknown): GroupRecord {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw Object.assign(new Error("channel must be a JSON object"), { status: 400 });
-  }
-  const body = value as Record<string, unknown>;
-
-  const roster = checkedMemberIds(body.memberIds);
-  if (!roster.ok) throw Object.assign(new Error(roster.error), { status: 400 });
-  const { memberIds } = roster;
-  if (body.name !== undefined && typeof body.name !== "string") {
-    throw Object.assign(new Error("channel name must be a string"), { status: 400 });
-  }
-  const name = body.name?.trim() || `${store.bot(memberIds[0])!.name} & co.`;
-  if (name.length > 100) throw Object.assign(new Error("channel name must be at most 100 characters"), { status: 400 });
-  let section: string | undefined;
-  if (body.section !== undefined && body.section !== null) {
-    if (typeof body.section !== "string") throw Object.assign(new Error("context must be a string"), { status: 400 });
-    section = body.section.trim() || undefined;
-    if (section && section.length > 60) {
-      throw Object.assign(new Error("context must be at most 60 characters"), { status: 400 });
-    }
-  }
-  let setup:
-    | { bulletin: string; defaultResponder: GroupDefaultResponder; completed: true }
-    | undefined;
-  if (body.setup !== undefined) {
-    if (!body.setup || typeof body.setup !== "object" || Array.isArray(body.setup)) {
-      throw Object.assign(new Error("setup must be an object"), { status: 400 });
-    }
-    const requested = body.setup as { bulletin?: unknown; defaultResponder?: unknown };
-    if (typeof requested.bulletin !== "string") {
-      throw Object.assign(new Error("setup.bulletin must be a string"), { status: 400 });
-    }
-    if (requested.bulletin.length > 12_000) {
-      throw Object.assign(new Error("setup.bulletin must be at most 12000 characters"), { status: 400 });
-    }
-    const responder = checkedGroupResponder(requested.defaultResponder, memberIds);
-    if (!responder) throw Object.assign(new Error("invalid setup.defaultResponder"), { status: 400 });
-    setup = { bulletin: requested.bulletin, defaultResponder: responder, completed: true };
-  }
-  return store.createGroup(name, memberIds, false, section, setup);
-}
-
-function updateChannel(groupId: string, value: unknown): GroupRecord {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw Object.assign(new Error("body must be a JSON object"), { status: 400 });
-  }
-  const body = value as Record<string, unknown>;
-
-  const existing = store.group(groupId);
-  if (!existing) throw Object.assign(new Error("no such room"), { status: 404 });
-  if (body.memberIds !== undefined && phoneSecretSubmissions.hasGroup(existing.id)) {
-    throw Object.assign(new Error("this channel is securely saving a credential — try again when it finishes"), { status: 409 });
-  }
-  if (
-    channelTaskBlocked(existing) &&
-    (body.memberIds !== undefined || body.defaultResponder !== undefined || body.bulletin !== undefined)
-  ) {
-    throw Object.assign(new Error("this channel is working or waiting on you — finish that turn first"), { status: 409 });
-  }
-  const patch: Record<string, unknown> = {};
-  if (body.name !== undefined) {
-    if (typeof body.name !== "string") throw Object.assign(new Error("room name must be a string"), { status: 400 });
-    const name = body.name.trim();
-    if (!name) throw Object.assign(new Error("room name must not be empty"), { status: 400 });
-    if (name.length > 100) throw Object.assign(new Error("room name must be at most 100 characters"), { status: 400 });
-    patch.name = name;
-  }
-  if (body.bulletin !== undefined) {
-    if (typeof body.bulletin !== "string") throw Object.assign(new Error("bulletin must be a string"), { status: 400 });
-    if (body.bulletin.length > 12_000) {
-      throw Object.assign(new Error("bulletin must be at most 12000 characters"), { status: 400 });
-    }
-    patch.bulletin = body.bulletin;
-  }
-  if (body.unread !== undefined) {
-    if (typeof body.unread !== "boolean") throw Object.assign(new Error("unread must be true or false"), { status: 400 });
-    patch.unread = body.unread;
-  }
-  if (body.memberIds !== undefined) {
-    // A DM is the pair it was opened for; only real rooms have a roster.
-    if (existing.dm) throw Object.assign(new Error("direct-message channels cannot change members"), { status: 400 });
-    const roster = checkedMemberIds(body.memberIds);
-    if (!roster.ok) throw Object.assign(new Error(roster.error.replace("channel", "room")), { status: 400 });
-    const removedGoalLead = routines!.listRoutines().some(
-      (routine) =>
-        routine.enabled &&
-        routine.target === "room-goal" &&
-        routine.groupId === existing.id &&
-        !roster.memberIds.includes(routine.botId),
-    ) || routines!.listRuns().some(
-      (run) =>
-        run.target === "room-goal" &&
-        run.groupId === existing.id &&
-        ["queued", "running", "waiting"].includes(run.status) &&
-        !roster.memberIds.includes(run.botId),
-    );
-    if (removedGoalLead) {
-      throw Object.assign(new Error("pause or reassign this room's team-goal routine before removing its lead"), { status: 409 });
-    }
-    patch.memberIds = roster.memberIds;
-  }
-  if (body.defaultResponder !== undefined) {
-    const memberIds = (patch.memberIds as string[] | undefined) ?? existing.memberIds;
-    const responder = checkedGroupResponder(body.defaultResponder, memberIds);
-    if (!responder) throw Object.assign(new Error("invalid default responder"), { status: 400 });
-    patch.defaultResponder = responder;
-  }
-  if (body.cwd !== undefined) {
-    if (existing.dm) throw Object.assign(new Error("direct-message channels cannot have a working folder"), { status: 400 });
-    if (existing.pinnedCwd !== undefined) {
-      throw Object.assign(new Error("the room's working folder is fixed after its first turn"), { status: 409 });
-    }
-    const checked = validateBotCwd(body.cwd);
-    if (!checked.ok) throw Object.assign(new Error(checked.error), { status: 400 });
-    patch.cwd = checked.cwd ?? undefined;
-  }
-  // one pinned message per room; null/"" clears. The id is not
-  // validated against the transcript here — a pin whose message was
-  // edited away or deleted simply resolves to nothing in the UI.
-  if (body.pinnedMessageId !== undefined) {
-    if (body.pinnedMessageId === null || body.pinnedMessageId === "") patch.pinnedMessageId = undefined;
-    else if (typeof body.pinnedMessageId === "string" && /^[\w-]+$/.test(body.pinnedMessageId)) {
-      patch.pinnedMessageId = body.pinnedMessageId;
-    } else throw Object.assign(new Error("pinnedMessageId must be a message id"), { status: 400 });
-  }
-  // same contract as a bot's sidebar section: null/"" clears, 60 chars max
-  if (body.section !== undefined) {
-    if (body.section === null) patch.section = undefined;
-    else if (typeof body.section !== "string") throw Object.assign(new Error("section must be a string"), { status: 400 });
-    else {
-      const trimmed = body.section.trim();
-      if (!trimmed) patch.section = undefined;
-      else if (trimmed.length > 60) throw Object.assign(new Error("section must be at most 60 characters"), { status: 400 });
-      else patch.section = trimmed;
-    }
-  }
-  const group = store.patchGroup(groupId, patch);
-  if (!group) throw Object.assign(new Error("no such room"), { status: 404 });
-  return group;
-}
-
-/** A person may steer a conversation whose teammates are still working: the
- * new turn starts now and the assignments stay attached. Tell that turn what
- * is still out — a model told nothing assumes its fan-out died and sends the
- * same work again, or reports it as lost. */
-function outstandingAssignmentsPrompt(threadId: string): string {
-  const pending = roomHandoffs.outstandingDirect(threadId);
-  if (!pending.length) return "";
-  const listed = pending.map(node => ({
-    requestId: node.id,
-    bot: store.bot(node.botId)?.name ?? "Teammate",
-    assignment: node.text.slice(0, 1_000),
-    status: node.status === "queued" ? "waiting for that teammate to be free" : "working on it now",
-  }));
-  return ` Assignments you already sent are still outstanding, and nothing in this conversation cancelled them: ${JSON.stringify(listed)}. Do not send them again, do not poll or wait for them, and do not tell the user they were lost. Each result returns to this conversation on its own and resumes you then. Answer the message above with that work still in flight.`;
-}
-
-// ── deferred resumes ───────────────────────────────────────────────────
-// The three pending-resume queues that re-dispatch a blocked turn once the
-// card it paused for settles — team-setup decisions, inline connector cards
-// and secret/credential cards — live in ./deferred-resumes.ts. It is wired
-// here because createGroupTurn just below is the earliest module-level
-// by-value consumer of its drains; runGroupMemberTurn and startTurn are
-// wrapper thunks over consts this file declares after this site.
-const {
-  pendingTeamSetupResumes, teamSetupResumeGenerations,
-  cancelTeamSetupResumesForThread, dispatchTeamSetupResume, drainTeamSetupResumes,
+  coordinationSystemInstructions,
+  createChannel, updateChannel, outstandingAssignmentsPrompt,
+  pendingTeamSetupResumes, teamSetupResumeGenerations, cancelTeamSetupResumesForThread,
+  dispatchTeamSetupResume, drainTeamSetupResumes,
   connectorThread, connectorMessage, maybeResumeConnectors, drainConnectorResumes,
   secretMessage, resumeSecretCard, drainSecretResumes,
-} = createDeferredResumes({
-  lateBound: {
-    runGroupMemberTurn: (groupId, threadId, botId, hop, spoken, cardContinuation, onDispatchError, isCancelled, onProviderHandshakeStarted, onProviderHandshakeSettled) =>
-      runGroupMemberTurn(groupId, threadId, botId, hop, spoken, cardContinuation, onDispatchError, isCancelled, onProviderHandshakeStarted, onProviderHandshakeSettled),
-    startTurn: (botId, text, opts) => startTurn(botId, text, opts),
-  },
-  helpers: {
-    activeGroupTurnForBot,
-    beginGroupTurnOperation, finishGroupTurnOperation,
-    groupProviderHandshakeStarted, groupProviderHandshakeSettled,
-  },
-  state: { groupQueues },
-});
-
-// ── local VM turn prep ───────────────────────────────────────────────────────────────────────
-// The Local VM turn-prep helpers live in ./local-vm-turn-prep.ts: the
-// payload view, the recreate-if-idle-removed readiness walk, and the
-// per-bot instance counts. Wired here because createGroupTurn just below
-// is the earliest module-level by-value consumer of readyLocalVmForTurn;
-// broadcast and the mutable localVmProvisionBusy flag arrive as thunks
-// over consts this file declares after this site.
-const {
   localVmPayload, readyLocalVmForTurn, existingPerBotLocalVmCount, perBotLocalVmCountForModeChange,
-} = createLocalVmTurnPrep({
+  teammateReportContext, roomPostBudgets, startGroupTurn, drainQueuedChannelSends,
+  roomHandoffs, publicGroupState, groupWithThread,
+  DEFAULT_PAGE, pageSize, messagePage, messageWindow,
+} = createGroupState({
+  helpers: {
+    bus, MAX_COMMS_DEPTH, DirectTurnSetupCancelled,
+    retireProviderTurn, shouldIgnoreProviderEvent, markCancelledProviderHandshake,
+    clearCancelledProviderHandshake, pendingCancelledProviderHandshakes,
+    providerTransitionForTurn, turnInstance, boxLifecycleBusyBots,
+    localVmLeaseFor, localVmIdleFor, localVmTargetForBot, localVmThreadTargets,
+    localVmActiveThreads, localVmOwnerBusy, localVmLifecycleBusy,
+    LOCAL_VM_IDLE_MS, LOCAL_VM_DESKTOP_WAIT_MS, noteLocalVmSeen, releaseLocalVmThread,
+    attachTeamBox, inheritedTeamComputer, teamComputerPrompt,
+    controlIntegration, browserIntegration, phoneIntegration, connectedAppsIntegration, agentsIntegration,
+    runningTurnEngines,
+    beginGroupTurnOperation, finishGroupTurnOperation, finishGroupGoalRun,
+    waitForGroupMemberBot, waitForChatRoomMember, groupProviderHandshakeSettled, activeGroupTurnForBot,
+    releaseTurnResources, interruptDirectThread, startScreenPoller,
+    roomTurnApprovalMode, fullAccessForSource, wireBot, publicBotQueuedMessages,
+    availableSkills, bindTurnComputer, markTaskContextExternallyUpdated,
+  },
   lateBound: {
     broadcast: (payload) => broadcast(payload),
-    setLocalVmProvisionBusy: (value) => { localVmProvisionBusy = value; },
-  },
-  lifecycle: {
-    localVmLifecycleBusy, LOCAL_VM_IDLE_MS, LOCAL_VM_DESKTOP_WAIT_MS, localVmIdleFor, noteLocalVmSeen,
-  },
-});
-// ── group turn engine ───────────────────────────────────────────────────────────────
-// The room/goal turn engine lives in ./group-turn.ts. It is wired here
-// because roomHandoffs (just below) is the earliest module-level consumer
-// of runGroupMemberTurn; thunks read consts declared later in this file.
-const {
-  runGroupMemberTurn, teammateReportContext, roomPostBudgets, startGroupTurn, drainQueuedChannelSends,
-} = createGroupTurn({
-  events: {
-    bus, watchdog: () => watchdog, roomStallCompletions: () => roomStallCompletions,
-    shouldIgnoreProviderEvent, retireProviderTurn, markCancelledProviderHandshake,
-    clearCancelledProviderHandshake, pendingCancelledProviderHandshakes,
-    runningTurnEngines: () => runningTurnEngines, DirectTurnSetupCancelled,
-  },
-  admission: {
-    providerFleet: () => providerFleet, providerInstancesChanging: () => providerInstancesChanging,
-    providerTransitionForTurn, turnInstance, boxLifecycleBusyBots: () => boxLifecycleBusyBots,
-    roomTurnApprovalMode, MAX_COMMS_DEPTH,
-  },
-  handoffs: { roomHandoffs: () => roomHandoffs, roomHandoffProblem },
-  rooms: { groupQueues, groupSpeakers: () => groupSpeakers, groupIsWorking, roomSetupPending, resolveReplyTarget },
-  operations: {
-    beginGroupTurnOperation, finishGroupTurnOperation, finishGroupGoalRun, updateGroupGoalRunProgress,
-    waitForGroupMemberBot, waitForChatRoomMember, groupProviderHandshakeStarted, groupProviderHandshakeSettled,
-    hasUnboundDiscardedGroupGoalTurn,
-  },
-  goalFold: {
-    groupGoalCoordinatorTurns, addGroupGoalCoordinatorTurn, removeGroupGoalCoordinatorTurn,
-    GROUP_GOAL_COORDINATOR_GUARD_MS, GROUP_GOAL_WAIT_MAX_MS: () => GROUP_GOAL_WAIT_MAX_MS,
+    watchdog: () => watchdog,
+    roomStallCompletions: () => roomStallCompletions,
+    groupSpeakers: () => groupSpeakers,
+    markInternalTurn: (threadId) => markInternalTurn(threadId),
+    isUnattended: (botId, threadId) => isUnattended(botId, threadId),
+    markUnattended: (botId, threadId) => markUnattended(botId, threadId),
+    GROUP_GOAL_WAIT_MAX_MS: () => GROUP_GOAL_WAIT_MAX_MS,
     GROUP_GOAL_MAX_WAIT_EXHAUSTIONS: () => GROUP_GOAL_MAX_WAIT_EXHAUSTIONS,
-  },
-  cleanup: {
-    releaseTurnResources, releaseLocalVmThread, startScreenPoller,
+    providerFleet: () => providerFleet,
+    providerInstancesChanging: () => providerInstancesChanging,
+    drainQueuedSends: () => drainQueuedSends(),
     retryDelegationsWaitingOn: (botId) => retryDelegationsWaitingOn(botId),
-    drains: { drainQueuedSends: () => drainQueuedSends(), drainConnectorResumes, drainSecretResumes, drainTeamSetupResumes },
+    startTurn: (botId, text, opts) => startTurn(botId, text, opts),
+    followupsReady: () => followupsReady,
+    localVmImageBusy: () => localVmImageBusy,
+    localVmModeChangeBusy: () => localVmModeChangeBusy,
+    setLocalVmProvisionBusy: (value) => { localVmProvisionBusy = value; },
+    roomSetupPending: (group) => roomSetupPending(group),
+    resolveReplyTarget: (threadId, value) => resolveReplyTarget(threadId, value),
+    routines: () => routines,
+    routineWiring: () => routineWiring,
+    phoneSecretSubmissions: () => phoneSecretSubmissions,
   },
-  localVm: {
-    localVmLeaseFor, localVmIdleFor, localVmThreadTargets: () => localVmThreadTargets,
-    localVmActiveThreads: () => localVmActiveThreads, localVmLifecycleBusy: () => localVmLifecycleBusy,
-    localVmOwnerBusy: () => localVmOwnerBusy, localVmImageBusy: () => localVmImageBusy,
-    localVmModeChangeBusy: () => localVmModeChangeBusy, readyLocalVmForTurn,
-    localVmTargetForBot,
-  },
-  computers: {
-    bindTurnComputer, attachTeamBox, controlIntegration, browserIntegration, phoneIntegration,
-    connectedAppsIntegration, agentsIntegration, inheritedTeamComputer, teamComputerPrompt,
-  },
-  prompts: { availableSkills },
-  queue: { followupsReady: () => followupsReady },
 });
 
-const roomHandoffs: RoomHandoffs = new RoomHandoffs(join(DATA_DIR, "room-handoffs.json"), roomHandoffHandlers({
-  store,
-  threadBusy,
-  botAtThreadCapacity,
-  maxCommsDepth: MAX_COMMS_DEPTH,
-  groupQueues,
-  roomHandoffProblem,
-  coordinationSystemInstructions,
-  coordinationTurnText,
-  fullAccessForSource,
-  groupIsWorking,
-  publicGroupState,
-  wireBot,
-  broadcast: () => broadcast,
-  roomHandoffs: () => roomHandoffs,
-  drainQueuedSends: () => drainQueuedSends(),
-  markTaskContextExternallyUpdated,
-  markInternalTurn: (threadId) => markInternalTurn(threadId),
-  isUnattended: (botId, threadId) => isUnattended(botId, threadId),
-  markUnattended: (botId, threadId) => markUnattended(botId, threadId),
-  startTurn: (botId, text, opts) => startTurn(botId, text, opts),
-  beginGroupTurnOperation,
-  finishGroupTurnOperation,
-  waitForChatRoomMember,
-  runGroupMemberTurn,
-  groupProviderHandshakeStarted,
-  groupProviderHandshakeSettled,
-  interruptDirectThread,
-}));
-setActiveCoordinationForThread(threadId => roomHandoffs.activeDirect(threadId));
-function publicGroupState(group: GroupRecord): WireGroup {
-  return { ...group, working: groupIsWorking(group) || [...roomHandoffs.nodes.values()].some(n => n.groupId === group.id && !["completed", "failed", "cancelled"].includes(n.status)) };
-}
-
-const groupWithThread = (group: GroupRecord) => ({
-  ...publicGroupState(group),
-  messages: store.messagesFor(group.threadId),
-  activeLeafId: store.activeLeaf(group.threadId),
-  ...(group.dm ? {} : { tasks: store.groupTasks(group.id) }),
-});
-
-// The store tells us what it wrote; this is the ONE place that turns those
-// into SSE frames. No mutation path can persist without emitting — the
-// property holds by construction, not by every call site remembering to
-// broadcast. Bot frames are the slim wire shape (no transcript); the few
-// endpoints whose callers need the transcript (task create/switch, imports)
-// still send their richer payload on top.
-store.onChange((change) => {
-  switch (change.type) {
-    case "sections":
-      broadcast({ kind: "sections", sections: store.sections });
-      break;
-    case "message":
-      broadcast({ kind: "message", threadId: change.threadId, message: change.message });
-      break;
-    case "message.patch":
-      broadcast({ kind: "message.patch", threadId: change.threadId, message: change.message });
-      break;
-    case "thread":
-      broadcast({ kind: "thread", threadId: change.threadId, activeLeafId: change.activeLeafId });
-      break;
-    case "thread.deleted":
-      routines?.forgetRoutineRequestReceiptsForThread(change.threadId);
-      // A deleted destination must not strand an approval in an internal
-      // task. Keep each run's snapshot and expose its execution as fallback.
-      for (const run of routines?.listRuns() ?? []) {
-        if (run.resultsThreadId === change.threadId || run.sourceThreadId === change.threadId) {
-          routineWiring.syncRoutineRunToSource(run);
-        }
-      }
-      broadcast({ kind: "bot.queued", queues: publicBotQueuedMessages() });
-      break;
-    case "bot": {
-      const bot = store.bot(change.botId);
-      if (bot) broadcast({ kind: "bot", bot: wireBot(bot) });
-      break;
-    }
-    case "bot.deleted":
-      broadcast({ kind: "bot.deleted", botId: change.botId });
-      break;
-    case "group": {
-      const group = store.group(change.groupId);
-      if (group) broadcast({ kind: "group", group: publicGroupState(group) });
-      break;
-    }
-    case "group.deleted":
-      broadcast({ kind: "group.deleted", groupId: change.groupId });
-      break;
-  }
-});
-
-// ── message pages ──────────────────────────────────────────────────────
-// GET /api/bots hands back every bot with its entire transcript, which is
-// the right answer over loopback and the wrong one over a phone network:
-// a long-running bot's thread is megabytes, and a turn-end desktop capture
-// is a base64 PNG sitting inline in it.
-//
-// `?messages=n` opts into a slim shape — the last n messages, with screen
-// captures reduced to a flag and fetched one at a time from the image
-// endpoint. Omitting the parameter returns exactly what it always did.
-const MESSAGE_PAGE_MAX = 200;
-const DEFAULT_PAGE = 50;
-
-/** undefined = absent, null = present but unusable (the caller answers 400). */
-function pageSize(raw: string | null): number | null | undefined {
-  if (raw === null) return undefined;
-  const size = Number(raw);
-  if (!Number.isInteger(size) || size < 0) return null;
-  return Math.min(size, MESSAGE_PAGE_MAX);
-}
-
-/** A screen message without its pixels. The client fetches those from
- * `/api/threads/:threadId/messages/:id/image` when it actually shows one. */
-function slimMessage(message: Message): Message | Record<string, unknown> {
-  if (message.kind !== "screen" || !message.png) return message;
-  const { png: _png, mime: _mime, ...rest } = message;
-  return { ...rest, hasImage: true };
-}
-
-/** `limit === undefined` is the original, unpaginated shape. A bounded,
- * cursor-less request (the common case: startup hydrate, a fresh
- * scrollback view) goes through messagesTail(), which can read just the
- * newest rows from SQLite instead of hydrating the whole transcript first.
- * Paging further back with `before` still needs the full, cached array to
- * seek to an arbitrary point in history. */
-function messagePage(threadId: string, limit: number | undefined, before?: string | null) {
-  if (limit === undefined) {
-    return { messages: store.messagesFor(threadId), activeLeafId: store.activeLeaf(threadId) };
-  }
-  if (!before) {
-    const tail = store.messagesTail(threadId, limit);
-    return { messages: tail.messages.map(slimMessage), hasMore: tail.hasMore, activeLeafId: tail.activeLeafId };
-  }
-  const all = store.messagesFor(threadId);
-  const end = all.findIndex((msg) => msg.id === before);
-  const stop = end === -1 ? all.length : end;
-  const start = Math.max(0, stop - limit);
-  return {
-    messages: all.slice(start, stop).map(slimMessage),
-    hasMore: start > 0,
-    activeLeafId: store.activeLeaf(threadId),
-  };
-}
-
-/** A bounded page centred on a known message, used when a search result is
- * opened on a client that only hydrated the newest part of the transcript. */
-function messageWindow(threadId: string, messageId: string, limit: number) {
-  const all = store.messagesFor(threadId);
-  const index = all.findIndex((message) => message.id === messageId);
-  if (index < 0) return null;
-  const before = Math.floor((limit - 1) / 2);
-  const start = Math.max(0, Math.min(index - before, all.length - limit));
-  const stop = Math.min(all.length, start + limit);
-  return { messages: all.slice(start, stop).map(slimMessage), hasMore: start > 0 };
-}
 
 // ── SSE fan-out to clients ────────────────────────────────────────────────────────────────────
 // The fan-out wiring, the event fold wiring, and the unattended/internal
@@ -1680,7 +1296,7 @@ const {
   wiring: {
     events: { broadcast, notify },
     helpers: {
-      unattendedDispatchState, roomSetupPending, groupIsWorking, startGroupTurn,
+      unattendedDispatchState, roomSetupPending: (group) => roomSetupPending(group), groupIsWorking, startGroupTurn,
       cancelGroupTurnOperations, cancelDirectTurnDispatch, runningTurnInstance,
     },
     state: { groupSpeakers, delegationWatch, pendingDelegationWakes, publicBot, startTurn },
@@ -1688,7 +1304,7 @@ const {
   helpers: {
     interruptAllDirectThreads, activeGroupTurnForBot, fullAccessForSource,
     proposalPersistence: (botId, threadId) => proposalPersistence(botId, threadId),
-    deliverCalendarCall,
+    deliverCalendarCall: (call, scheduledFor) => deliverCalendarCall(call, scheduledFor),
   },
   host: {
     routines: () => routines,
@@ -1767,156 +1383,21 @@ const webhookIngressStatus = () => ({
 });
 
 // ── config hot-reload ─────────────────────────────────────────────────
-const roomHandoffTimer = setInterval(() => {
-  try { roomHandoffs.tick(); } catch (error) { console.error("room handoffs:", error); }
-}, 250);
-roomHandoffTimer.unref();
-/** Long enough for a real update, short enough that a room stays readable. */
-const ROOM_POST_MAX_CHARS = 4_000;
+// The calendar-rooms cluster -- the room-handoff tick, the approval bus,
+// calendar-call room provisioning and delivery, room setup/reply/post
+// policy -- lives in ./calendar-rooms.ts; index.ts wires the factory at the
+// region's original site so the interval starts at the same point in module
+// evaluation order. roomSetupPending, resolveReplyTarget and
+// deliverCalendarCall are consumed by factories wired earlier in this file,
+// which pass wrapper thunks over the names returned here.
+const {
+  ROOM_POST_MAX_CHARS, approvalBus, ensureCalendarCallRoom, deliverCalendarCall,
+  roomSetupPending, resolveReplyTarget, lastHumanRoomMessageAt, roomPostEligibility,
+} = createCalendarRooms({
+  helpers: { roomHandoffs, broadcast, notify, fullAccessForSource, startGroupTurn },
+  lateBound: { calendarCalls: () => calendarCalls },
+});
 
-// approval bus: peer-approval.ts only needs to push cards and broadcast
-// them — its pending map lives in the module so the two respond endpoints
-// can call resolvePeerComms without holding a reference back to here.
-const approvalBus: ApprovalBus = { store, broadcast, notify, autoApply: fullAccessForSource };
-
-// Approvals live only in memory, so any peer card still open on disk is one
-// whose resolver died with the previous process. Left alone it can never be
-// answered, and the composer stays disabled behind it — settle them at boot.
-{
-  const stale = dismissStalePeerCards(approvalBus);
-  if (stale) console.log(`peer approvals: dismissed ${stale} card(s) left by a previous run`);
-}
-
-function sameCalendarRoster(group: GroupRecord, botIds: readonly string[]): boolean {
-  if (group.dm || group.memberIds.length !== botIds.length) return false;
-  const wanted = new Set(botIds);
-  return group.memberIds.every((id) => wanted.has(id));
-}
-
-function ensureCalendarCallRoom(call: CalendarCall): GroupRecord {
-  const linked = call.roomId ? store.group(call.roomId) : undefined;
-  let group = linked && sameCalendarRoster(linked, call.botIds) && !roomSetupPending(linked)
-    ? linked
-    : undefined;
-  group ??= store.createGroup(call.name, call.botIds, false, undefined, {
-    bulletin: "",
-    defaultResponder: { kind: "everyone" },
-    completed: true,
-  });
-  if (call.roomId !== group.id) calendarCalls!.linkRoom(call.id, group.id);
-  return group;
-}
-
-function deliverCalendarCall(call: CalendarCall, scheduledFor: number): void {
-  // A one-bot calendar entry remains a reminder that opens that bot's chat.
-  // Multi-bot entries are rooms and begin with the shared event prompt.
-  if (call.botIds.length < 2) return;
-  const group = ensureCalendarCallRoom(call);
-  const text = [
-    `@everyone ${call.description.trim() || call.name}`,
-    ...call.attachments.map((attachment) =>
-      `<${attachment.kind === "image" ? "attached-image" : "attached-file"} path="${escapeAttribute(attachment.path)}" name="${escapeAttribute(attachment.name)}" />`
-    ),
-  ].join("\n\n");
-  const sendId = `calendar_${call.id}_${scheduledFor}`;
-  const threadIds = new Set([group.threadId, ...(group.tasks ?? []).map((task) => task.threadId)]);
-  const messages = [...threadIds].flatMap((threadId) => store.messagesFor(threadId));
-  if (messages.some((message) => message.sendId === sendId)) return;
-  startGroupTurn(group.id, text, undefined, sendId);
-}
-
-function roomSetupPending(group: GroupRecord): boolean {
-  const hasMarker =
-    Object.prototype.hasOwnProperty.call(group, "setupCompletedAt") ||
-    Object.prototype.hasOwnProperty.call(group, "setupSkippedAt");
-  return (
-    !group.dm &&
-    hasMarker &&
-    group.setupCompletedAt == null &&
-    group.setupSkippedAt == null &&
-    store.messagesFor(group.threadId).length === 0
-  );
-}
-
-function resolveReplyTarget(threadId: string, value: unknown): Message | undefined {
-  if (value === undefined || value === null || value === "") return undefined;
-  if (typeof value !== "string") throw Object.assign(new Error("replyToId must be a message id"), { status: 400 });
-  const target = store.messagesFor(threadId).find((message) => message.id === value);
-  if (!target || target.kind !== "text" || !target.text?.trim()) {
-    throw Object.assign(new Error("the message being replied to is no longer available"), { status: 404 });
-  }
-  return target;
-}
-
-/** When a person last wrote into the room's current conversation, if one
- * ever has. The posting budget's ceiling counts only the bot posts nobody
- * has answered since, so this is read fresh on every attempt rather than
- * remembered — the room's transcript is already the record of who spoke
- * last, and a second copy of it could only ever disagree.
- *
- * Only a person puts a user-role message in a room: the composer, or a
- * calendar call they scheduled. No bot tool has that ingress — post_to_room
- * appends role "bot", which is the rule this whole surface turns on. The
- * one door a bot's shell could reach on a headless server, the HTTP API
- * with no session behind it, stamps what it lets in (Message.via), and a
- * line so stamped does not count here — so a bot cannot re-arm the ceiling
- * it just spent. */
-function lastHumanRoomMessageAt(group: GroupRecord): number | undefined {
-  const messages = store.messagesFor(group.threadId);
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i];
-    if (message.role === "user" && message.kind === "text" && !message.via) return message.at;
-  }
-  return undefined;
-}
-
-/** Whether `bot` may write into `group` from outside a turn there, and the
- * exact refusal when it may not.
- *
- * Room membership is the one place the app's section boundary does not
- * reach: list_bots, ask_bot, delegate_bot and create_bot are all scoped to
- * the sender's section, but a person is free to put bots from two sections
- * in one room. A tool that pushed text into such a room would therefore be
- * the first way one section speaks to another with nobody in the loop, so
- * this refuses it outright rather than trying to judge when that is
- * harmless. The cost is real — a genuinely cross-section room cannot be
- * posted into from outside — and it is the cheaper mistake: the person can
- * still relay, and the boundary keeps meaning exactly one thing.
- *
- * Membership is read from the record here and never from a tool argument;
- * the argument only names which room to look up. */
-function roomPostEligibility(
-  bot: BotRecord,
-  group: GroupRecord,
-): { ok: true } | { ok: false; status: number; error: string } {
-  if (group.dm) {
-    return {
-      ok: false,
-      status: 400,
-      error: "that is a one-to-one bot channel, not a room — use ask_bot or delegate_bot to reach a single bot",
-    };
-  }
-  if (!group.memberIds.includes(bot.id)) {
-    return { ok: false, status: 403, error: "you are not a member of that room" };
-  }
-  const outsider = group.memberIds
-    .map((id) => store.bot(id))
-    .find((member) => member && !canAccessTeam(bot, member.section));
-  if (outsider) {
-    return {
-      ok: false,
-      status: 403,
-      error: `that room includes @${outsider.name}, who is outside your section — tell the user what you wanted to post there instead`,
-    };
-  }
-  // A room whose setup the person has not finished has never been opened
-  // for business, and its first message decides whether setup still counts
-  // as pending. A bot must not be the one to settle that.
-  if (roomSetupPending(group)) {
-    return { ok: false, status: 409, error: "that room is still being set up — it cannot receive messages yet" };
-  }
-  return { ok: true };
-}
 
 const {
   proposalPersistence, skillProposalPersistence, stagedSkillListing,
