@@ -10,8 +10,11 @@
 // store/cfg/registry are live bindings from ../runtime.ts;
 // requirePinnedClientThread is rebuilt per request from ./messages.ts
 // with the same (auth, req) pair index.ts passed it. Bot deletion
-// (DELETE /api/bots/:id) stays in index.ts: that handler sits after
-// the local-computer interrupt family and re-matches the path itself.
+// (DELETE /api/bots/:id) moved in from index.ts, where it sat just
+// after the /api/local-computer/interrupt handler; its effective match
+// position is now just before interrupt, and the only pattern between
+// those two slots is interrupt itself (an exact /api/local-computer
+// path, disjoint from /api/bots/:id), so behavior is preserved.
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { json, readBody, type RouteContext } from "./http.ts";
@@ -78,6 +81,7 @@ export function createBotManagementRoutes(deps: {
   browserLive: TurnIntegrations["browserLive"];
   currentBrowserSession: TurnIntegrations["currentBrowserSession"];
   forgetTemporaryBrowser: TurnIntegrations["forgetTemporaryBrowser"];
+  deleteBotWithLifecycle: (botId: string) => Promise<{ status: number; body: { error?: string; ok?: boolean } }>;
 }) {
   return async (req: IncomingMessage, res: ServerResponse, rctx: RouteContext): Promise<boolean> => {
     const { method, path, auth } = rctx;
@@ -102,6 +106,7 @@ export function createBotManagementRoutes(deps: {
       browserLive,
       currentBrowserSession,
       forgetTemporaryBrowser,
+      deleteBotWithLifecycle,
     } = deps;
     const requirePinnedClientThread = createRequirePinnedClientThread(auth, req);
     if (method === "POST" && path === "/api/bots") {
@@ -903,6 +908,18 @@ export function createBotManagementRoutes(deps: {
         recordProfileChange(bot.id, "user", "api", beforeProfile, profileSnapshot(now));
       }
       json(res, 200, { bot: wireBot(store.bot(bot.id)!) });
+      return true;
+    }
+    // Bot deletion moved in from index.ts, where this block sat just after
+    // the /api/local-computer/interrupt handler. Its effective match
+    // position is now just before interrupt (this module runs before the
+    // computers module); the only pattern between those two slots is
+    // interrupt itself — an exact /api/local-computer path, disjoint from
+    // /api/bots/:id — so behavior is preserved.
+    m = path.match(/^\/api\/bots\/([\w-]+)$/);
+    if (m && method === "DELETE") {
+      const result = await deleteBotWithLifecycle(m[1]);
+      json(res, result.status, result.body);
       return true;
     }
     return false;

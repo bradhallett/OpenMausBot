@@ -34,7 +34,7 @@ import {
 import { parseBotProfilePatch } from "./bot-profile.ts";
 import * as box from "./box.ts";
 import { computerBackendFor } from "./computer-backend.ts";
-import { TeamComputers, teamComputerAssignment, teamComputerCreate, teamComputerOwner } from "./team-computers.ts";
+import { TeamComputers, teamComputerOwner } from "./team-computers.ts";
 import type { WireGroup } from "../shared/wire.ts";
 import { boxCreateRecoverySnapshot } from "./box-create-idempotency.ts";
 import { boxDeletionSnapshot } from "./box-delete-journal.ts";
@@ -45,29 +45,23 @@ import {
 } from "./peer-roster.ts";
 import {
   containerComputerAction,
-  containerComputerExists,
-  containerComputerScreenshot,
   containerComputerStatus,
   containerRuntimeStatus,
   perBotLocalVmTarget,
   SHARED_LOCAL_VM_TARGET,
-  setupCommands,
   type LocalVmTarget,
 } from "./container-computer.ts";
 import {
   instanceConfigs,
   loadConfig,
-  localVmMaxInstances,
   localVmMode,
   threadEventLogRetentionDays,
   saveConfig,
   sharedComputersEnabled,
   builtInBrowserEnabled,
   vpsSshAlias,
-  DATA_DIR,
-  EVENTS_DIR,
-  NATIVE_DIR,
   roomHandoffLimits,
+  DATA_DIR,
 } from "./config.ts";
 import { sweepThreadEventLogs, type ThreadLogRetentionCandidate } from "./thread-retention.ts";
 import { resetPathCache } from "./env-path.ts";
@@ -167,9 +161,6 @@ import { CalendarCallManager, type CalendarCall } from "./calendar-calls.ts";
 import {
   browserEngineEncryptionKey,
   clearBrowserSessionState,
-  ensureChrome,
-  installAgentBrowserBinary,
-  resolveAgentBrowserBinary,
   browserEngineStatus,
   browserSessionId,
 } from "./browser-engine.ts";
@@ -179,7 +170,6 @@ import { TeamSetupError, TeamSetupRequestService } from "./team-setup-requests.t
 import type { TeamSetupRequest } from "../shared/team-setup.ts";
 import { profileRevision, profileSnapshot } from "./profile-revision.ts";
 import { flushAllProfileHistory, flushProfileHistory, readHistory, recordProfileChange } from "./profile-versions.ts";
-import { readThreadEvents } from "./thread-events.ts";
 import { listenWebhookIngress, type WebhookIngress } from "./webhook-ingress.ts";
 import { WebhookManager } from "./webhooks.ts";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
@@ -220,7 +210,6 @@ import { createGracefulShutdown } from "./graceful-shutdown.ts";
 import {
   createWorkspaceAccess,
   describeEdition,
-  editionStatus,
   hostedWorkspaceConfiguration,
   hostedWorkspaceConfigured,
   loadEnterpriseLayer,
@@ -242,6 +231,9 @@ import { createMessageRoutes, createRequirePinnedClientThread } from "./routes/m
 import { createTeamRoutes } from "./routes/teams.ts";
 import { createBotRoutes } from "./routes/bots.ts";
 import { createBotManagementRoutes } from "./routes/bot-management.ts";
+import { createAuthSessionRoutes } from "./routes/auth-session.ts";
+import { createComputersRoutes } from "./routes/computers.ts";
+import { createSystemRoutes } from "./routes/system.ts";
 import { createUsageRoutes } from "./routes/usage.ts";
 import { createConfigRoutes } from "./routes/config.ts";
 import type { RouteContext } from "./routes/http.ts";
@@ -287,7 +279,6 @@ import { createCustomDomainVerifier, customDomainIpv4, normalizeCustomDomain } f
 import { allowedScopes, createEmailSignIn, parseAllowList } from "./account-signin.ts";
 import { ProviderAuthSessions } from "./provider-auth-sessions.ts";
 import {
-  clearSessionCookie,
   isLoopbackHost,
   isProxied,
   labelFromUserAgent,
@@ -298,7 +289,7 @@ import {
   serializeSessionCookie,
   sessionCookieName,
 } from "./request-auth.ts";
-import { cookieMaxAgeSeconds, formatPairingCode, SessionRegistry, type Scope } from "./sessions.ts";
+import { cookieMaxAgeSeconds, SessionRegistry } from "./sessions.ts";
 import { describeBrand, loadBrand } from "./brand.ts";
 import {
   PHONE_SECRET_PROTOCOL_VERSION,
@@ -352,7 +343,6 @@ const customDomainVerifier = createCustomDomainVerifier({ environmentId: ENVIRON
 const emailSignIn = createEmailSignIn({
   allow: signInAllowList,
 });
-let customDomainRevision = 0;
 function savedCustomDomain(): string | null {
   if (DESKTOP_MANAGED || !cfg.customDomain) return null;
   try { return normalizeCustomDomain(cfg.customDomain); }
@@ -3476,6 +3466,62 @@ const handleBotManagement = createBotManagementRoutes({
   browserLive,
   currentBrowserSession,
   forgetTemporaryBrowser,
+  deleteBotWithLifecycle,
+});
+const handleAuthSession = createAuthSessionRoutes({
+  sessions,
+  SESSION_COOKIE,
+  DESKTOP_MANAGED,
+  publicUrl,
+  customDomainStatus,
+  customDomainVerifier,
+});
+const handleComputers = createComputersRoutes({
+  routines: () => routines,
+  sessions,
+  interruptAllDirectThreads,
+  cancelDirectTurnDispatch,
+  activeGroupTurnForBot,
+  cancelGroupTurnOperations,
+  runningTurnInstance,
+  teamComputers,
+  teamComputersPayload,
+  computerControl,
+  controlLeaseIdSchema,
+  computerProviderConfigTransitions,
+  providerTransitionMessage,
+  boxLifecycleBusyBots,
+  assertTeamControlCanBeTaken,
+  botHasActiveTurn,
+  botComputerControlSnapshot,
+  claimTeamComputerLifecycle,
+  claimBotComputerLifecycle,
+  teamComputerInUse,
+  managedBoxOwners,
+  claimBoxInventoryRequest,
+  claimManagedBoxMutation,
+  claimManagedVpsMutation,
+  localVmOwnerBusy,
+  localVmLeaseFor,
+  localVmIdleFor,
+  localVmTargetForBot,
+  localVmInventoryPayload,
+  localVmLifecycleBusy,
+  LOCAL_VM_IDLE_MS,
+  computerPreviewBot,
+  computerPreviewSurface,
+  localVmPayload,
+  existingPerBotLocalVmCount,
+  localVmImageBusy: { get: () => localVmImageBusy, set: (value) => { localVmImageBusy = value; } },
+  localVmModeChangeBusy: () => localVmModeChangeBusy,
+  localVmProvisionBusy: { get: () => localVmProvisionBusy, set: (value) => { localVmProvisionBusy = value; } },
+});
+const handleSystem = createSystemRoutes({
+  STATIC_DIR,
+  browserEngineInstall: { get: () => browserEngineInstall, set: (value) => { browserEngineInstall = value; } },
+  browserEngineInstallError: { get: () => browserEngineInstallError, set: (value) => { browserEngineInstallError = value; } },
+  broadcast,
+  configStatus,
 });
 
 
@@ -3682,107 +3728,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       releaseWorkspaceRequest = workspaceMaintenance.request();
     }
 
-    // ── sessions: who am I, tickets, pairing and revocation ─────────────
-    if (method === "GET" && path === "/api/auth/session") {
-      return json(
-        res,
-        200,
-        auth.kind === "loopback"
-          ? { kind: "loopback", scopes: auth.scopes, environmentId: ENVIRONMENT_ID }
-          : {
-              kind: "session",
-              id: auth.session.id,
-              label: auth.session.label,
-              scopes: auth.scopes,
-              expiresAt: auth.session.expiresAt,
-              via: auth.via,
-              environmentId: ENVIRONMENT_ID,
-              // the account behind the session, when it came from a sign-in
-              ...(auth.session.email ? { email: auth.session.email } : {}),
-            },
-      );
-    }
-    if (method === "POST" && path === "/api/auth/stream-ticket") {
-      if (auth.kind === "loopback") return json(res, 200, { ticket: null, reason: "loopback needs no ticket" });
-      return json(res, 200, sessions.issueStreamTicket(auth.session.id));
-    }
-    if (method === "POST" && path === "/api/auth/logout") {
-      if (auth.kind === "session") sessions.revoke(auth.session.id);
-      res.setHeader("set-cookie", clearSessionCookie(SESSION_COOKIE));
-      return json(res, 200, { ok: true });
-    }
-    if (method === "POST" && path === "/api/auth/pairing") {
-      const body = await readBody(req);
-      // Authentication happened before the request body was read. A session
-      // can be revoked while a slow client is still sending that body, so do
-      // not let the captured authorization mint a replacement session.
-      if (auth.kind === "session" && !sessions.isLive(auth.session.id)) {
-        return json(res, 401, { error: "Your session ended. Sign in again before creating a pairing code." });
-      }
-      const requested: unknown = body?.scopes;
-      const scopes = Array.isArray(requested) ? requested.filter((v): v is Scope => v === "admin" || v === "client") : undefined;
-      const opened = sessions.openPairing({ label: typeof body?.label === "string" ? body.label : undefined, scopes });
-      const origin = requestOrigin(req);
-      const base = publicUrl() ?? (auth.kind === "session" && origin ? origin : null);
-      const code = formatPairingCode(opened.code);
-      // Two links for one window. `url` opens the web app and is what a
-      // browser and the iOS app already read. `inviteUrl` is the custom
-      // scheme the native companion scanners accept; it carries the
-      // credential encoding because those scanners cannot take a typed code.
-      const serverName = environmentDescriptor({ environmentId: ENVIRONMENT_ID, desktopManaged: DESKTOP_MANAGED }).label;
-      const invite = base
-        ? `openmausbot://pair?address=${encodeURIComponent(base)}&token=${encodeURIComponent(opened.credential)}&name=${encodeURIComponent(serverName)}`
-        : null;
-      return json(res, 200, {
-        id: opened.id,
-        code,
-        credential: opened.credential,
-        expiresAt: opened.expiresAt,
-        url: base ? `${base}/pair#code=${code}` : null,
-        inviteUrl: invite,
-        serverName,
-        hint: base
-          ? null
-          : "this server has no public address to put in a link: set OMB_PUBLIC_URL, or open /pair on the address you use and type the code",
-      });
-    }
-    if (method === "GET" && path === "/api/auth/pairing") return json(res, 200, { pairings: sessions.openPairings(), publicUrl: publicUrl() });
-    // Admin-only via request-auth's default deny. Connecting a domain only
-    // changes future pairing links; DNS, proxy setup, webhooks and all existing
-    // sessions remain untouched. The tunnel/deployment URL is kept as fallback.
-    if (path === "/api/settings/custom-domain") {
-      res.setHeader("cache-control", "no-store");
-      if (method === "GET") return json(res, 200, customDomainStatus());
-      if (method === "POST" || method === "DELETE") {
-        if (DESKTOP_MANAGED) return json(res, 409, { error: "Custom domains are configured on a self-hosted OpenMausBot server, not the desktop companion." });
-        if (!/^application\/json\b/i.test(String(req.headers["content-type"] ?? ""))) {
-          return json(res, 415, { error: "content-type must be application/json" });
-        }
-        if (method === "DELETE") {
-          saveConfig({ customDomain: "" });
-          cfg.customDomain = "";
-          customDomainRevision++;
-          return json(res, 200, customDomainStatus());
-        }
-        const body = await readBody(req, 4096);
-        if (typeof body?.domain !== "string") return json(res, 400, { error: "Enter your domain name." });
-        const revision = customDomainRevision;
-        const verified = await customDomainVerifier.verify(body.domain);
-        if (auth.kind === "session" && !sessions.isLive(auth.session.id)) {
-          return json(res, 401, { error: "Your session ended. Sign in again before connecting a domain." });
-        }
-        if (revision !== customDomainRevision) return json(res, 409, { error: "Domain settings changed during verification. Try again." });
-        saveConfig({ customDomain: verified.origin });
-        cfg.customDomain = verified.origin;
-        customDomainRevision++;
-        return json(res, 200, customDomainStatus());
-      }
-    }
-    m = path.match(/^\/api\/auth\/pairing\/([\w-]+)$/);
-    if (m && method === "DELETE") {
-      const cancelled = sessions.cancelPairing(m[1]);
-      return json(res, cancelled ? 200 : 404, cancelled ? { ok: true } : { error: "no such pairing code" });
-    }
+    if (await handleAuthSession(req, res, rctx)) return;
     if (method === "POST" && path === "/api/desktop/shared-computer-control" && sharedComputersEnabled(cfg)) {
       if (auth.kind !== "loopback") return json(res, 403, { error: "Local desktop only" });
       const body = await readBody(req, 1024);
@@ -3820,15 +3766,6 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (action === "result") sharedComputers.complete(id, auth.session.id, secret, String(body?.jobId), body?.result);
       if (action === "disconnect") sharedComputers.disconnect(id, auth.session.id, secret);
       return json(res, 200, { ok: true });
-    }
-    if (method === "GET" && path === "/api/auth/sessions") {
-      return json(res, 200, { sessions: sessions.list(), current: auth.kind === "session" ? auth.session.id : null });
-    }
-    m = path.match(/^\/api\/auth\/sessions\/([\w-]+)$/);
-    if (m && method === "DELETE") {
-      const revoked = sessions.revoke(m[1]);
-      if (auth.kind === "session" && auth.session.id === m[1]) res.setHeader("set-cookie", clearSessionCookie(SESSION_COOKIE));
-      return json(res, revoked ? 200 : 404, revoked ? { ok: true } : { error: "no such session" });
     }
     // Isolated integration fixtures cannot invoke an MCP tool before their
     // fake provider exits, so they mint an exact synthetic turn capability
@@ -3973,40 +3910,6 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     if (await handleTeams(req, res, rctx)) return;
     if (await handleBots(req, res, rctx)) return;
     if (await handleBotManagement(req, res, rctx)) return;
-
-    if (method === "POST" && path === "/api/local-computer/interrupt") {
-      if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
-        return json(res, 415, { error: "content-type must be application/json" });
-      }
-      await Promise.allSettled(
-        store.bots
-          .filter((bot) => bot.computer === "local")
-          .map(async (bot) => {
-            await interruptAllDirectThreads(bot.id);
-            const routineRun = routines!.activeBotRunForBot(bot.id);
-            if (routineRun) {
-              cancelDirectTurnDispatch(bot.id, routineRun.threadId);
-              if (routineRun.threadId) {
-                revokeInternalCapabilitiesForThread(routineRun.threadId);
-              }
-              await routines!.cancelRun(routineRun.id);
-            }
-            const groupTurn = activeGroupTurnForBot(bot.id);
-            if (groupTurn) {
-              cancelGroupTurnOperations(groupTurn.group.id, groupTurn.threadId);
-              revokeInternalCapabilitiesForThread(groupTurn.threadId);
-              await runningTurnInstance(bot, groupTurn.threadId)?.adapter.interruptTurn(groupTurn.threadId).catch(() => {});
-              closeOpenApprovals(groupTurn.threadId);
-            }
-          }),
-      );
-      return json(res, 200, { ok: true });
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)$/);
-    if (m && method === "DELETE") {
-      const result = await deleteBotWithLifecycle(m[1]);
-      return json(res, result.status, result.body);
-    }
 
     // ── bot skills: imported Agent Skills (SKILL.md) ────────────────────
     // Import lands DISABLED; the UI shows SKILL.md + scan warnings and a
@@ -5102,328 +5005,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       return json(res, 200, { bot: fresh });
     }
 
-    // Named team Boxes use real independent ownership, never a hidden bot or
-    // an arbitrary provider id. These new routes remain admin-only by default.
-    if (path === "/api/team-computers" && method === "GET") {
-      res.setHeader("cache-control", "private, no-store");
-      return json(res, 200, await teamComputersPayload());
-    }
-    m = path.match(/^\/api\/team-computers(?:\/([\w-]+)(?:\/(provision|join|sleep|control))?)?$/);
-    if (m) {
-      const computerId = m[1];
-      const action = m[2];
-      let found = computerId ? teamComputers.get(computerId) : undefined;
-      if (computerId && !found) return json(res, 404, { error: "No such team computer" });
-      if (method === "GET" && action === "control" && found) {
-        return json(res, 200, computerControl.snapshot(teamComputerOwner(found.id)));
-      }
-      if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) return json(res, 415, { error: "content-type must be application/json" });
-      const body = await readBody(req);
-      found = computerId ? teamComputers.get(computerId) : undefined;
-      const assertCurrentOwner = () => {
-        if (auth.kind === "session" && !sessions.isLive(auth.session.id)) throw Object.assign(new Error("Your session ended; sign in again"), { status: 401 });
-        if (computerProviderConfigTransitions.has("box")) throw Object.assign(new Error(providerTransitionMessage("box")), { status: 409 });
-      };
-      assertCurrentOwner();
-      if (action === "control" && method === "POST" && found) {
-        const parsed = z.object({ action: z.enum(["take", "release"]), controlLeaseId: controlLeaseIdSchema.optional() }).strict().safeParse(body);
-        if (!parsed.success) return json(res, 400, { error: "Choose take or release with a valid optional controlLeaseId" });
-        const key = teamComputerOwner(found.id);
-        if (parsed.data.action === "take" && boxLifecycleBusyBots.has(key)) return json(res, 409, { error: "Wait for this computer's action to finish before taking control" });
-        if (parsed.data.action === "take") assertTeamControlCanBeTaken(found.id);
-        if (parsed.data.controlLeaseId) {
-          const result = parsed.data.action === "take"
-            ? computerControl.acquireLease(key, parsed.data.controlLeaseId)
-            : computerControl.releaseLease(key, parsed.data.controlLeaseId);
-          return json(res, 200, { ...result.snapshot, ...result });
-        }
-        return json(res, 200, parsed.data.action === "take" ? computerControl.take(key) : computerControl.release(key));
-      }
-      if (method === "PATCH" && found && !action) {
-        const parsed = teamComputerAssignment.safeParse(body);
-        if (!parsed.success) return json(res, 400, { error: "Confirm shared desktop access with section and acknowledgeSharedAccess: true" });
-        const section = parsed.data.section;
-        const checkAssignment = () => {
-          assertCurrentOwner();
-          if (section !== null && section !== "" && !store.sections.includes(section)) throw Object.assign(new Error("Create the team before assigning a computer"), { status: 404 });
-          if (section !== null && store.bots.some(bot => sectionKey(bot.section) === section && (
-            botHasActiveTurn(bot.id) || routines?.activeRunForBot(bot.id) || botComputerControlSnapshot(bot.id).held || boxLifecycleBusyBots.has(bot.id)
-          ))) throw Object.assign(new Error("Stop the target team's work and release computer control before assigning this computer"), { status: 409 });
-        };
-        checkAssignment();
-        const release = claimTeamComputerLifecycle(found);
-        try {
-          if (section !== null && !(await box.findBox(cfg, teamComputerOwner(found.id)))) return json(res, 409, { error: "Create or retry this computer before assigning it to a team" });
-          checkAssignment();
-          if (teamComputerInUse(found)) return json(res, 409, { error: "This team computer became busy; stop its work before assigning it" });
-          teamComputers.assign(found.id, section);
-          return json(res, 200, { ok: true });
-        } finally { release(); }
-      }
-      if (method === "POST" && !computerId) {
-        const parsed = teamComputerCreate.safeParse(body);
-        if (!parsed.success) return json(res, 400, { error: "Provide requestId (UUID), a name, and acknowledgeCost: true to create a paid Box" });
-        if (!box.boxConfigured(cfg)) return json(res, 409, { error: "Configure Box in Settings before creating a cloud computer" });
-        const computer = teamComputers.create(parsed.data.name, parsed.data.requestId);
-        const release = claimTeamComputerLifecycle(computer);
-        try {
-          await box.provisionBox(cfg, teamComputerOwner(computer.id), computer.name);
-          teamComputers.setProblem(computer.id);
-          return json(res, 201, { id: computer.id });
-        } catch (error) {
-          teamComputers.setProblem(computer.id, redactSecretsInText(error instanceof Error ? error.message : String(error)));
-          throw error;
-        } finally { release(); }
-      }
-      if (method === "POST" && found && action && action !== "control") {
-        if (action === "provision" && body?.acknowledgeCost !== true) return json(res, 400, { error: "Confirm Box creation or wake costs with acknowledgeCost: true" });
-        // A ready-only join never wakes, provisions or steals an agent's turn.
-        // The caller takes a separate explicit human-control lease first.
-        if (action === "join") {
-          const key = teamComputerOwner(found.id);
-          if (boxLifecycleBusyBots.has(key)) return json(res, 409, { error: "Wait for this computer's action to finish" });
-          if (!computerControl.snapshot(key).held) return json(res, 409, { error: "Take control before opening this shared desktop" });
-          const release = claimBotComputerLifecycle(key);
-          try { return json(res, 200, await box.joinReadyBox(cfg, key)); }
-          finally { release(); }
-        }
-        const release = claimTeamComputerLifecycle(found);
-        try {
-          const result = action === "provision"
-            ? await box.provisionBox(cfg, teamComputerOwner(found.id), found.name)
-            : await box.sleepBox(cfg, teamComputerOwner(found.id));
-          teamComputers.setProblem(found.id);
-          return json(res, 200, result);
-        } catch (error) {
-          teamComputers.setProblem(found.id, redactSecretsInText(error instanceof Error ? error.message : String(error)));
-          throw error;
-        } finally { release(); }
-      }
-      return json(res, 405, { error: "method not allowed" });
-    }
+    if (await handleComputers(req, res, rctx)) return;
 
-    // Account-wide Box inventory is a Settings surface, never a provisioning
-    // path. Listing remains read-only; lifecycle changes require explicit
-    // JSON actions and are revalidated against a fresh provider listing.
-    if (method === "GET" && path === "/api/computers/boxes") {
-      res.setHeader("cache-control", "private, no-store");
-      return json(res, 200, await box.listManagedBoxes(cfg, managedBoxOwners()));
-    }
-    m = path.match(/^\/api\/computers\/boxes\/([\w-]+)\/(sleep|delete)$/);
-    if (m && method === "POST") {
-      if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
-        return json(res, 415, { error: "content-type must be application/json" });
-      }
-      const body = await readBody(req);
-      if (computerProviderConfigTransitions.has("box")) {
-        return json(res, 409, { error: providerTransitionMessage("box") });
-      }
-      const releaseInventoryRequest = claimBoxInventoryRequest(m[1]);
-      try {
-        const owners = managedBoxOwners();
-        if (m[2] === "sleep") {
-          return json(res, 200, await box.sleepManagedBox(cfg, owners, m[1], claimManagedBoxMutation));
-        }
-        if (typeof body?.confirmName !== "string" || body.confirmName.length > 100) {
-          return json(res, 400, { error: "confirmName must be the cloud computer name shown in Settings" });
-        }
-        return json(res, 202, await box.deleteManagedBox(
-          cfg,
-          owners,
-          m[1],
-          body.confirmName,
-          claimManagedBoxMutation,
-        ));
-      } finally {
-        releaseInventoryRequest();
-      }
-    }
-    if (method === "GET" && path === "/api/computers/vps") {
-      res.setHeader("cache-control", "private, no-store");
-      return json(res, 200, await vps.listManagedVpsComputers(cfg, managedBoxOwners()));
-    }
-    m = path.match(/^\/api\/computers\/vps\/([\w-]+)\/remove$/);
-    if (m && method === "POST") {
-      if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
-        return json(res, 415, { error: "content-type must be application/json" });
-      }
-      const body = await readBody(req);
-      if (computerProviderConfigTransitions.has("vps")) {
-        return json(res, 409, { error: providerTransitionMessage("vps") });
-      }
-      if (typeof body?.confirmName !== "string" || body.confirmName.length > 100) {
-        return json(res, 400, { error: "confirmName must be the VPS computer name shown in Settings" });
-      }
-      const releaseComputerLifecycle = claimManagedVpsMutation(m[1]);
-      try {
-        return json(res, 200, await vps.removeManagedVpsComputer(
-          cfg,
-          managedBoxOwners(),
-          m[1],
-          body.confirmName,
-        ));
-      } finally {
-        releaseComputerLifecycle();
-      }
-    }
+    if (await handleSystem(req, res, rctx)) return;
 
-    // what the user's machine can host: which runtime is installed, whether
-    // its daemon is up, and whether the desktop image and container exist
-    if (method === "GET" && path === "/api/local-computer") {
-      return json(res, 200, await localVmPayload(SHARED_LOCAL_VM_TARGET));
-    }
-    if (method === "GET" && path === "/api/local-computer/instances") {
-      res.setHeader("cache-control", "private, no-store");
-      return json(res, 200, await localVmInventoryPayload());
-    }
-    m = path.match(/^\/api\/local-computer\/(pull|run|start|stop|remove)$/);
-    if (m && method === "POST") {
-      // Requiring JSON makes these localhost lifecycle mutations non-simple
-      // browser requests. A hostile web page cannot submit them with a form,
-      // and its cross-origin JSON request is stopped by the browser preflight
-      // because this server deliberately emits no CORS permission.
-      if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
-        return json(res, 415, { error: "content-type must be application/json" });
-      }
-      const action = z.enum(["pull", "run", "start", "stop", "remove"]).parse(m[1]);
-      if (localVmImageBusy || localVmModeChangeBusy || localVmLifecycleBusy.has(SHARED_LOCAL_VM_TARGET.key)) {
-        return json(res, 409, { error: "another Local VM setup action is still running" });
-      }
-      if (localVmMode(cfg) === "per-bot" && action === "run") {
-        return json(res, 409, { error: "Per-bot mode creates each desktop from that bot's Computer panel" });
-      }
-      const vmOwner = localVmLeaseFor(SHARED_LOCAL_VM_TARGET).current(localVmOwnerBusy);
-      if (vmOwner && (action === "stop" || action === "remove" || action === "run")) {
-        return json(res, 409, { error: "the Local VM is being used by a bot — stop that turn first" });
-      }
-      if (action === "pull") localVmImageBusy = true;
-      else localVmLifecycleBusy.add(SHARED_LOCAL_VM_TARGET.key);
-      try {
-        const status = await containerComputerAction(action, undefined, undefined, SHARED_LOCAL_VM_TARGET);
-        if (action === "run" || action === "start") localVmIdleFor(SHARED_LOCAL_VM_TARGET).touch();
-        if (action === "stop" || action === "remove") localVmIdleFor(SHARED_LOCAL_VM_TARGET).cancel();
-        return json(res, 200, {
-          ...status,
-          commands: setupCommands(status.runtime, process.platform, SHARED_LOCAL_VM_TARGET),
-          idle_timeout_ms: LOCAL_VM_IDLE_MS,
-          mode: localVmMode(cfg),
-          max_instances: localVmMaxInstances(cfg),
-        });
-      } finally {
-        if (action === "pull") localVmImageBusy = false;
-        else localVmLifecycleBusy.delete(SHARED_LOCAL_VM_TARGET.key);
-      }
-    }
-    if (method === "POST" && path === "/api/local-computer/screenshot") {
-      localVmIdleFor(SHARED_LOCAL_VM_TARGET).touch();
-      return json(res, 200, {
-        image: await containerComputerScreenshot(undefined, undefined, SHARED_LOCAL_VM_TARGET),
-      });
-    }
-
-    m = path.match(/^\/api\/bots\/([\w-]+)\/local-computer$/);
-    if (m && method === "GET") {
-      const bot = computerPreviewBot(m[1], url);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      return json(res, 200, await localVmPayload(localVmTargetForBot(bot.id)));
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/local-computer\/(run|stop|remove)$/);
-    if (m && method === "POST") {
-      if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
-        return json(res, 415, { error: "content-type must be application/json" });
-      }
-      const bot = store.bot(m[1]);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      if (boxLifecycleBusyBots.has(bot.id)) {
-        return json(res, 409, { error: "this bot's computer is being changed or deleted — wait for it to finish" });
-      }
-      const action = z.enum(["run", "stop", "remove"]).parse(m[2]);
-      const target = localVmTargetForBot(bot.id);
-      if (target.key === SHARED_LOCAL_VM_TARGET.key) {
-        return json(res, 409, { error: "Shared mode manages this desktop in App Settings → Computers" });
-      }
-      if (localVmImageBusy || localVmModeChangeBusy || localVmLifecycleBusy.has(target.key)) {
-        return json(res, 409, { error: "this bot's Local VM setup action is still running" });
-      }
-      if (action === "run" && localVmProvisionBusy) {
-        return json(res, 409, { error: "another per-bot Local VM is being created — retry after it finishes" });
-      }
-      const vmOwner = localVmLeaseFor(target).current(localVmOwnerBusy);
-      if (vmOwner) return json(res, 409, { error: "this bot is using its Local VM — stop the turn first" });
-      // Fence this target, and the cross-target capacity decision for creates,
-      // before the first await so two requests cannot both pass the limit.
-      localVmLifecycleBusy.add(target.key);
-      if (action === "run") localVmProvisionBusy = true;
-      try {
-        if (action === "run") {
-          const before = await containerComputerStatus(undefined, undefined, target);
-          if (!before.runtime) return json(res, 409, { error: before.problem ?? "No container runtime is installed" });
-          if (!(await containerComputerExists(before.runtime, target))) {
-            const count = await existingPerBotLocalVmCount(before.runtime);
-            if (count >= localVmMaxInstances(cfg)) {
-              return json(res, 409, {
-                error: `The per-bot Local VM limit is ${localVmMaxInstances(cfg)} — delete an unused bot VM or raise the limit in App Settings`,
-              });
-            }
-          }
-        }
-        const status = await containerComputerAction(action, undefined, undefined, target);
-        if (action === "run") localVmIdleFor(target).touch();
-        if (action === "stop" || action === "remove") localVmIdleFor(target).cancel();
-        return json(res, 200, {
-          ...status,
-          commands: setupCommands(status.runtime, process.platform, target),
-          idle_timeout_ms: LOCAL_VM_IDLE_MS,
-          mode: localVmMode(cfg),
-          max_instances: localVmMaxInstances(cfg),
-        });
-      } finally {
-        if (action === "run") localVmProvisionBusy = false;
-        localVmLifecycleBusy.delete(target.key);
-      }
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/local-computer\/screenshot$/);
-    if (m && method === "POST") {
-      const bot = computerPreviewBot(m[1], url);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      if (url.searchParams.has("threadId") && await computerPreviewSurface(bot, bot.threadId) !== "vm") {
-        return json(res, 409, { error: "This conversation is not using the Local VM" });
-      }
-      const target = localVmTargetForBot(bot.id);
-      localVmIdleFor(target).touch();
-      return json(res, 200, {
-        image: await containerComputerScreenshot(undefined, undefined, target),
-      });
-    }
-
-    // identity handshake for the packaged app's port fallback: the forked
-    // child proves it is OURS by echoing its pid (a stray dev server has
-    // the same API shape but a different pid)
-    if (method === "GET" && path === "/api/health") {
-      return json(res, 200, { app: "openmausbot", pid: process.pid, static: Boolean(STATIC_DIR) });
-    }
-    // The bots' browser engine: install it on this machine (agent-browser +
-    // a Chrome for Testing, a one-time download), or ask how that is going.
-    // One install at a time; the config frame's browserEngine tells the rest.
-    if (method === "POST" && path === "/api/browser-engine/install") {
-      if (!browserEngineInstall) {
-        const status = browserEngineStatus();
-        if (status.kind === "unavailable" && !status.installable) return json(res, 409, { error: status.reason });
-        browserEngineInstallError = null;
-        browserEngineInstall = (async () => {
-          const binary = resolveAgentBrowserBinary() ?? await installAgentBrowserBinary({ log: (line) => console.log(line) });
-          await ensureChrome(binary, { log: (line) => console.log(line) });
-        })().then(
-          () => { browserEngineInstallError = null; },
-          (error: unknown) => { browserEngineInstallError = error instanceof Error ? error.message : String(error); },
-        ).finally(() => {
-          browserEngineInstall = null;
-          broadcast({ kind: "config", ...configStatus() });
-        });
-        broadcast({ kind: "config", ...configStatus() });
-      }
-      return json(res, 202, { installing: true });
-    }
     // ── the fleet: client workspaces on this server, through the root agent ──
     // Admin scope by default plus the `admin` entitlement; the socket's own
     // permissions decide whether this workspace may drive the agent at all.
@@ -5447,34 +5032,6 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       } catch (error) {
         return json(res, 502, { error: error instanceof Error ? error.message : String(error) });
       }
-    }
-
-    // Which edition this server runs and why (see server/enterprise.ts). Read-only.
-    if (method === "GET" && path === "/api/edition") {
-      return json(res, 200, editionStatus());
-    }
-    // The brand for this deployment (server/brand.ts): read per request so edits show on reload.
-    if (method === "GET" && path === "/api/brand") {
-      return json(res, 200, loadBrand());
-    }
-
-    // ── inspector: a thread's runtime events + native protocol tee ──
-    // Both logs already exist on disk; this only reads them back. Threads
-    // belong to bots or rooms — anything else is not a thread we know.
-    m = path.match(/^\/api\/threads\/([\w-]+)\/events$/);
-    if (m && method === "GET") {
-      const threadId = m[1];
-      const known =
-        store.bots.some((b) => store.tasks(b.id).some((t) => t.threadId === threadId)) ||
-        Boolean(store.groupByThread(threadId));
-      if (!known) return json(res, 404, { error: "no such thread" });
-      const rawLimit = url.searchParams.get("limit");
-      const parsedLimit = rawLimit === null ? undefined : Number(rawLimit);
-      if (parsedLimit !== undefined && (!Number.isInteger(parsedLimit) || parsedLimit <= 0)) {
-        return json(res, 400, { error: "limit must be a positive whole number" });
-      }
-      const limit = parsedLimit;
-      return json(res, 200, readThreadEvents({ eventsDir: EVENTS_DIR, nativeDir: NATIVE_DIR, threadId, limit }));
     }
 
     if (await handleUsage(req, res, rctx)) return;
