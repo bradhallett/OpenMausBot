@@ -18,12 +18,8 @@ import type {
   RoutineRequestOwner,
   RoutineRequestReceipt,
   RoutineRun,
-  RoutineRunOn,
-  RoutineSchedule,
-  RoutineTarget,
 } from "./types.ts";
-import { composeExecutionPrompt, finishedOrder } from "./prompt.ts";
-import type { RoutineContinuityCarry } from "./prompt.ts";
+import { composeExecutionPrompt } from "./prompt.ts";
 import type { RoutineManagerOptions } from "../routines.ts";
 import {
   intervalAllowsOccurrence,
@@ -34,7 +30,6 @@ import {
   nextOccurrence,
 } from "./schedule.ts";
 import {
-  cloneAttachments,
   cloneRoutine,
   cloneRun,
   loadAttachments,
@@ -44,6 +39,25 @@ import {
   loadTimeoutMinutes,
   sanitizeInput,
 } from "./persistence.ts";
+import {
+  findWebhookRun,
+  loadWebhookRunReceipts,
+  MAX_WEBHOOK_RECEIPTS,
+  RoutineRequestReceiptLedger,
+  WEBHOOK_RETRY_WINDOW_MS,
+} from "./receipts.ts";
+import type { WebhookRunReceipt } from "./receipts.ts";
+import {
+  applyResultsInput,
+  continuityCarry,
+  discardResultsThreads,
+  initialOccurrence,
+  missingTargetMessage,
+  newRun,
+  webhookRun,
+  targetState,
+} from "./runs.ts";
+import type { ResultsThreadAllocation, WebhookRunInput } from "./runs.ts";
 
 const persistedSourceThreadId = z.string().trim().min(1).optional().catch(undefined);
 
@@ -60,22 +74,6 @@ interface RoutineFile {
   webhookRunReceipts?: WebhookRunReceipt[];
 }
 
-const webhookRunReceiptSchema = z.object({
-  webhookId: z.string().min(1).max(200),
-  deliveryId: z.string().min(1).max(200),
-  runId: z.string().min(1),
-  acceptedAt: z.number().finite().nonnegative(),
-});
-type WebhookRunReceipt = z.infer<typeof webhookRunReceiptSchema>;
-const WEBHOOK_RETRY_WINDOW_MS = 7 * 24 * 60 * 60_000;
-const MAX_WEBHOOK_RECEIPTS = 20_000;
-
-type ResultsThreadAllocation = { botId: string; threadId: string };
-
-function routineRequestOwnerKey(owner: RoutineRequestOwner): string {
-  return JSON.stringify([owner.requestId, owner.messageId, owner.botId, owner.threadId]);
-}
-
 const CATCH_UP_MS = 12 * 60 * 60_000;
 /** How long before a due routine the computer is asked to stay awake. */
 const WAKE_HORIZON_MS = 60 * 60_000;
@@ -86,29 +84,13 @@ export const ROUTINE_DEFERRAL_NOTICE_MS = 30 * 60_000;
 
 const MAX_RUNS = 2_000;
 
-const ROUTINE_REQUEST_ACTIONS = new Set<RoutineRequestOperation["action"]>([
-  "create",
-  "update",
-  "pause",
-  "resume",
-  "run_now",
-  "delete",
-]);
-
-function isRoutineRequestAction(value: unknown): value is RoutineRequestOperation["action"] {
-  return typeof value === "string" && ROUTINE_REQUEST_ACTIONS.has(value as RoutineRequestOperation["action"]);
-}
-
-/** Continuity reuses the bounded stored report, not the full transcript. */
-const CONTINUITY_CHARS = 2_000;
-
 export class RoutineManager {
   private readonly file: string;
   private readonly now: () => number;
   private readonly options: RoutineManagerOptions;
   private routines: Routine[] = [];
   private runs: RoutineRun[] = [];
-  private routineRequestReceipts: RoutineRequestReceipt[] = [];
+  private readonly requestReceipts = new RoutineRequestReceiptLedger((mutate) => this.commitMutation(mutate));
   private webhookRunReceipts: WebhookRunReceipt[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
@@ -157,25 +139,8 @@ export class RoutineManager {
             return loaded;
           })
         : [];
-      this.routineRequestReceipts = Array.isArray(disk.routineRequestReceipts)
-        ? disk.routineRequestReceipts.filter((receipt): receipt is RoutineRequestReceipt =>
-            typeof receipt?.requestId === "string" &&
-            typeof receipt?.messageId === "string" &&
-            typeof receipt?.botId === "string" &&
-            typeof receipt?.threadId === "string" &&
-            isRoutineRequestAction(receipt?.action) &&
-            receipt?.fingerprintVersion === 1 &&
-            typeof receipt?.fingerprint === "string" && /^[a-f0-9]{64}$/.test(receipt.fingerprint) &&
-            typeof receipt?.resultId === "string" &&
-            Number.isFinite(receipt?.appliedAt)
-          )
-        : [];
-      this.webhookRunReceipts = Array.isArray(disk.webhookRunReceipts)
-        ? disk.webhookRunReceipts.flatMap((receipt) => {
-            const parsed = webhookRunReceiptSchema.safeParse(receipt);
-            return parsed.success ? [parsed.data] : [];
-          })
-        : [];
+      this.requestReceipts.load(disk.routineRequestReceipts);
+      this.webhookRunReceipts = loadWebhookRunReceipts(disk.webhookRunReceipts);
       // Upgrade old run logs before history pruning can discard their IDs.
       const known = new Set(this.webhookRunReceipts.map((r) => JSON.stringify([r.webhookId, r.deliveryId])));
       for (const run of this.runs) {
@@ -188,7 +153,7 @@ export class RoutineManager {
     } catch {
       this.routines = [];
       this.runs = [];
-      this.routineRequestReceipts = [];
+      this.requestReceipts.reset();
       this.webhookRunReceipts = [];
     }
     // A local process cannot still own these turns after a full restart.
@@ -257,20 +222,14 @@ export class RoutineManager {
   }
 
   routineRequestReceipt(requestId: string): RoutineRequestReceipt | null {
-    const receipt = this.routineRequestReceipts.find((candidate) => candidate.requestId === requestId);
-    return receipt ? { ...receipt } : null;
+    return this.requestReceipts.routineRequestReceipt(requestId);
   }
 
   /** Small startup index used to locate only transcripts that may need
    * cross-file commit recovery. Most launches have no receipts and therefore
    * do not read or cache any transcript for this feature. */
   routineRequestReceiptOwners(): RoutineRequestOwner[] {
-    return this.routineRequestReceipts.map(({ requestId, messageId, botId, threadId }) => ({
-      requestId,
-      messageId,
-      botId,
-      threadId,
-    }));
+    return this.requestReceipts.routineRequestReceiptOwners();
   }
 
   /** Once the transcript card is durably settled, its scheduler receipt is
@@ -278,36 +237,17 @@ export class RoutineManager {
    * actionable card may survive indefinitely and must retain its exact-once
    * recovery record for the same lifetime. */
   forgetRoutineRequestReceipt(request: RoutineRequestCommit): boolean {
-    const receipt = this.matchingRoutineRequestReceipt(request);
-    if (!receipt) return false;
-    const index = this.routineRequestReceipts.indexOf(receipt);
-    this.commitMutation(() => {
-      this.routineRequestReceipts.splice(index, 1);
-    });
-    return true;
+    return this.requestReceipts.forgetRoutineRequestReceipt(request);
   }
 
   forgetRoutineRequestReceiptsForThread(threadId: string): number {
-    const kept = this.routineRequestReceipts.filter((receipt) => receipt.threadId !== threadId);
-    const removed = this.routineRequestReceipts.length - kept.length;
-    if (removed === 0) return 0;
-    this.commitMutation(() => {
-      this.routineRequestReceipts = kept;
-    });
-    return removed;
+    return this.requestReceipts.forgetRoutineRequestReceiptsForThread(threadId);
   }
 
   /** Drop only receipts whose confirmation transcript no longer exists.
    * Reachable open cards retain exact-once recovery for their full lifetime. */
   reconcileRoutineRequestReceipts(reachable: readonly RoutineRequestOwner[]): number {
-    const keys = new Set(reachable.map(routineRequestOwnerKey));
-    const kept = this.routineRequestReceipts.filter((receipt) => keys.has(routineRequestOwnerKey(receipt)));
-    const removed = this.routineRequestReceipts.length - kept.length;
-    if (removed === 0) return 0;
-    this.commitMutation(() => {
-      this.routineRequestReceipts = kept;
-    });
-    return removed;
+    return this.requestReceipts.reconcileRoutineRequestReceipts(reachable);
   }
 
   isActiveThread(threadId: string): boolean {
@@ -323,7 +263,7 @@ export class RoutineManager {
 
   create(input: RoutineInput, request?: RoutineRequestCommitFor<"create">): Routine {
     if (request) {
-      const receipt = this.matchingRoutineRequestReceipt(request);
+      const receipt = this.requestReceipts.matchingRoutineRequestReceipt(request);
       if (receipt) {
         const committed = this.routines.find((routine) => routine.id === receipt.resultId);
         if (committed) return cloneRoutine(committed);
@@ -332,8 +272,8 @@ export class RoutineManager {
     }
     const at = this.now();
     const clean = sanitizeInput(input, at);
-    if (this.targetState(clean) === "missing") throw new Error(this.missingTargetMessage(clean.target));
-    const nextRunAt = clean.enabled ? this.initialOccurrence(clean.schedule, at) : null;
+    if (targetState(clean, this.options) === "missing") throw new Error(missingTargetMessage(clean.target));
+    const nextRunAt = clean.enabled ? initialOccurrence(clean.schedule, at) : null;
     if (clean.schedule.type === "interval" && clean.enabled && nextRunAt === null) {
       throw new Error("This interval has no future runs. Choose a later end date or turn it off.");
     }
@@ -347,10 +287,10 @@ export class RoutineManager {
       createdAt: at,
       updatedAt: at,
     };
-    const discardResults = this.applyResultsInput(routine, input.resultsThreadId);
+    const discardResults = applyResultsInput(routine, input.resultsThreadId, this.options);
     this.commitMutation(() => {
       this.routines.unshift(routine);
-      if (request) this.rememberRoutineRequest(request, routine.id, at);
+      if (request) this.requestReceipts.rememberRoutineRequest(request, routine.id, at);
     }, discardResults);
     this.emitRoutine(routine);
     return cloneRoutine(routine);
@@ -362,7 +302,7 @@ export class RoutineManager {
     request?: RoutineRequestCommitFor<"update" | "pause" | "resume">,
   ): Routine | null {
     if (request) {
-      const receipt = this.matchingRoutineRequestReceipt(request);
+      const receipt = this.requestReceipts.matchingRoutineRequestReceipt(request);
       if (receipt) {
         const committed = this.routines.find((routine) => routine.id === receipt.resultId);
         return committed ? cloneRoutine(committed) : null;
@@ -385,19 +325,19 @@ export class RoutineManager {
       attachments: patch.attachments ?? routine.attachments,
       continuity: patch.continuity ?? routine.continuity,
     }, now);
-    if (this.targetState(clean) === "missing") throw new Error(this.missingTargetMessage(clean.target));
+    if (targetState(clean, this.options) === "missing") throw new Error(missingTargetMessage(clean.target));
     const scheduleChanged = JSON.stringify(clean.schedule) !== JSON.stringify(routine.schedule);
     const enabledChanged = clean.enabled !== routine.enabled;
     // Definition-only edits retain due work and offline catch-up.
     const nextRunAt = !clean.enabled ? null : scheduleChanged || enabledChanged
-      ? this.initialOccurrence(clean.schedule, now)
+      ? initialOccurrence(clean.schedule, now)
       : routine.nextRunAt;
     if (clean.schedule.type === "interval" && clean.enabled && nextRunAt === null) {
       throw new Error("This interval has no future runs. Choose a later end date or turn it off.");
     }
     const destination = { ...routine, ...clean };
     if (destination.botId !== routine.botId) delete destination.resultsThreadId;
-    const discardResults = this.applyResultsInput(destination, patch.resultsThreadId);
+    const discardResults = applyResultsInput(destination, patch.resultsThreadId, this.options);
     const cancelledRuns: RoutineRun[] = [];
     this.commitMutation(() => {
       Object.assign(routine, clean, {
@@ -423,7 +363,7 @@ export class RoutineManager {
           cancelledRuns.push(run);
         }
       }
-      if (request) this.rememberRoutineRequest(request, routine.id, now);
+      if (request) this.requestReceipts.rememberRoutineRequest(request, routine.id, now);
     }, discardResults);
     for (const run of cancelledRuns) this.emitRun(run);
     this.emitRoutine(routine);
@@ -432,7 +372,7 @@ export class RoutineManager {
 
   remove(id: string, request?: RoutineRequestCommitFor<"delete">): boolean {
     if (request) {
-      const receipt = this.matchingRoutineRequestReceipt(request);
+      const receipt = this.requestReceipts.matchingRoutineRequestReceipt(request);
       if (receipt) {
         return true;
       }
@@ -449,7 +389,7 @@ export class RoutineManager {
         run.finishedAt = this.now();
         cancelledRuns.push(run);
       }
-      if (request) this.rememberRoutineRequest(request, id, this.now());
+      if (request) this.requestReceipts.rememberRoutineRequest(request, id, this.now());
     });
     for (const run of cancelledRuns) this.emitRun(run);
     this.options.emit?.({ kind: "routine.deleted", routineId: id });
@@ -518,7 +458,7 @@ export class RoutineManager {
 
   runNow(id: string, request?: RoutineRequestCommitFor<"run_now">): RoutineRun | null {
     if (request) {
-      const receipt = this.matchingRoutineRequestReceipt(request);
+      const receipt = this.requestReceipts.matchingRoutineRequestReceipt(request);
       if (receipt) {
         const committed = this.runs.find((run) => run.id === receipt.resultId);
         return committed ? cloneRun(committed) : null;
@@ -530,12 +470,20 @@ export class RoutineManager {
     const allocations: ResultsThreadAllocation[] = [];
     const previousDestination = routine.resultsThreadId;
     this.commitMutation(() => {
-      run = this.newRun(routine, this.now(), true, allocations, request?.threadId ?? routine.sourceThreadId);
+      run = newRun(
+        routine,
+        this.now(),
+        true,
+        allocations,
+        { now: this.now, resolveResultsThread: this.options.resolveResultsThread },
+        request?.threadId ?? routine.sourceThreadId,
+      );
+      this.runs.push(run);
       // Preserve the invoking chat as provenance/fallback for this run.
       // An explicitly configured results destination continues to win.
       if (request) run.sourceThreadId = request.threadId;
-      if (request) this.rememberRoutineRequest(request, run.id, this.now());
-    }, () => this.discardResultsThreads(allocations));
+      if (request) this.requestReceipts.rememberRoutineRequest(request, run.id, this.now());
+    }, () => discardResultsThreads(allocations, this.options));
     if (routine.resultsThreadId !== previousDestination) this.emitRoutine(routine);
     this.emitRun(run);
     queueMicrotask(() => void this.tick());
@@ -544,48 +492,17 @@ export class RoutineManager {
 
   /** Look up an accepted delivery independently of run-log retention. */
   webhookRunReceipt(webhookId: string, deliveryId: string): { id: string } | null {
-    const receipt = this.webhookRunReceipts.find((candidate) =>
-      candidate.webhookId === webhookId && candidate.deliveryId === deliveryId &&
-      candidate.acceptedAt >= this.now() - WEBHOOK_RETRY_WINDOW_MS);
-    if (receipt) return { id: receipt.runId };
-    // Never duplicate work that is still pending, even beyond the retry window.
-    const active = this.runs.find((run) => run.webhookId === webhookId && run.deliveryId === deliveryId &&
-      ["queued", "running", "waiting"].includes(run.status));
-    return active ? { id: active.id } : null;
+    return findWebhookRun(webhookId, deliveryId, this.webhookRunReceipts, this.runs, this.now());
   }
 
   /** Queue webhook work through the same dispatcher as scheduled routines. */
-  enqueueWebhook(input: {
-    webhookId: string;
-    webhookName: string;
-    prompt: string;
-    botId: string;
-    runOn: RoutineRunOn;
-    deliveryId: string;
-    receivedAt: number;
-  }): { id: string } {
+  enqueueWebhook(input: WebhookRunInput): { id: string } {
     const existing = this.webhookRunReceipt(input.webhookId, input.deliveryId);
     if (existing) return existing;
     if (this.options.botState(input.botId) === "missing") {
       throw Object.assign(new Error("The assigned MAUS no longer exists"), { status: 410 });
     }
-    const run: RoutineRun = {
-      id: randomUUID(),
-      routineId: input.webhookId,
-      routineName: input.webhookName,
-      prompt: input.prompt,
-      target: "bot",
-      botId: input.botId,
-      runOn: input.runOn,
-      scheduledFor: input.receivedAt,
-      status: "queued",
-      manual: false,
-      triggerSource: "webhook",
-      webhookId: input.webhookId,
-      deliveryId: input.deliveryId,
-      attachments: [],
-      createdAt: this.now(),
-    };
+    const run = webhookRun(input, this.now());
     const previousReceipts = this.webhookRunReceipts;
     const receipts = previousReceipts.filter((receipt) =>
       receipt.acceptedAt >= this.now() - WEBHOOK_RETRY_WINDOW_MS);
@@ -608,36 +525,6 @@ export class RoutineManager {
     this.emitRun(run);
     queueMicrotask(() => void this.tick());
     return cloneRun(run);
-  }
-
-  /** The most recent completed report for a continuity routine, or `null` when
-   * continuity is off, the routine is gone, or nothing has finished yet. The
-   * text is redacted on the way in: a report can quote anything the run saw,
-   * and continuity would otherwise carry it forward on every future run. */
-  private continuityCarry(run: RoutineRun): RoutineContinuityCarry | null {
-    const routine = this.routines.find((candidate) => candidate.id === run.routineId);
-    if (!routine?.continuity) return null;
-    let latest: RoutineRun | null = null;
-    for (const candidate of this.runs) {
-      if (candidate.routineId !== run.routineId) continue;
-      // Reassigning a routine must not disclose the old bot's report to a
-      // different bot or execution destination.
-      if (candidate.botId !== run.botId || candidate.target !== run.target || candidate.runOn !== run.runOn) continue;
-      if (candidate.id === run.id) continue;
-      if (candidate.status !== "completed") continue;
-      if (!candidate.output?.trim()) continue;
-      if (!Number.isFinite(finishedOrder(candidate))) continue;
-      if (!latest || finishedOrder(candidate) > finishedOrder(latest)) latest = candidate;
-    }
-    if (!latest) return null;
-    const redacted = redactSecretsInText(latest.output ?? "").trim();
-    if (!redacted) return null;
-    const truncated = redacted.length > CONTINUITY_CHARS;
-    return {
-      finishedAt: latest.finishedAt ?? latest.createdAt,
-      output: truncated ? `${redacted.slice(0, CONTINUITY_CHARS - 1).trimEnd()}…` : redacted,
-      truncated,
-    };
   }
 
   activeWebhookRunCount(webhookId: string): number {
@@ -750,7 +637,14 @@ export class RoutineManager {
               (run) => run.routineId === routine.id && ["queued", "running", "waiting"].includes(run.status),
             );
             if (!overlapping) {
-              const run = this.newRun(routine, scheduledFor, false, allocations);
+              const run = newRun(
+                routine,
+                scheduledFor,
+                false,
+                allocations,
+                { now: this.now, resolveResultsThread: this.options.resolveResultsThread },
+              );
+              this.runs.push(run);
               if (late > CATCH_UP_MS) {
                 run.status = "missed";
                 run.finishedAt = now;
@@ -773,7 +667,7 @@ export class RoutineManager {
               routine.updatedAt = Math.max(now, routine.updatedAt + 1);
             }
           }
-        }, () => this.discardResultsThreads(allocations));
+        }, () => discardResultsThreads(allocations, this.options));
       }
       // Reporting may persist transcript cards, so publish only after the
       // scheduler batch (including each destination) is durable.
@@ -817,7 +711,7 @@ export class RoutineManager {
             continue;
           }
         }
-        const state = this.targetState(run);
+        const state = targetState(run, this.options);
         if (state === "busy") {
           // A queued run behind a busy target is deferred, not silent. Stamp
           // the wait once so receipts and cards can say how long it has been
@@ -836,7 +730,7 @@ export class RoutineManager {
           continue;
         }
         if (state === "missing") {
-          this.failRun(run, this.missingTargetMessage(run.target));
+          this.failRun(run, missingTargetMessage(run.target));
           continue;
         }
         // A webhook is an incoming message, so make its task the bot's live
@@ -881,7 +775,7 @@ export class RoutineManager {
             await this.options.startTurn(
               run.botId,
               task.threadId,
-              composeExecutionPrompt(prompt, run.attachments, this.continuityCarry(run)),
+              composeExecutionPrompt(prompt, run.attachments, continuityCarry(run, this.routines, this.runs)),
               run.runOn ?? "maus",
               triggerSource,
               (message) => this.failThread(task.threadId, message),
@@ -1018,99 +912,6 @@ export class RoutineManager {
     this.options.onRunFailed?.(cloneRun(run));
   }
 
-  private targetState(target: Pick<RoutineRun, "target" | "groupId" | "botId">): "ready" | "busy" | "missing" {
-    if (target.target === "room-goal") {
-      if (!target.groupId || !this.options.goalState) return "missing";
-      return this.options.goalState(target.groupId, target.botId);
-    }
-    return this.options.botState(target.botId);
-  }
-
-  private missingTargetMessage(target: RoutineTarget): string {
-    return target === "room-goal"
-      ? "The assigned room or coordinator no longer exists"
-      : "The assigned bot no longer exists";
-  }
-
-  private initialOccurrence(schedule: RoutineSchedule, now: number): number | null {
-    // Return the original time, not max(at, now): tick() already decides
-    // whether a stale "once" run fires or is recorded as "missed" based on
-    // how far past the scheduled time it is. Clamping to now here hides the
-    // original schedule from the run receipt (scheduledFor would read "now"
-    // instead of the time the user chose) and prevents the 12-hour missed
-    // threshold from ever triggering for a "once" routine created late.
-    if (schedule.type === "once") return schedule.at;
-    return nextOccurrence(schedule, now);
-  }
-
-  private newRun(
-    routine: Routine,
-    scheduledFor: number,
-    manual: boolean,
-    allocations: ResultsThreadAllocation[],
-    sourceThreadId = routine.sourceThreadId,
-  ): RoutineRun {
-    if (routine.target === "bot" && this.options.resolveResultsThread) {
-      const destination = this.options.resolveResultsThread({ ...routine, sourceThreadId }, false);
-      if (destination !== routine.resultsThreadId) {
-        if (destination) allocations.push({ botId: routine.botId, threadId: destination });
-        routine.resultsThreadId = destination;
-        routine.updatedAt = Math.max(this.now(), routine.updatedAt + 1);
-      }
-    }
-    const run: RoutineRun = {
-      id: randomUUID(),
-      routineId: routine.id,
-      routineName: routine.name,
-      prompt: routine.prompt,
-      durationMinutes: routine.durationMinutes,
-      ...(routine.timeoutMinutes === undefined ? {} : { timeoutMinutes: routine.timeoutMinutes }),
-      attachments: cloneAttachments(routine.attachments),
-      target: routine.target,
-      groupId: routine.groupId,
-      botId: routine.botId,
-      runOn: routine.runOn ?? "maus",
-      scheduledFor,
-      status: "queued",
-      manual,
-      triggerSource: manual ? "manual" : "schedule",
-      sourceThreadId,
-      resultsThreadId: routine.resultsThreadId,
-      createdAt: this.now(),
-    };
-    this.runs.push(run);
-    return run;
-  }
-
-  private discardResultsThreads(allocations: ResultsThreadAllocation[]) {
-    for (const { botId, threadId } of allocations) {
-      try {
-        this.options.discardResultsThread?.(botId, threadId);
-      } catch (error) {
-        console.error("routine: could not discard uncommitted results thread", error);
-      }
-    }
-  }
-
-  private applyResultsInput(routine: Routine, value: RoutineInput["resultsThreadId"]) {
-    if (routine.target !== "bot") {
-      if (value != null) throw Object.assign(new Error("Results threads are only available for bot routines"), { status: 400 });
-      delete routine.resultsThreadId;
-      return;
-    }
-    if (value === undefined) return;
-    if (value === null) {
-      const destination = this.options.resolveResultsThread?.(routine, true);
-      if (!destination) throw new Error("Could not create a results thread for this routine");
-      routine.resultsThreadId = destination;
-      return () => this.options.discardResultsThread?.(routine.botId, destination);
-    }
-    if (typeof value !== "string" || !value.trim() || !this.options.isResultsThread?.(routine.botId, value.trim())) {
-      throw Object.assign(new Error("Choose a visible results thread belonging to this bot"), { status: 400 });
-    }
-    routine.resultsThreadId = value.trim();
-  }
-
   private emitRoutine(routine: Routine) {
     this.options.emit?.({ kind: "routine", routine: cloneRoutine(routine) });
   }
@@ -1130,35 +931,6 @@ export class RoutineManager {
     }
   }
 
-  private matchingRoutineRequestReceipt(request: RoutineRequestCommit): RoutineRequestReceipt | null {
-    const receipt = this.routineRequestReceipts.find((candidate) => candidate.requestId === request.requestId);
-    if (!receipt) return null;
-    if (
-      receipt.action !== request.action ||
-      receipt.messageId !== request.messageId ||
-      receipt.botId !== request.botId ||
-      receipt.threadId !== request.threadId ||
-      receipt.fingerprintVersion !== request.fingerprintVersion ||
-      receipt.fingerprint !== request.fingerprint
-    ) {
-      throw new Error("Routine request receipt does not match this confirmation card");
-    }
-    return receipt;
-  }
-
-  private rememberRoutineRequest(
-    request: RoutineRequestCommit,
-    resultId: string,
-    appliedAt: number,
-  ) {
-    const existing = this.matchingRoutineRequestReceipt(request);
-    if (existing) {
-      if (existing.resultId !== resultId) throw new Error("Routine request receipt has another result");
-      return;
-    }
-    this.routineRequestReceipts.unshift({ ...request, resultId, appliedAt });
-  }
-
   /**
    * A confirmation receipt is only true once the scheduler mutation and its
    * receipt reached the same atomic file. Restore the complete in-memory
@@ -1169,7 +941,7 @@ export class RoutineManager {
     const before = {
       routines: this.routines.map(cloneRoutine),
       runs: this.runs.map(cloneRun),
-      receipts: this.routineRequestReceipts.map((receipt) => ({ ...receipt })),
+      receipts: this.requestReceipts.snapshot(),
     };
     try {
       mutate();
@@ -1177,7 +949,7 @@ export class RoutineManager {
     } catch (error) {
       this.routines = before.routines;
       this.runs = before.runs;
-      this.routineRequestReceipts = before.receipts;
+      this.requestReceipts.restore(before.receipts);
       try {
         rollback?.();
       } catch (cleanupError) {
@@ -1206,9 +978,8 @@ export class RoutineManager {
       version: 1,
       routines: this.routines,
       runs: this.runs,
-      routineRequestReceipts: this.routineRequestReceipts,
+      routineRequestReceipts: this.requestReceipts.persisted(),
       webhookRunReceipts: this.webhookRunReceipts,
     } satisfies RoutineFile, null, 2), { mode: 0o600 });
   }
 }
-
