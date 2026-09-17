@@ -7,10 +7,8 @@ import { extname, join } from "node:path";
 
 import { SharedComputers } from "./shared-computers.ts";
 
-import {
-  BrowserCleanupCoordinator,
-  type BrowserCleanupWireRequest,
-} from "./browser-lifecycle-cleanup.ts";
+import { BrowserCleanupCoordinator } from "./browser-lifecycle-cleanup.ts";
+import { createDesktopBridge } from "./desktop-bridge.ts";
 import { flushDecisionLog } from "./decision-log.ts";
 import {
   cleanupStaleAttachmentPartials,
@@ -40,7 +38,6 @@ import {
 import type { RequestAuth } from "./request-auth.ts";
 import { fleetAvailable, fleetRequest, fleetSocketPath } from "./fleet-client.ts";
 import { entitled } from "./enterprise.ts";
-import { HOSTED_CONTRACT_HEADER, HOSTED_CONTRACT_METADATA, HOSTED_CONTRACT_VERSION } from "./hosted-contract.ts";
 
 
 import { closeMessageDb, chatFollowups, settleChatFollowups } from "./message-db.ts";
@@ -113,7 +110,7 @@ import {
   loadEnterpriseLayer,
   type WorkspaceAccess,
 } from "./enterprise.ts";
-import { environmentDescriptor, serverVersion } from "./environment.ts";
+import { serverVersion } from "./environment.ts";
 import { createWorkspaceBackupRoutes, isWorkspaceBackupSessionControl } from "./workspace-backup-http.ts";
 import { json, readBody } from "./http.ts";
 import { createInternalRoutes } from "./routes/internal.ts";
@@ -132,6 +129,7 @@ import { createBotThreadOpsRoutes } from "./routes/bot-thread-ops.ts";
 import { createBotTasksRoutes } from "./routes/bot-tasks.ts";
 import { createBotProfileRoutes } from "./routes/bot-profile.ts";
 import { createBotMemoryRoutes } from "./routes/bot-memory.ts";
+import { createPreAuthRoutes } from "./routes/pre-auth.ts";
 import { createAuthSessionRoutes } from "./routes/auth-session.ts";
 import { createBotCardsRoutes } from "./routes/bot-cards.ts";
 import { createBotComputerRoutes } from "./routes/bot-computer.ts";
@@ -169,11 +167,7 @@ import { createCustomDomainVerifier, customDomainIpv4, normalizeCustomDomain } f
 import { allowedScopes, createEmailSignIn, parseAllowList } from "./account-signin.ts";
 import { ProviderAuthSessions } from "./provider-auth-sessions.ts";
 import {
-  isLoopbackHost,
-  isProxied,
-  labelFromUserAgent,
   requestOrigin,
-  requestSource,
   resolveRequestAuth,
   parseCookies,
   serializeSessionCookie,
@@ -273,66 +267,15 @@ const providerAuthSessions = new ProviderAuthSessions();
 const bundledSkills = loadBundledSkills();
 const availableSkills = () => mergeSkills(bundledSkills, loadUserSkills(join(DATA_DIR, "skills")));
 
-// Electron's utility-process parent port is private to the desktop main
-// process. It lets a slow first-time managed Composio registration arrive
-// after first paint without putting the credential in the renderer or
-// restarting the embedded server. Plain Node/dev launches have no parentPort.
-type UtilityParentPort = {
-  on(event: "message", listener: (event: { data?: object }) => void): void;
-  postMessage(message: object): void;
-};
-// SAFETY: Electron's utility-process runtime is the only environment that
-// supplies parentPort; plain Node intentionally leaves it absent.
-const utilityParentPort = (process as NodeJS.Process & { parentPort?: UtilityParentPort }).parentPort;
-type DesktopPrivateMessage = BrowserCleanupWireRequest | {
-  type: "openmausbot:browser-control";
-  botId: string;
-  held: true;
-} | {
-  type: "openmausbot:phone-secret-save";
-  requestId: string;
-  target: string;
-  value: string;
-} | {
-  type: "approval-trusted-mode-result" | "approval-trusted-mode-commit-result";
-  requestId: string;
-  ok: boolean;
-  bot?: ReturnType<typeof wireBot>;
-  error?: string;
-} | {
-  type: "approval-trusted-mode-confirm-result";
-  requestId: string;
-  ok: boolean;
-  error?: string;
-} | {
-  type: "approval-trusted-mode-activate-result" | "approval-trusted-mode-finalize-result";
-  requestId: string;
-  ok: boolean;
-  error?: string;
-};
-function postDesktopPrivateMessage(message: DesktopPrivateMessage): boolean {
-  if (!utilityParentPort) return false;
-  try {
-    utilityParentPort.postMessage(message);
-    return true;
-  } catch (error) {
-    console.error(`[desktop-sync] could not send private parent message: ${error instanceof Error ? error.message : String(error)}`);
-    return false;
-  }
-}
-function applyDesktopMutationTokenMessage(raw: unknown): boolean {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
-  const message = raw as Record<string, unknown>;
-  if (message.type !== "openmausbot:desktop-mutation-token") return false;
-  if (typeof message.token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(message.token)) {
-    throw new Error("invalid desktop mutation capability");
-  }
-  desktopMutationToken = message.token;
-  if (typeof message.companionToken === "string" && /^[A-Za-z0-9_-]{43}$/.test(message.companionToken)) {
-    companionMutationToken = message.companionToken;
-  }
-  return true;
-}
+const {
+  postDesktopPrivateMessage,
+  applyDesktopMutationTokenMessage,
+  onUtilityParentMessage,
+  postUtilityParentMessage,
+} = createDesktopBridge({
+  desktopMutationToken: { get: () => desktopMutationToken, set: (value) => { desktopMutationToken = value; } },
+  companionMutationToken: { get: () => companionMutationToken, set: (value) => { companionMutationToken = value; } },
+});
 // Browser data of a deleted bot or profile: the engine's saved session
 // state, cleared here on every host (the desktop no longer owns a browser).
 // The coordinator keeps its durable journal and replay; this is its outbox.
@@ -435,7 +378,7 @@ const handleDesktopTrustedApprovalMessage = createDesktopApproval({
 });
 
 const phoneSecrets = new PhoneSecretBridge(postDesktopPrivateMessage);
-utilityParentPort?.on("message", (event) => {
+onUtilityParentMessage((event) => {
   const message = event?.data;
   try {
     if (applyDesktopMutationTokenMessage(message)) return;
@@ -466,14 +409,14 @@ const managedDesktop = new ManagedDesktopProviders({
 });
 // Only Electron owns this port. There is deliberately no HTTP equivalent or
 // config patch for its organization identity, endpoint, or model capability.
-utilityParentPort?.on("message", event => {
+onUtilityParentMessage(event => {
   const message = event.data as { type?: unknown; requestId?: unknown; connection?: unknown } | undefined;
   if (message?.type !== "openmausbot:managed-desktop") return;
   const requestId = typeof message.requestId === "string" && message.requestId.length <= 100 ? message.requestId : undefined;
   void companyRuntimeStarted.then(() => managedDesktop.apply(message.connection)).then(() => {
-    utilityParentPort.postMessage({ type: "openmausbot:managed-desktop-result", requestId, ok: true });
+    postUtilityParentMessage({ type: "openmausbot:managed-desktop-result", requestId, ok: true });
   }, () => {
-    utilityParentPort.postMessage({ type: "openmausbot:managed-desktop-result", requestId, ok: false, error: "Company connection could not be applied. Reconnect from desktop Settings." });
+    postUtilityParentMessage({ type: "openmausbot:managed-desktop-result", requestId, ok: false, error: "Company connection could not be applied. Reconnect from desktop Settings." });
   });
 });
 
@@ -1545,6 +1488,16 @@ const handleBotProfile = createBotProfileRoutes({
 const handleBotMemory = createBotMemoryRoutes({
   checkpointRestoreLeases,
 });
+const handlePreAuth = createPreAuthRoutes({
+  sessions,
+  emailSignIn,
+  customDomainVerifier,
+  SESSION_COOKIE,
+  DESKTOP_MANAGED,
+  HOSTED_WORKSPACE,
+  serveStatic,
+  workspaceAccess: () => workspaceAccess,
+});
 const handleAuthSession = createAuthSessionRoutes({
   sessions,
   SESSION_COOKIE,
@@ -1648,141 +1601,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
   const method = req.method ?? "GET";
   let releaseWorkspaceRequest: (() => void) | undefined;
   try {
-    // Unlike the legacy reachability probe, this attests the running
-    // server's portal-membership capability, including live entitlement.
-    if (method === "GET" && path === "/api/health/hosted") {
-      res.setHeader("cache-control", "no-store");
-      const hosted = hostedWorkspaceConfiguration();
-      if (!hosted?.portalMembership || !workspaceAccess || !entitled("admin")) {
-        return json(res, 503, { error: "Hosted workspace readiness is unavailable." });
-      }
-      res.setHeader(HOSTED_CONTRACT_HEADER, String(HOSTED_CONTRACT_VERSION));
-      return json(res, 200, { ok: true, service: "openmausbot", membershipAuthority: "portal", workspace: hosted.workspace, ...HOSTED_CONTRACT_METADATA });
-    }
-    // Hosted workspaces have one sign-in authority. A missing optional layer
-    // must not accidentally reactivate legacy email/QR credential minting.
-    if (HOSTED_WORKSPACE) {
-      if (method === "POST" && ["/api/auth/pair", "/api/pair", "/api/auth/pairing", "/api/auth/email/start", "/api/auth/email/verify"].includes(path)) {
-        return json(res, 403, { error: "Sign in through the workspace portal." });
-      }
-      if (workspaceAccess) {
-        if (await workspaceAccess.handlePublic(req, res, url)) return;
-      } else if (path.startsWith("/api/auth/hosted/") || path === "/pair" || (path === "/" && (!isLoopbackHost(req.headers.host) || isProxied(req)))) {
-        return json(res, 503, { error: "Workspace sign-in is unavailable." });
-      }
-    }
-    // ── who is asking (server/request-auth.ts) ──────────────────────────
-    // Two public routes come first: what this server is, and turning a pairing
-    // code into a session. Everything else needs the loopback owner or a
-    // paired session with the right scope.
-    if (method === "GET" && !path.startsWith("/api/") && !path.startsWith("/.well-known/") && serveStatic(res, path)) return;
-    if (method === "GET" && path === "/.well-known/openmausbot/environment") {
-      return json(res, 200, environmentDescriptor({ environmentId: ENVIRONMENT_ID, desktopManaged: DESKTOP_MANAGED, emailSignIn: !HOSTED_WORKSPACE && emailSignIn.enabled(), sharedComputers: sharedComputersEnabled(cfg) }));
-    }
-    const domainCheck = /^\/\.well-known\/openmausbot\/domain-check\/([a-f0-9]{64})$/.exec(path);
-    if (method === "GET" && domainCheck) {
-      res.setHeader("cache-control", "no-store");
-      const challenge = customDomainVerifier.challenge(domainCheck[1]);
-      return json(res, challenge ? 200 : 404, challenge ?? { error: "No active domain check." });
-    }
-    // Sign in with an emailed code (server/account-signin.ts). Public like
-    // /api/auth/pair, JSON-only for the same reason, and counted against the
-    // same per-source lockout so a code cannot be guessed.
-    if (method === "POST" && (path === "/api/auth/email/start" || path === "/api/auth/email/verify")) {
-      if (!/^application\/json\b/i.test(String(req.headers["content-type"] ?? ""))) {
-        return json(res, 415, { error: "send the sign-in request as JSON (content-type: application/json)" });
-      }
-      if (!emailSignIn.enabled()) return json(res, 404, { error: "email sign-in is not set up on this server; use a pairing code" });
-      const source = requestSource(req);
-      const allowed = sessions.attemptAllowed(source);
-      if (!allowed.ok) return json(res, 429, { error: `too many failed sign-in attempts from your address; try again in ${Math.ceil(allowed.retryAfterMs / 1000)}s` });
-      const body = await readBody(req);
-      const email = typeof body?.email === "string" ? body.email : "";
-      if (path === "/api/auth/email/start") {
-        const started = await emailSignIn.start(email);
-        if (!started.ok) {
-          if (started.status === 403) sessions.noteFailure(source);
-          return json(res, started.status, { error: started.error });
-        }
-        return json(res, 200, { ok: true });
-      }
-      const code = typeof body?.code === "string" ? body.code : "";
-      const label = typeof body?.label === "string" ? body.label : "";
-      const verified = await emailSignIn.verify(email, code);
-      if (!verified.ok) {
-        if (verified.status === 401 || verified.status === 403) sessions.noteFailure(source);
-        console.warn(`email sign-in refused from ${source}: ${verified.error}`);
-        return json(res, verified.status, { error: verified.error });
-      }
-      sessions.clearFailures(source);
-      const issued = sessions.issue({ label: label.trim() || labelFromUserAgent(req.headers["user-agent"]), scopes: verified.scopes, userId: verified.userId, email: verified.email });
-      const environment = environmentDescriptor({ environmentId: ENVIRONMENT_ID, desktopManaged: DESKTOP_MANAGED, emailSignIn: true, sharedComputers: sharedComputersEnabled(cfg) });
-      const secure = requestOrigin(req)?.startsWith("https://") === true;
-      res.setHeader("set-cookie", serializeSessionCookie(SESSION_COOKIE, issued.token, { secure, maxAgeSeconds: cookieMaxAgeSeconds(issued.session) }));
-      return json(res, 200, { session: issued.session, environment });
-    }
-    if (method === "POST" && path === "/api/auth/pair") {
-      // JSON only: a cross-site HTML form cannot send this content type
-      // without a preflight, so a stray unused code cannot be planted as a
-      // session in someone else's browser.
-      if (!/^application\/json\b/i.test(String(req.headers["content-type"] ?? ""))) {
-        return json(res, 415, { error: "send the pairing code as JSON (content-type: application/json)" });
-      }
-      const body = await readBody(req);
-      const code = typeof body?.code === "string" ? body.code : "";
-      const wantsCookie = body?.cookie === true;
-      const label = typeof body?.label === "string" ? body.label : "";
-      const attemptId = typeof body?.attemptId === "string" ? body.attemptId : undefined;
-      const result = sessions.exchange({ code, label, attemptId, source: requestSource(req), fallbackLabel: labelFromUserAgent(req.headers["user-agent"]) });
-      if (!result.ok) {
-        console.warn(`pairing refused from ${requestSource(req)}: ${result.error}`);
-        return json(res, result.status, { error: result.error });
-      }
-      const environment = environmentDescriptor({ environmentId: ENVIRONMENT_ID, desktopManaged: DESKTOP_MANAGED, emailSignIn: emailSignIn.enabled(), sharedComputers: sharedComputersEnabled(cfg) });
-      if (wantsCookie) {
-        const secure = requestOrigin(req)?.startsWith("https://") === true;
-        res.setHeader("set-cookie", serializeSessionCookie(SESSION_COOKIE, result.token, { secure, maxAgeSeconds: cookieMaxAgeSeconds(result.session) }));
-        return json(res, 200, { session: result.session, environment });
-      }
-      return json(res, 200, { token: result.token, session: result.session, environment });
-    }
-    // The route the iOS and Android companion apps already POST to. Until now
-    // only the desktop's companion sidecar answered it, so a self-hosted
-    // server had nothing for a native phone to pair against: the app could
-    // reach the server and pass its health probe, then ask for a credential
-    // the server could not issue. Same window, same lockout and the same
-    // single-use exchange as /api/auth/pair above; only the request and
-    // response shapes differ, because the apps were written against the
-    // sidecar. Public and unauthenticated for the same reason
-    // /api/auth/pair is: redeeming a one-time credential IS the sign-in.
-    if (method === "POST" && path === "/api/pair") {
-      if (!/^application\/json\b/i.test(String(req.headers["content-type"] ?? ""))) {
-        return json(res, 415, { error: "send the pairing credential as JSON (content-type: application/json)" });
-      }
-      const body = await readBody(req);
-      const credential = typeof body?.credential === "string" ? body.credential : typeof body?.code === "string" ? body.code : "";
-      const label = typeof body?.deviceName === "string" ? body.deviceName : "";
-      const attemptId = typeof body?.pairRequestId === "string" ? body.pairRequestId : undefined;
-      const paired = sessions.exchange({ code: credential, label, attemptId, source: requestSource(req), fallbackLabel: labelFromUserAgent(req.headers["user-agent"]) });
-      if (!paired.ok) {
-        console.warn(`pairing refused from ${requestSource(req)}: ${paired.error}`);
-        return json(res, paired.status, { error: paired.error });
-      }
-      // The shape the companion apps decode (android/core Models.kt,
-      // PairResponseSerializer): token, device and serverName are required;
-      // hosts and endpoints are advisory and deliberately omitted, because a
-      // harness has no sidecar endpoints to advertise.
-      return json(res, 200, {
-        token: paired.token,
-        device: {
-          id: paired.session.id,
-          name: paired.session.label,
-          createdAt: paired.session.createdAt,
-          lastSeenAt: paired.session.lastSeenAt,
-        },
-        serverName: environmentDescriptor({ environmentId: ENVIRONMENT_ID, desktopManaged: DESKTOP_MANAGED }).label,
-      });
-    }
+    if (await handlePreAuth(req, res, { method, path, url })) return;
     const gate = resolveRequestAuth(req, {
       sessions,
       cookieName: SESSION_COOKIE,
