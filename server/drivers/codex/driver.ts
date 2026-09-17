@@ -47,7 +47,7 @@ import { codexAccountEmail } from "../codex-identity.ts";
 import { classifyResumeFailure, mayReplay, recoveryPromptFor } from "../../resume-recovery.ts";
 import { CodexRpcError, missingNativeCodexThread } from "./rpc.ts";
 import { codexAstraUpdate } from "./update.ts";
-import { CodexConfig, decodeConfig, managedCodexArgs } from "./config.ts";
+import { type CodexConfig, decodeConfig, managedCodexArgs } from "./config.ts";
 import { codexNativeIncomingLogMessage, codexNativeLogMessage, permissionProfileUnsupported } from "./logs.ts";
 import { mountMcpServer, noteSkippedSseServer } from "./mcp.ts";
 
