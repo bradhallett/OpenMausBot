@@ -372,6 +372,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
       }
       const runtime = createDriverSessionRuntime<Turn>({
         driverKind: DRIVER_KIND,
+        providerInstanceId: instanceId,
         stopTurn: (turn) => turn.stop(),
       });
       const { emit, base } = runtime;

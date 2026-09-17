@@ -434,7 +434,7 @@ export function GroupView({ group }: { group: Group }) {
       >
         {setupPending ? (
           <div className="flex min-h-full w-full items-center py-8">
-            <RoomSetup group={group} members={members} />
+            <RoomSetup key={`${group.id}:${group.threadId}`} group={group} members={members} />
           </div>
         ) : (
         <div
