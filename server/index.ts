@@ -11,10 +11,6 @@ import { z } from "zod";
 import { SharedComputers } from "./shared-computers.ts";
 import { SharedComputerControl } from "./shared-computer-control.ts";
 import { RoomHandoffs } from "./room-handoffs.ts";
-import {
-  approvalModeFor,
-  supportsApprovalMode,
-} from "../shared/approval-mode.ts";
 import { escapeAttribute } from "../shared/attachments.ts";
 
 import {
@@ -33,10 +29,7 @@ import type { WireGroup } from "../shared/wire.ts";
 import { boxCreateRecoverySnapshot } from "./box-create-idempotency.ts";
 import { boxDeletionSnapshot } from "./box-delete-journal.ts";
 import * as composio from "./composio.ts";
-import {
-  canAccessTeam,
-  canReachPeer,
-} from "./peer-roster.ts";
+import { canAccessTeam } from "./peer-roster.ts";
 import {
   containerComputerAction,
   containerComputerStatus,
@@ -69,7 +62,7 @@ import { entitled } from "./enterprise.ts";
 import { HOSTED_CONTRACT_HEADER, HOSTED_CONTRACT_METADATA, HOSTED_CONTRACT_VERSION } from "./hosted-contract.ts";
 import type { RuntimeEvent } from "./contracts.ts";
 
-import type { CommsBus } from "./comms-visibility.ts";
+
 import { closeMessageDb, chatFollowups, settleChatFollowups } from "./message-db.ts";
 import {
   discardDelegations,
@@ -86,7 +79,6 @@ import { ManagedDesktopProviders } from "./managed-desktop.ts";
 import { cancelPeerApprovalsFor, dismissStalePeerCards, type ApprovalBus } from "./peer-approval.ts";
 import { withPeerProvenance } from "./peer-provenance.ts";
 import {
-  sectionKey,
   titleFromLlm,
   type BotRecord,
   type GroupDefaultResponder,
@@ -96,7 +88,6 @@ import {
 import { recordHanded } from "./delta-context.ts";
 import type { TurnOwner } from "./turn-resources.ts";
 import { flushAllMemoryJournals } from "./memory-journal.ts";
-import { readSections } from "./section-context.ts";
 import {
   applyStagedSkillWrite,
   getStagedSkillWrite,
@@ -105,12 +96,13 @@ import {
 } from "./skills.ts";
 import type { SkillRequestCardData } from "../shared/skill-request.ts";
 import { discoverExistingPerBotLocalVms, shouldArmLocalVmIdle } from "./local-vm-inventory.ts";
-import { redactSecretsInText } from "./redact.ts";
+
 import * as vps from "./vps-computer.ts";
 import { createEventsPipeline } from "./events-pipeline.ts";
-import { createRoutineWiring } from "./routine-wiring.ts";
+import { createRoutineLifecycle } from "./routine-lifecycle.ts";
+import { createTeamSetupLifecycle } from "./team-setup-lifecycle.ts";
 import { createTurnDispatch } from "./turn-dispatch.ts";
-import { RoutineManager, type RoutineRun } from "./routines.ts";
+import { RoutineManager } from "./routines.ts";
 import { CalendarCallManager, type CalendarCall } from "./calendar-calls.ts";
 import {
   browserEngineEncryptionKey,
@@ -118,9 +110,9 @@ import {
   browserEngineStatus,
   browserSessionId,
 } from "./browser-engine.ts";
-import { RoutineRequestService } from "./routine-requests.ts";
-import { ProfileRequestService } from "./profile-requests.ts";
-import { TeamSetupError, TeamSetupRequestService } from "./team-setup-requests.ts";
+
+
+
 import type { TeamSetupRequest } from "../shared/team-setup.ts";
 import { flushAllProfileHistory } from "./profile-versions.ts";
 import { listenWebhookIngress, type WebhookIngress } from "./webhook-ingress.ts";
@@ -461,8 +453,8 @@ const {
   helpers: {
     publicGroupState,
     notify: (notification) => notify(notification),
-    routineSourceOwner,
-    routineSourceThread,
+    routineSourceOwner: (run) => routineSourceOwner(run),
+    routineSourceThread: (run) => routineSourceThread(run),
   },
 });
 // ── checked inputs ────────────────────────────────────────────────────────
@@ -494,7 +486,7 @@ const handleDesktopTrustedApprovalMessage = createDesktopApproval({
   helpers: {
     postDesktopPrivateMessage,
     checkedTaskModelSwitch,
-    stopBotForEmergencyApprovalDowngrade,
+    stopBotForEmergencyApprovalDowngrade: (botId) => stopBotForEmergencyApprovalDowngrade(botId),
   },
 });
 
@@ -1423,8 +1415,8 @@ const {
   helpers: {
     shouldIgnoreProviderEvent,
     approvalModeForTurn,
-    routineSourceOwner,
-    routineSourceThread,
+    routineSourceOwner: (run) => routineSourceOwner(run),
+    routineSourceThread: (run) => routineSourceThread(run),
     generatedImageTurnKey,
     cancelDirectTurnDispatch,
     settleDirectCoordination,
@@ -1763,190 +1755,36 @@ const {
 
 
 // ── routines: persisted definitions → detached bot tasks ───────────────
-// The scheduler owns timing and receipts; the existing harness remains the
-// only owner of provider sessions, approvals, tools, computers and messages.
-// The scheduler's host wiring (comms bus + RoutineManager construction)
-// and the run-card projection live in ./routine-wiring.ts; these source
-// resolvers stay here because the group-goal fold reads them too.
-function routineSourceOwner(run: Pick<RoutineRun, "botId" | "sourceThreadId" | "resultsThreadId">) {
-  if (run.resultsThreadId) {
-    const bot = store.bot(run.botId);
-    const task = bot && store.taskByThread(bot.id, run.resultsThreadId);
-    return bot && !bot.hidden && task && !task.routineRunId
-      ? { bot, group: undefined, threadId: task.threadId }
-      : null;
-  }
-  const threadId = run.sourceThreadId?.trim();
-  if (!threadId) return null;
-  // Validate before messagesFor(): Store lazily opens transcript storage, so
-  // reading an orphan id first would recreate a deleted conversation.
-  const bot = store.bot(run.botId);
-  if (!bot) return null;
-  // The source is stamped from the confirmed request, never calendar input.
-  // A request for a teammate runs as that teammate but reports to the bot
-  // whose conversation held the card. Recheck their section before sharing
-  // a result, since either bot may have moved since confirmation.
-  const sourceBot = store.botByThread(threadId);
-  if (sourceBot && !sourceBot.hidden && !store.taskByThread(sourceBot.id, threadId)?.routineRunId &&
-    (sourceBot.id === bot.id || canReachPeer(sourceBot, bot))) {
-    return { bot: sourceBot, group: undefined, threadId };
-  }
-  const group = store.groupByThread(threadId);
-  return group?.memberIds.includes(bot.id) ? { bot, group, threadId } : null;
-}
-
-function routineSourceThread(run: RoutineRun): string | null {
-  return routineSourceOwner(run)?.threadId ?? null;
-}
-
-/** Stop work that may have captured Full/Custom before a fail-closed Ask
- * compensation arrived over Electron's private channel. Cancellation flags
- * are flipped synchronously; the awaited work only drains capabilities and
- * interrupts the already-started provider process. */
-async function stopBotForEmergencyApprovalDowngrade(botId: string): Promise<void> {
-  const bot = store.bot(botId);
-  if (!bot) return;
-  for (const task of store.tasks(botId)) {
-    if (task.approvalMode === "full" || task.approvalMode === "custom") {
-      store.patchTask(botId, task.threadId, { approvalMode: "ask", autoApprove: false, alwaysAllow: [] });
-    }
-  }
-  const directStop = interruptAllDirectThreads(botId);
-
-  const routineRun = routines?.activeBotRunForBot(bot.id);
-  if (routineRun) {
-    if (routineRun.threadId) revokeInternalCapabilitiesForThread(routineRun.threadId);
-    cancelDirectTurnDispatch(bot.id, routineRun.threadId);
-    await routines!.cancelRun(routineRun.id);
-    if (routineRun.threadId) closeOpenApprovals(routineRun.threadId);
-    await directStop;
-    return;
-  }
-
-  const groupTurn = activeGroupTurnForBot(bot.id);
-  if (groupTurn) {
-    revokeInternalCapabilitiesForThread(groupTurn.threadId);
-    cancelGroupTurnOperations(groupTurn.group.id, groupTurn.threadId);
-    const results = await Promise.allSettled([
-      directStop,
-      runningTurnInstance(bot, groupTurn.threadId)?.adapter.interruptTurn(groupTurn.threadId),
-    ]);
-    closeOpenApprovals(groupTurn.threadId);
-    const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
-    if (failure) throw failure.reason;
-    return;
-  }
-
-  await directStop;
-}
-
-// Load queued handoffs before scheduler recovery can fail an interrupted
-// run. Its failure callback can then durably drop that work immediately;
-// nothing dispatches until the listener is ready below.
-const routineWiring = createRoutineWiring({
-  events: { broadcast, notify },
-  fold: { routineSourceOwner, routineSourceThread },
-  helpers: {
-    unattendedDispatchState, roomSetupPending, groupIsWorking, startGroupTurn,
-    cancelGroupTurnOperations, cancelDirectTurnDispatch, runningTurnInstance,
-    reportIncident,
-    handoffs,
+// The scheduler's host wiring, its crash-recovery reconciliation, and the
+// routine request lifecycle (source resolvers, emergency downgrade stop,
+// request service, card projection/resolution) live in
+// ./routine-lifecycle.ts; index.ts wires it here at the cluster's original
+// site. The factories wired earlier above (group-turn-operations,
+// events-pipeline, desktop-approval) take wrapper thunks over the source
+// resolvers and the downgrade stop this factory returns.
+const {
+  routineSourceOwner, routineSourceThread, stopBotForEmergencyApprovalDowngrade,
+  routineWiring, commsBus, routineRequests, routineTimeZone, agentRoutine,
+  resolveAndSendRoutine,
+} = createRoutineLifecycle({
+  wiring: {
+    events: { broadcast, notify },
+    helpers: {
+      unattendedDispatchState, roomSetupPending, groupIsWorking, startGroupTurn,
+      cancelGroupTurnOperations, cancelDirectTurnDispatch, runningTurnInstance,
+      reportIncident,
+      handoffs,
+    },
+    state: { groupSpeakers, delegationWatch, pendingDelegationWakes, publicBot, startTurn },
   },
-  state: { groupSpeakers, delegationWatch, pendingDelegationWakes, publicBot, startTurn },
-});
-const commsBus: CommsBus = routineWiring.commsBus;
-routines = routineWiring.routines;
-// The scheduler receipt and room transcript live in separate durable stores.
-// If the process exited between those two writes, prefer the correlated
-// RoutineRun's terminal truth; an uncorrelated manual goal is simply failed
-// because no in-memory orchestrator can survive a restart.
-const recoveredRoutineGoalRuns = new Map(
-  routines.listRuns().filter((run) => run.target === "room-goal").map((run) => [run.id, run]),
-);
-const groupGoalRecoveryAt = Date.now();
-store.reconcileInterruptedGroupGoals((runId, threadId) => {
-  const run = recoveredRoutineGoalRuns.get(runId);
-  if (!run || run.threadId !== threadId) return null;
-  const status = run.goalStatus ?? (
-    run.status === "completed"
-      ? "completed"
-      : run.status === "cancelled"
-        ? "stopped"
-        : "failed"
-  );
-  const detail = run.output ?? run.error ?? (
-    status === "completed"
-      ? "The scheduled team goal completed before OpenMausBot restarted."
-      : status === "stopped"
-        ? "The scheduled team goal was stopped."
-        : "OpenMausBot restarted before this scheduled team goal finished."
-  );
-  return { status, detail, finishedAt: run.finishedAt ?? groupGoalRecoveryAt };
-});
-calendarCalls = new CalendarCallManager({
-  botExists: (botId) => Boolean(store.bot(botId)),
-  onDue: deliverCalendarCall,
-});
-const recoveryOwners = routines.routineRequestReceiptOwners();
-if (recoveryOwners.length > 0) {
-  // A normal launch has no crash-gap receipts, so it must not eagerly load
-  // every historical transcript. Inspect only the distinct threads named by
-  // a surviving receipt; reconciliation then removes any whose card vanished.
-  const recoveryThreads = [...new Set(recoveryOwners.map((owner) => owner.threadId))];
-  routines.reconcileRoutineRequestReceipts(
-    recoveryThreads.flatMap((threadId) =>
-      store.messagesFor(threadId).flatMap((message) => {
-        const request = message.card?.routineRequest;
-        return request && !message.card?.answered && !message.card?.dismissed
-          ? [{ requestId: request.requestId, messageId: message.id, botId: request.botId, threadId: request.threadId }]
-          : [];
-      }),
-    ),
-  );
-}
-
-// Chat tools can prepare routine changes, but the harness applies them only
-// after the user confirms a durable card. Keeping this beside the scheduler
-// makes the card resolvable after an app restart without involving the model.
-async function cloudRoutineReadiness(): Promise<{ ready: boolean; reason?: string }> {
-  if (!box.boxConfigured(cfg)) {
-    return {
-      ready: false,
-      reason: "Cloud VM needs a working Box API key in App Settings before this routine can run.",
-    };
-  }
-  const instance = registry.instances().find((candidate) => candidate.driverKind === "boxAgent");
-  if (!instance) {
-    return { ready: false, reason: "The Cloud VM runner is unavailable. Restart OpenMausBot and try again." };
-  }
-  try {
-    const snapshot = await instance.snapshot();
-    return snapshot.state === "available"
-      ? { ready: true }
-      : { ready: false, reason: snapshot.reason || "The Cloud VM runner is not ready." };
-  } catch (error) {
-    return {
-      ready: false,
-      reason: `The Cloud VM runner could not be checked: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
-}
-const routineRequests = new RoutineRequestService({
-  store,
-  routines,
-  autoApply: fullAccessForSource,
-  cloudReady: cloudRoutineReadiness,
-  canPersist: proposalPersistence,
-  // Cross-bot routines: the confirmation card can sit open indefinitely, so
-  // the target is re-authorized when the user confirms, not just at proposal.
-  validateTarget: (proposerBotId, target) => {
-    const proposer = store.bot(proposerBotId);
-    const targetBot = store.bot(target.botId);
-    if (!targetBot) return `@${target.name} no longer exists, so this routine cannot be scheduled for it`;
-    if (!proposer || !canReachPeer(proposer, targetBot)) {
-      return `@${target.name} is no longer in this section, so this routine cannot be scheduled for it`;
-    }
-    return null;
+  helpers: {
+    interruptAllDirectThreads, activeGroupTurnForBot, fullAccessForSource,
+    proposalPersistence, deliverCalendarCall,
+  },
+  host: {
+    routines: () => routines,
+    setRoutines: (next) => { routines = next; },
+    setCalendarCalls: (next) => { calendarCalls = next; },
   },
 });
 async function deleteBotWithLifecycle(botId: string, revalidate: () => void = () => {}, setupRequest?: TeamSetupRequest) {
@@ -2162,230 +2000,21 @@ async function deleteBotWithLifecycle(botId: string, revalidate: () => void = ()
       }
 }
 
-const profileRequests = new ProfileRequestService({
-  store,
-  autoApply: fullAccessForSource,
-  canPersist: proposalPersistence,
-  // A Chief may change a section peer; anyone else only itself. Re-checked at confirm.
-  validateTarget: (proposerBotId, targetBotId) => {
-    const proposer = store.bot(proposerBotId);
-    const target = store.bot(targetBotId);
-    if (!target) return "that bot no longer exists";
-    if (!proposer?.chiefOfStaff) return "only a section's Chief of Staff can change another bot's profile";
-    if (!canReachPeer(proposer, target)) return "that bot is not in a team this Chief is allowed to manage";
-    return null;
+// ── team setup / profile request cards ──────────────────────────────────
+// The ProfileRequestService and TeamSetupRequestService wiring with their
+// card resolution/send helpers (including resolveAndSendProfile, which
+// physically sat just before the WebhookManager wiring) live in
+// ./team-setup-lifecycle.ts; index.ts wires it at profileRequests'
+// original site. deleteBotWithLifecycle stays above and crosses by value.
+const { profileRequests, teamSetupTeams, teamSetupRequests, resolveAndSendTeamSetup, resolveAndSendProfile } = createTeamSetupLifecycle({
+  helpers: {
+    fullAccessForSource, proposalPersistence, assertTeamComputerChangeIdle, connectorThread,
+    activeGroupTurnForBot, checkedModelSelection, wireBot, teamSetupResumeGenerations,
+    dispatchTeamSetupResume, broadcast, deleteBotWithLifecycle,
   },
+  lateBound: { routines: () => routines },
+  limits: { maxWorkspaceBots: MAX_WORKSPACE_BOTS },
 });
-const teamSetupTeams = () => [...new Set(["", ...readSections(), ...store.bots.map((bot) => sectionKey(bot.section)), ...store.groups.map((group) => sectionKey(group.section))])];
-const teamSetupRequests = new TeamSetupRequestService({
-  store, teams: teamSetupTeams, canAccessTeam, canPersist: proposalPersistence, maxBots: MAX_WORKSPACE_BOTS,
-  autoApply: fullAccessForSource,
-  validateChange: (before, fields) => assertTeamComputerChangeIdle(before, { ...before, ...fields }),
-  ownsThread: (botId, threadId) => Boolean(connectorThread(botId, threadId)),
-  targetBusy: (botId, sourceThreadId) => {
-    if (!sourceThreadId) return Boolean(store.bot(botId)?.busy || hasDirectDispatch(botId) || activeGroupTurnForBot(botId) || routines?.activeRunForBot(botId));
-    const group = activeGroupTurnForBot(botId);
-    const run = routines?.activeRunForBot(botId);
-    return store.tasks(botId).some(task => task.threadId !== sourceThreadId && threadBusy(botId, task.threadId)) ||
-      [...directTurnDispatchClaims].some(([threadId, claim]) => threadId !== sourceThreadId && claim.botId === botId) ||
-      Boolean(group && group.threadId !== sourceThreadId) || Boolean(run && run.threadId !== sourceThreadId);
-  },
-  validateModel: (selection, current) => {
-    const checked = checkedModelSelection(selection, undefined, true);
-    if (!checked.ok) return checked.error;
-    if (current?.approvalGrant) return "Wait for the approval-level confirmation before changing this bot's model";
-    if (current) {
-      const mode = approvalModeFor(current);
-      const driver = registry.cliTarget(selection.instanceId)?.driverKind;
-      if (!supportsApprovalMode(driver, mode) || ((mode === "full" || mode === "custom") && driver !== registry.cliTarget(current.modelSelection.instanceId)?.driverKind)) {
-        return `@${current.name}'s existing permissions are incompatible with that provider. Change its permissions in bot settings, then propose the model change again.`;
-      }
-    }
-    return null;
-  },
-  deleteBot: async (botId, revalidate, request) => {
-    const result = await deleteBotWithLifecycle(botId, revalidate, request);
-    if (result.status >= 400) throw new TeamSetupError(result.body.error ?? "The bot could not be deleted", result.status);
-  },
-});
-
-async function resolveAndSendTeamSetup(res: ServerResponse, args: { botId: string; threadId: string; requestId: string; behavior: string }, ownerReview: boolean): Promise<boolean> {
-  const card = store.messagesFor(args.threadId).find((item) => item.card?.requestId === args.requestId && item.card.teamSetupRequest)?.card;
-  if (!card) return false;
-  if (args.behavior === "allow" && !ownerReview) { json(res, 403, { error: "Approve team setup or deletion from the desktop app or a paired owner device. In a local browser, wait until every bot is idle." }); return true; }
-  if (args.behavior === "allow" && !card.answered && !card.dismissed) {
-    // Confirmed Chief setup can move bots without the ordinary PATCH route.
-    // Keep that atomic Store operation behind the same shared-machine fence.
-    for (const operation of card.teamSetupRequest!.operations) {
-      const before = store.bot(operation.botId);
-      if (before && operation.action === "update") assertTeamComputerChangeIdle(before, { ...before, ...operation.fields });
-    }
-  }
-  const resumeGeneration = teamSetupResumeGenerations.get(args.threadId) ?? 0;
-  const resolved = await teamSetupRequests.resolve(args);
-  if (!resolved) return false;
-  if (!resolved.duplicate) {
-    appendDecision(DATA_DIR, { threadId: args.threadId, requestId: args.requestId, botId: args.botId, tool: card.tool,
-      summary: card.subtitle, decision: resolved.result.state === "applied" ? "user-approved" : "user-denied", source: "user" });
-  }
-  const current = store.messagesFor(args.threadId).find((item) => item.id === resolved.messageId);
-  if (current?.card?.teamSetupRequest?.result && !current.card.teamSetupRequest.resumed) {
-    store.patchMessage(args.threadId, current.id, { card: { ...current.card, teamSetupRequest: { ...current.card.teamSetupRequest, resumed: true } } });
-    dispatchTeamSetupResume({ request: resolved.request, messageId: resolved.messageId, generation: resumeGeneration });
-  }
-  json(res, 200, { ok: true, outcome: resolved.result.state === "applied" ? "allowed-once" : "rejected", result: resolved.result, alreadySettled: resolved.duplicate });
-  return true;
-}
-const ROUTINE_WEEKDAY_NAMES = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"] as const;
-const routineTimeZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-const routineTimestamp = (value: number | undefined) =>
-  value !== undefined && Number.isFinite(value) ? new Date(value).toISOString() : null;
-const agentRoutine = (
-  routine: ReturnType<RoutineManager["listRoutines"]>[number],
-  latestRun?: RoutineRun,
-) => {
-  // Routines created in the calendar predate chat-card redaction and may
-  // contain a credential in their instructions. The list result is handed
-  // back to the model, so scrub the complete value before taking its preview.
-  const safeInstructions = redactSecretsInText(routine.prompt);
-  const safeName = redactSecretsInText(routine.name);
-  return {
-    id: routine.id,
-    name: safeName,
-    instructions: safeInstructions.slice(0, 2_000),
-    instructionsTruncated: safeInstructions.length > 2_000,
-    continuity: routine.continuity === true,
-    enabled: routine.enabled,
-    runOn: routine.runOn,
-    durationMinutes: routine.durationMinutes,
-    ...(routine.timeoutMinutes === undefined ? {} : { timeoutMinutes: routine.timeoutMinutes }),
-    schedule: routine.schedule.type === "once"
-      ? { type: "once" as const, at: new Date(routine.schedule.at).toISOString() }
-      : routine.schedule.type === "interval"
-        ? {
-            type: "interval" as const,
-            everyMinutes: routine.schedule.everyMinutes,
-            anchorAt: new Date(routine.schedule.anchorAt).toISOString(),
-            ...(routine.schedule.weekdays === undefined
-              ? {}
-              : { weekdays: routine.schedule.weekdays.map((day) => ROUTINE_WEEKDAY_NAMES[day]) }),
-            ...(routine.schedule.window === undefined ? {} : { window: { ...routine.schedule.window } }),
-            ...(routine.schedule.endsAt === undefined
-              ? {}
-              : { endsAt: new Date(routine.schedule.endsAt).toISOString() }),
-          }
-        : routine.schedule.type === "cron"
-          ? { ...routine.schedule }
-          : {
-              type: "weekly" as const,
-              time: routine.schedule.time,
-              weekdays: routine.schedule.weekdays.map((day) => ROUTINE_WEEKDAY_NAMES[day]),
-            },
-    nextRunAt: routine.nextRunAt === null ? null : new Date(routine.nextRunAt).toISOString(),
-    latestRun: latestRun
-      ? {
-          id: latestRun.id,
-          status: latestRun.status,
-          triggerSource: latestRun.triggerSource ?? (latestRun.manual ? "manual" : "schedule"),
-          scheduledFor: routineTimestamp(latestRun.scheduledFor),
-          startedAt: routineTimestamp(latestRun.startedAt),
-          finishedAt: routineTimestamp(latestRun.finishedAt),
-          attention: latestRun.attention ? redactSecretsInText(latestRun.attention).slice(0, 500) : null,
-          output: latestRun.output ? redactSecretsInText(latestRun.output).slice(0, 1_000) : null,
-          error: latestRun.error ? redactSecretsInText(latestRun.error).slice(0, 500) : null,
-          executionThreadId: latestRun.threadId ?? null,
-        }
-      : null,
-  };
-};
-function sendRoutineResolution(
-  res: ServerResponse,
-  result: ReturnType<RoutineRequestService["resolve"]>,
-): boolean {
-  if (!result.claimed) return false;
-  if (result.state === "invalid") {
-    json(res, result.status, { error: result.error });
-    return true;
-  }
-  if (result.state === "already_settled") {
-    json(res, 200, {
-      ok: true,
-      outcome: result.behavior === "allow" ? "allowed-once" : result.behavior === "deny" ? "rejected" : "unavailable",
-      alreadySettled: true,
-    });
-    return true;
-  }
-  if (result.state === "denied") {
-    json(res, 200, { ok: true, outcome: "rejected" });
-    return true;
-  }
-  json(res, 200, {
-    ok: true,
-    outcome: "allowed-once",
-    routineAction: result.action,
-    resultId: result.resultId,
-  });
-  return true;
-}
-function resolveAndSendRoutine(
-  res: ServerResponse,
-  args: { botId: string; botName?: string; threadId: string; requestId: string; behavior: string },
-): boolean {
-  const card = store.messagesFor(args.threadId).find(
-    (message) => message.card?.requestId === args.requestId && message.card.routineRequest,
-  )?.card;
-  const result = routineRequests.resolve(args);
-  if (
-    result.claimed &&
-    (result.state === "applied" || result.state === "denied")
-  ) {
-    appendDecision(DATA_DIR, {
-      threadId: args.threadId,
-      requestId: args.requestId,
-      botId: args.botId,
-      botName: args.botName,
-      tool: card?.tool,
-      summary: card?.subtitle,
-      decision: result.state === "applied" ? "user-approved" : "user-denied",
-      source: "user",
-    });
-  }
-  return sendRoutineResolution(res, result);
-}
-function resolveAndSendProfile(
-  res: ServerResponse,
-  args: { botId: string; botName?: string; threadId: string; requestId: string; behavior: string },
-): boolean {
-  const card = store.messagesFor(args.threadId).find(
-    (message) => message.card?.requestId === args.requestId && message.card.profileRequest,
-  )?.card;
-  if (!card) return false;
-  const result = profileRequests.resolve(args);
-  if (!result.claimed) return false;
-  if (result.state === "applied" || result.state === "denied") {
-    appendDecision(DATA_DIR, {
-      threadId: args.threadId, requestId: args.requestId, botId: args.botId, botName: args.botName,
-      tool: "update_profile", summary: card.subtitle,
-      decision: result.state === "applied" ? "user-approved" : "user-denied", source: "user",
-    });
-  }
-  if (result.state === "applied") {
-    const target = store.bot(result.targetBotId);
-    if (target) broadcast({ kind: "bot", bot: wireBot(target) });
-    json(res, 200, {
-      ok: true, outcome: "allowed-once", profileFields: result.fields,
-      ...(result.settlementPending ? { settlementPending: true, message: result.message } : {}),
-    });
-    return true;
-  }
-  if (result.state === "invalid") { json(res, result.status, { error: result.error }); return true; }
-  if (result.state === "already_settled") {
-    json(res, 200, { ok: true, outcome: result.behavior === "allow" ? "allowed-once" : "rejected", alreadySettled: true });
-    return true;
-  }
-  json(res, 200, { ok: true, outcome: "rejected" });
-  return true;
-}
 
 // Webhook definitions are independent from calendar schedules, but every
 // delivery joins the same RoutineManager queue. That keeps unattended work
@@ -3658,7 +3287,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
 
 const server = createServer(handleRequest);
 
-calendarCalls.start();
+calendarCalls!.start();
 
 // Resolve the edition before accepting requests so /api/edition is never a guess.
 console.log(describeEdition(await loadEnterpriseLayer()));
