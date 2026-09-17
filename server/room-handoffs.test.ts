@@ -425,6 +425,26 @@ describe("room handoff lifetime budget", () => {
         .toThrow(/budget exhausted: only 3m of the 30m tree lifetime remains/);
     }, () => nowMs);
   });
+  it("closes the executing pause when cancelTree stops the tree, so a follow-up sees the aged budget", async () => {
+    let nowMs = 0;
+    await fixture(async (engine, hooks) => {
+      hooks.run = node => node.key === "build"
+        ? new Promise<{ ok: boolean; text: string }>(() => {})
+        : Promise.resolve({ ok: true, text: "done" });
+      engine.enqueue(addr("A"), "turn", undefined, addr("B"), "build", "build");
+      engine.sourceSettled("turn", true);
+      nowMs = 10 * 60_000; engine.tick(); await flush();
+      // Execution ran 10m→15m; cancelRoom stops the whole tree through
+      // cancelTree while build still executes, with no tick in between. The
+      // pause must close there: by 28m the settled tree has aged its full
+      // wall clock, while the still-open span the old code left would lend
+      // the follow-up 18m of pause it no longer has.
+      nowMs = 15 * 60_000; engine.cancelRoom("A");
+      nowMs = 28 * 60_000;
+      expect(() => engine.enqueue(addr("A"), "turn", undefined, addr("C"), "followup", "more work"))
+        .toThrow(/budget exhausted: only 2m of the 30m tree lifetime remains/);
+    }, () => nowMs);
+  });
   it("refuses follow-up work when the remaining lifetime cannot serve a minimum runway", () => {
     let nowMs = 0;
     return fixture(engine => {
