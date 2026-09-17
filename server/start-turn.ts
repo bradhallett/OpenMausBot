@@ -4,7 +4,7 @@
 // declaration site; every call site there is unchanged.
 //
 // The turn body is decomposed into the named phase functions in
-// ./start-turn/phases.ts; this file keeps the deps wiring and the exact
+// ./start-turn/phases/; this file keeps the deps wiring and the exact
 // sequence in which the phases run. Everything before the dispatch task
 // is synchronous, exactly as it was inline: the busy flip and claim
 // registration still happen before startTurn returns.
@@ -29,19 +29,12 @@ import type { ScreenCapture } from "./screen-frame-source.ts";
 import type { BrowserRuntime } from "./browser-runtime.ts";
 import type { PendingTurnCancellations, ProviderTurnGenerationRegistry } from "./turn-dispatch-guard.ts";
 import type { SurfacePlan } from "./surface.ts";
-import {
-  admitDirectTurn,
-  assembleTurnContext,
-  assembleTurnIntegrations,
-  bindUserMessage,
-  buildCoordinationPrompts,
-  buildTurnSystemPrompt,
-  claimDirectTurn,
-  dispatchProviderTurn,
-  prepareTurnDispatch,
-  resolveTurnProvider,
-  settleDispatchFailure,
-} from "./start-turn/phases.ts";
+import { admitDirectTurn, claimDirectTurn } from "./start-turn/phases/admission.ts";
+import { assembleTurnContext, bindUserMessage } from "./start-turn/phases/context.ts";
+import { assembleTurnIntegrations } from "./start-turn/phases/integrations.ts";
+import { buildCoordinationPrompts, buildTurnSystemPrompt } from "./start-turn/phases/prompts.ts";
+import { resolveTurnProvider } from "./start-turn/phases/provider.ts";
+import { dispatchProviderTurn, prepareTurnDispatch, settleDispatchFailure } from "./start-turn/phases/dispatch.ts";
 
 /** The settled-turn receipt the direct-followup machinery hands back. */
 type DirectTurnOutcome = { ok: boolean; text: string };
