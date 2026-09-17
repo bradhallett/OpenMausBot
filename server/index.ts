@@ -345,7 +345,7 @@ import {
 } from "./enterprise.ts";
 import { environmentDescriptor, serverVersion } from "./environment.ts";
 import { createWorkspaceBackupRoutes, isWorkspaceBackupSessionControl } from "./workspace-backup-http.ts";
-import { json, readBody, stderrOf } from "./http.ts";
+import { json, readBody, readJsonValue, stderrOf } from "./http.ts";
 import { createEventsRoutes } from "./routes/events.ts";
 import { createRoutinesRoutes } from "./routes/routines.ts";
 import { createInternalRoutes, type AskBotOutcome, type InternalCapability } from "./routes/internal.ts";
@@ -6112,7 +6112,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         return json(res, 400, { error: "ref must identify a rendered image" });
       }
       const href = method === "POST"
-        ? (typeof body.path === "string" ? body.path : "")
+        ? (typeof body?.path === "string" ? body.path : "")
         : messageImageTargetAt(message.text, Number(rawReference));
       if (!href) return json(res, 400, { error: "path is required" });
 
@@ -6541,7 +6541,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           projectCwd = validated.cwd;
         }
       }
-      const body = await readBody(req, MAX_TEAM_BACKUP_BYTES);
+      const body = await readJsonValue(req, MAX_TEAM_BACKUP_BYTES);
       if (body?.format === "openmaus.backup") {
         if (importMode !== "add") return json(res, 400, { error: "Import backups alongside your existing bots; project mode is only for templates" });
         try {

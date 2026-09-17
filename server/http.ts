@@ -13,6 +13,18 @@ export function json(res: ServerResponse, status: number, body: unknown, headers
 }
 
 export function readBody(req: IncomingMessage, limit = 1_000_000): Promise<any> {
+  return readJsonBody(req, limit, true);
+}
+
+// The team import's body is a JSON-encoded document — a Markdown package
+// string as often as a request object — so it reads the parsed value without
+// the shared object-shape check; the size limit and invalid-JSON rejection
+// still apply, and the route's own parsers reject anything unreadable.
+export function readJsonValue(req: IncomingMessage, limit = 1_000_000): Promise<any> {
+  return readJsonBody(req, limit, false);
+}
+
+function readJsonBody(req: IncomingMessage, limit: number, objectOnly: boolean): Promise<any> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let bytes = 0;
@@ -43,6 +55,14 @@ export function readBody(req: IncomingMessage, limit = 1_000_000): Promise<any> 
         body = data ? JSON.parse(data) : {};
       } catch {
         return fail(400, "invalid JSON body");
+      }
+      // Routes own their null tolerance: the interrupt/steer endpoints accept
+      // a JSON null body as "no options" (legacy clients send it), while
+      // mutation routes reject null with their own "body must be a JSON
+      // object" checks. Only arrays and scalars are rejected here, so a null
+      // body reaches the route's own contract instead of a blanket 400.
+      if (objectOnly && body !== null && (typeof body !== "object" || Array.isArray(body))) {
+        return fail(400, "body must be a JSON object");
       }
       done = true;
       resolve(body);
