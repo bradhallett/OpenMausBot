@@ -4,7 +4,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { startCua, stopCua, registerCuaIpc, setCuaStateListener } from "./cua.mjs";
 import { createAndroidDeviceController } from "./android-device.mjs";
 import { finishSpeech, startSpeech, stopSpeech } from "./speech.mjs";
@@ -24,7 +24,6 @@ import { createServerSupervisor } from "./server-supervisor.mjs";
 import { packageUrlFromCommandLine, packageUrlFromDeepLink } from "./package-link.mjs";
 import { windowChromeOptions } from "./window-chrome.mjs";
 import { collisionFreeDownloadPath, defaultSaveName, withSavableFile } from "./save-file.mjs";
-import { desktopViewerPermissionAllowed } from "./desktop-viewer-permissions.mjs";
 import { appPermissionAllowed, externalWebUrl } from "./app-permissions.mjs";
 import {
   ensureManagedComposioCredentials,
@@ -32,20 +31,9 @@ import {
   managedComposioChildEnvironment,
 } from "./managed-composio.mjs";
 import {
-  createManagedCompanionTunnel,
-  managedCompanionTunnelAccess,
-  resolveCloudflaredBinary,
-  resolveManagedCompanionGuardian,
-  withManagedCompanionTunnelAccess,
-  withoutManagedCompanionTunnelAccess,
-} from "./managed-companion-tunnel.mjs";
-import {
   createPhoneSecretSaveCoordinator,
-  createPhoneSecretIdentity,
   decodePhoneSecretSaveRequest,
   phoneSecretPrivateKeyMessage,
-  readPhoneSecretIdentity,
-  withPhoneSecretIdentity,
 } from "./phone-secret-identity.mjs";
 import {
   desktopCompanionAccess,
@@ -56,12 +44,6 @@ import {
   withoutDesktopCompanionAccess,
 } from "./desktop-companion-client.mjs";
 import { isKnownSkin, skinChrome } from "./skin-overlay.cjs";
-import { createControlPlaneClient } from "./control-plane-client.mjs";
-import {
-  companionAccountCleanupPending,
-  createCompanionAccountService,
-  resolveCompanionControlPlaneURL,
-} from "./companion-account-service.mjs";
 import capabilitiesModule from "./capabilities.cjs";
 import environmentsModule from "./environments.cjs";
 import localOriginModule from "./local-origin.cjs";
@@ -86,10 +68,44 @@ import {
   credentialStoreUnavailable,
   desktopDataDir,
   initializeSecureCredentialStore,
-  secureCredentialState,
   secureCredentials,
   updateSecureCredentialDocument,
 } from "./main/secure-config.mjs";
+import {
+  SERVER_PORT,
+  serverProc,
+  serverReady,
+  utilityServerExits,
+  stopUtilityServer,
+  setServerPort,
+  setServerReady,
+  adoptUtilityServer,
+  markServerUnavailable,
+} from "./main/server-runtime.mjs";
+import {
+  APP_ICON,
+  desktopViewerContextId,
+  desktopViewerWindow,
+  openDesktopViewer,
+} from "./main/desktop-viewer.mjs";
+import { buildErrorPage } from "./main/boot-error-page.mjs";
+import {
+  decorateDesktopCompanionState,
+  desktopCompanionState,
+  ensureCompanionAccountService,
+  ensurePhoneSecretIdentity,
+  installationDisplayName,
+  phoneSecretIdentity,
+  refreshDesktopCompanionTailscale,
+  startDesktopCompanion,
+  stopDesktopCompanion,
+  syncCompanionKeepAwake,
+} from "./main/companion-connection.mjs";
+
+export {
+  clearManagedCompanionEndpointCredentials,
+  reconcileManagedCompanionEndpointProvision,
+} from "./main/companion-connection.mjs";
 
 const { desktopCapabilities, nativeDesktopActions } = capabilitiesModule;
 const nativeActions = nativeDesktopActions(process.platform);
@@ -98,7 +114,6 @@ const { createDisplayMediaGuard, invokeDisplayMediaCallback, selectCaptureSource
   "./screen-preview.cjs",
 );
 const { STAGE_PREFIX: APPIMAGE_CUA_STAGE_PREFIX } = require("./cua-linux-bundle.cjs");
-const { desktopViewerUrl, sameDesktopViewerOrigin } = require("./desktop-viewer.cjs");
 const { createDesktopWorkspaceManager } = require("./desktop-workspace.cjs");
 const { createTrustedApprovalModeCoordinator } = require("./approval-trusted-mode.cjs");
 const { DESKTOP_MUTATION_HEADER, desktopServerHeaders } = require("./desktop-server-auth.cjs");
@@ -108,11 +123,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 127.0.0.1 explicitly — vite binds IPv4; a bare "localhost" here can
 // resolve to ::1 and paint a black window
 const DEV_URL = process.env.ELECTRON_START_URL ?? "http://127.0.0.1:5199";
-let SERVER_PORT = 8799;
-const APP_ICON = path.join(__dirname, "resources/app-icon.png");
-let desktopViewerWindow = null;
-let desktopViewerOwner = null;
-let desktopViewerContextId = null;
 let desktopWorkspaceManager = null;
 let desktopWorkspaceOwner = null;
 let pendingPackageInstallUrl = packageUrlFromCommandLine(process.argv);
@@ -204,14 +214,6 @@ app.on("second-instance", (_event, commandLine) => {
   deliverPackageInstall(target);
 });
 
-// Packaged: the harness server ships in Resources (compiled JS, zero deps)
-// and runs on Electron's own Node via utilityProcess. It serves the built
-// UI too, so the window talks to one origin and there is no dev proxy.
-// A stray server on the default port must not brick the app — fall back to
-// alternate ports until one binds AND identifies as ours (the probe checks
-// our API shape, not just a 200).
-let serverProc = null;
-let serverReady = !app.isPackaged;
 let desktopDataDirLease = null;
 let managedDesktop = null;
 let companyBackupController = null;
@@ -222,8 +224,6 @@ let companyBackupClientStateRequest = null;
 let companyRestoreCommitting = false;
 let companyBackupConfigurationRevision = 0;
 const managedDesktopRelay = createManagedDesktopRelay();
-const utilityServerExits = new WeakMap();
-const UTILITY_SERVER_STOP_TIMEOUT_MS = 6_500;
 const trustedApprovalMode = createTrustedApprovalModeCoordinator({ randomId: randomUUID });
 const desktopMutationToken = randomBytes(32).toString("base64url");
 const companionMutationToken = randomBytes(32).toString("base64url");
@@ -231,8 +231,7 @@ const serverSupervisor = createServerSupervisor({
   restart: () => startServerOn(SERVER_PORT),
   stop: stopUtilityServer,
   onReady(proc) {
-    serverProc = proc;
-    serverReady = true;
+    adoptUtilityServer(proc);
     serverStartConflictOnly = false;
     slog(`server ready pid=${proc.pid} port=${SERVER_PORT}`);
     // Re-read the latest account credentials; registration may have completed
@@ -252,8 +251,7 @@ const serverSupervisor = createServerSupervisor({
     }
   },
   onUnavailable() {
-    serverReady = false;
-    serverProc = null;
+    markServerUnavailable();
     companyBackupSchedule?.reconcile();
     // nothing to hold for while the scheduler is down; polling resumes on ready
     routineWake.stop();
@@ -269,46 +267,16 @@ const serverSupervisor = createServerSupervisor({
   log: slog,
 });
 
-async function stopUtilityServer(proc, timeoutMs = UTILITY_SERVER_STOP_TIMEOUT_MS) {
-  if (!proc) return true;
-  const exited = utilityServerExits.get(proc);
-  if (!exited) return false;
-  try {
-    proc.kill();
-  } catch {
-    // The tracked exit promise below is still the authority. A throw can mean
-    // the process crossed the exit boundary immediately before kill().
-  }
-  let timer;
-  return Promise.race([
-    exited.then(() => true),
-    new Promise((resolve) => {
-      timer = setTimeout(() => resolve(false), timeoutMs);
-      timer.unref?.();
-    }),
-  ]).finally(() => clearTimeout(timer));
-}
-let phoneSecretIdentity = null;
 let desktopRemoteAccess = null;
 let desktopCompanionRelay = null;
 
 let desktopShutdownStarted = false;
 import {
-  companionAdvertisedHostedUrl,
   companionEnabledAtRest,
-  companionOriginTarget,
   companionPairing,
-  companionRefreshTailscale,
   companionCloudDesktopAccess,
   companionRevoke,
-  companionRunning,
-  companionState,
-  rememberCompanionEnabled,
   rememberCompanionKeepAwake,
-  setCompanionHostedUrl,
-  setCompanionLifecycleListener,
-  startCompanion,
-  stopCompanion,
 } from "./companion.mjs";
 import { createRoutineWakeHold, rememberRoutineWake, routineWakeSettings } from "./routine-wake.mjs";
 
@@ -320,18 +288,6 @@ import { createRoutineWakeHold, rememberRoutineWake, routineWakeSettings } from 
  * const declared later would be in its temporal dead zone at module load.
  */
 const { isLocalSender: senderIsLocal, localOnly, localOnlySync, setLocalOrigin } = localOriginModule;
-
-let companionPowerBlocker = null;
-
-function syncCompanionKeepAwake(companionEnabled, keepAwake) {
-  const shouldBlock = companionEnabled && keepAwake;
-  if (shouldBlock && companionPowerBlocker === null) {
-    companionPowerBlocker = powerSaveBlocker.start("prevent-app-suspension");
-  } else if (!shouldBlock && companionPowerBlocker !== null) {
-    if (powerSaveBlocker.isStarted(companionPowerBlocker)) powerSaveBlocker.stop(companionPowerBlocker);
-    companionPowerBlocker = null;
-  }
-}
 
 // Keep this computer awake for scheduled routines (electron/routine-wake.mjs):
 // the scheduler lives in the local server, which cannot run while the Mac
@@ -364,279 +320,6 @@ installDesktopCrashListeners({
   isShuttingDown: () => desktopShutdownStarted,
   mainWebContents: () => mainWindow?.webContents ?? null,
 });
-
-// ── managed companion connection ───────────────────────────────────────
-// Account onboarding provisions one remote Cloudflare Tunnel per desktop,
-// then calls reconcileManagedCompanionEndpointProvision below. Only the
-// endpoint is public state. The connector token stays in credentials.bin and
-// is passed to cloudflared through a private token file by the lifecycle
-// module — never through IPC, argv, the environment, or logs.
-let managedCompanionConnector = null;
-let companionAccountService = null;
-let companionDesiredThisLaunch = false;
-let companionLaunchGeneration = 0;
-let advertisementTransition = Promise.resolve();
-
-async function ensurePhoneSecretIdentity() {
-  const existing = readPhoneSecretIdentity(secureCredentialState?.read() ?? secureCredentials);
-  if (existing) {
-    phoneSecretIdentity = existing;
-    return existing;
-  }
-  try {
-    const created = await createPhoneSecretIdentity();
-    await updateSecureCredentialDocument((credentials) =>
-      withPhoneSecretIdentity(credentials, created),
-    );
-    phoneSecretIdentity = created;
-    return created;
-  } catch (error) {
-    // Companion chat remains available. Pairing simply omits the public key,
-    // and mobile cards explain that secure entry needs the desktop until the
-    // OS credential store is available on a later launch.
-    phoneSecretIdentity = null;
-    slog(`phone credential key unavailable: ${error?.message ?? error}`);
-    return null;
-  }
-}
-
-function publicManagedCompanionState() {
-  const access = managedCompanionTunnelAccess(secureCredentials);
-  const status = managedCompanionConnector?.getStatus();
-  if (status) {
-    const publicState = {
-      status: status.status,
-      configured: status.configured,
-      ready: status.ready,
-    };
-    if (status.endpoint) publicState.url = status.endpoint;
-    if (status.retryInMs) publicState.retryInMs = status.retryInMs;
-    if (status.error) publicState.error = status.error;
-    return publicState;
-  }
-  return access
-    ? { status: "stopped", configured: true, ready: false, url: access.endpoint }
-    : { status: "unconfigured", configured: false, ready: false };
-}
-
-function decorateDesktopCompanionState(state) {
-  // The panel polls this state, so a sidecar that exited on its own releases
-  // the blocker within one poll instead of keeping the computer awake forever.
-  syncCompanionKeepAwake(state.enabled && !state.error, state.keepAwake === true);
-  return { ...state, managedConnection: publicManagedCompanionState() };
-}
-
-async function desktopCompanionState() {
-  return decorateDesktopCompanionState(await companionState());
-}
-
-function companionLaunchOptions(hostedUrl = null) {
-  return {
-    resourcesPath: process.resourcesPath,
-    harnessPort: SERVER_PORT,
-    mutationToken: companionMutationToken,
-    hostedUrl,
-    // Only an embedded server receives the private half over its utility
-    // port. A dev server launched in another terminal cannot decrypt, so it
-    // must not advertise a public key and strand the phone on a dead path.
-    secretPublicKey: app.isPackaged && serverProc ? phoneSecretIdentity?.publicKey ?? null : null,
-    log: slog,
-  };
-}
-
-function ensureManagedCompanionConnector() {
-  if (managedCompanionConnector) return managedCompanionConnector;
-  managedCompanionConnector = createManagedCompanionTunnel({
-    binaryPath: resolveCloudflaredBinary({
-      isPackaged: app.isPackaged,
-      resourcesPath: process.resourcesPath,
-      appPath: app.getAppPath(),
-    }),
-    guardianEntry: resolveManagedCompanionGuardian({ appPath: app.getAppPath() }),
-    runtimeExecutable: process.execPath,
-    runtimeRoot: path.join(app.getPath("userData"), "managed-companion-tunnel"),
-    onChange: (status) => {
-      slog(`managed companion connection ${status.status}`);
-      if (!companionDesiredThisLaunch) return;
-      void reconcileCompanionAdvertisement(status.ready ? status.endpoint : null);
-    },
-    log: slog,
-  });
-  return managedCompanionConnector;
-}
-
-/** Publish a hosted address only after its connector has passed public health
- * verification. Updating the owned sidecar in place preserves the exact
- * private origin generation and cannot invalidate an open pairing window. */
-function reconcileCompanionAdvertisement(
-  endpoint,
-  ownedGeneration = companionLaunchGeneration,
-) {
-  const normalizedEndpoint = endpoint || null;
-  const work = advertisementTransition.then(async () => {
-    if (
-      ownedGeneration !== companionLaunchGeneration ||
-      !companionDesiredThisLaunch ||
-      !companionRunning() ||
-      companionAdvertisedHostedUrl() === normalizedEndpoint
-    ) {
-      return desktopCompanionState();
-    }
-    const updated = await setCompanionHostedUrl(normalizedEndpoint);
-    return { ...updated, managedConnection: publicManagedCompanionState() };
-  });
-  advertisementTransition = work.then(
-    () => {},
-    () => {},
-  );
-  return work;
-}
-
-async function startManagedCompanionConnection({ waitForVerification = true } = {}) {
-  if (companionAccountCleanupPending(secureCredentials)) {
-    return publicManagedCompanionState();
-  }
-  const access = managedCompanionTunnelAccess(secureCredentials);
-  if (!access) return publicManagedCompanionState();
-  const target = companionOriginTarget();
-  if (!target) return publicManagedCompanionState();
-  const operation = ensureManagedCompanionConnector().start({ ...access, originTarget: target });
-  if (!waitForVerification) {
-    void operation.catch(() => {});
-    return publicManagedCompanionState();
-  }
-  const status = await operation;
-  await reconcileCompanionAdvertisement(status.ready ? status.endpoint : null);
-  return publicManagedCompanionState();
-}
-
-async function startDesktopCompanion({ waitForHosted = true, remember = true } = {}) {
-  companionDesiredThisLaunch = true;
-  companionLaunchGeneration += 1;
-  // Direct LAN comes up first. The hosted endpoint is added in place only
-  // after the guardian has verified the public route to this exact sidecar.
-  const localState = await startCompanion(companionLaunchOptions());
-  if (!localState.enabled || localState.error) {
-    companionDesiredThisLaunch = false;
-    return desktopCompanionState();
-  }
-  if (remember) rememberCompanionEnabled(true);
-  await startManagedCompanionConnection({ waitForVerification: waitForHosted });
-  return desktopCompanionState();
-}
-
-async function stopDesktopCompanion({ remember = true } = {}) {
-  companionDesiredThisLaunch = false;
-  companionLaunchGeneration += 1;
-  if (remember) rememberCompanionEnabled(false);
-  syncCompanionKeepAwake(false, false);
-  await managedCompanionConnector?.stop();
-  await stopCompanion();
-  return desktopCompanionState();
-}
-
-async function refreshDesktopCompanionTailscale() {
-  if (!companionRunning()) {
-    const started = await startDesktopCompanion({ waitForHosted: false });
-    if (!started.enabled || started.error) return started;
-  }
-  return decorateDesktopCompanionState(await companionRefreshTailscale());
-}
-
-setCompanionLifecycleListener(({ expected, pid }) => {
-  if (expected) return;
-  slog(`owned companion exited unexpectedly pid=${pid ?? "unknown"}`);
-  companionDesiredThisLaunch = false;
-  companionLaunchGeneration += 1;
-  syncCompanionKeepAwake(false, false);
-  // stop() invalidates the guardian's owner pipe synchronously, before the
-  // sidecar module removes this generation's private socket.
-  void managedCompanionConnector?.stop().catch(() => {});
-});
-
-/** Narrow main-process hook for the account onboarding flow. Its return value
- * is explicitly secret-free and can be used to refresh the settings panel. */
-export async function reconcileManagedCompanionEndpointProvision(provision) {
-  await updateSecureCredentialDocument((credentials) =>
-    withManagedCompanionTunnelAccess(credentials, provision),
-  );
-  if (companionDesiredThisLaunch) {
-    await startManagedCompanionConnection({ waitForVerification: true });
-  }
-  return publicManagedCompanionState();
-}
-
-/** Called only after the control plane has revoked/deleted the endpoint. */
-export async function clearManagedCompanionEndpointCredentials() {
-  await updateSecureCredentialDocument((credentials) =>
-    withoutManagedCompanionTunnelAccess(credentials),
-  );
-  await managedCompanionConnector?.stop();
-  if (companionDesiredThisLaunch) await reconcileCompanionAdvertisement(null);
-  return publicManagedCompanionState();
-}
-
-/** Account sign-out must stop advertising the hosted route before it asks
- * the control plane to revoke anything, but it must not erase the retry
- * credentials until that remote cleanup is durably scheduled. */
-async function stopManagedCompanionEndpointLocally() {
-  await managedCompanionConnector?.stop();
-  if (companionDesiredThisLaunch) await reconcileCompanionAdvertisement(null);
-  return publicManagedCompanionState();
-}
-
-async function activatePersistedManagedCompanionEndpoint() {
-  if (companionDesiredThisLaunch) {
-    return startManagedCompanionConnection({ waitForVerification: true });
-  }
-  return publicManagedCompanionState();
-}
-
-function installationDisplayName() {
-  const hostname = [...os.hostname()]
-    .filter((character) => character.codePointAt(0) >= 32 && character.codePointAt(0) !== 127)
-    .join("")
-    .trim();
-  return hostname.slice(0, 80) || "This computer";
-}
-
-function ensureCompanionAccountService() {
-  if (companionAccountService) return companionAccountService;
-  const baseURL = resolveCompanionControlPlaneURL({
-    isPackaged: app.isPackaged,
-    environment: process.env,
-  });
-  let client = null;
-  if (baseURL) {
-    try {
-      client = createControlPlaneClient({ baseURL });
-    } catch {
-      // An invalid explicit override disables hosted access. Direct LAN,
-      // Bonjour, and Tailscale pairing remain completely independent.
-    }
-  }
-  companionAccountService = createCompanionAccountService({
-    client,
-    readCredentials: () => secureCredentialState?.read() ?? secureCredentials,
-    updateCredentials: updateSecureCredentialDocument,
-    identity: {
-      name: installationDisplayName(),
-      platform:
-        process.platform === "win32"
-          ? "windows"
-          : process.platform === "darwin"
-            ? "darwin"
-            : "linux",
-      appVersion: app.getVersion().slice(0, 64),
-    },
-    newClientInstanceId: randomUUID,
-    activatePersistedEndpoint: activatePersistedManagedCompanionEndpoint,
-    stopManagedEndpoint: stopManagedCompanionEndpointLocally,
-    managedConnectionState: publicManagedCompanionState,
-    companionIsOn: () => companionDesiredThisLaunch,
-  });
-  return companionAccountService;
-}
 
 // Everything the bug-report bundle needs. The config summary comes from the
 // server's own booleans-only /api/config status (credentials are never
@@ -1046,7 +729,7 @@ async function startServerPackaged() {
       if (desktopShutdownStarted) return false;
       const started = await startServerOn(port);
       if (started.proc) {
-        SERVER_PORT = port;
+        setServerPort(port);
         if (serverSupervisor.ready(started.proc)) return true;
       }
       if (started.abort) return false;
@@ -1070,29 +753,6 @@ function syncManagedComposioCredentials() {
   } catch (error) {
     slog(`connected-apps credential sync failed: ${error?.message ?? error}`);
   }
-}
-
-// The page is built at failure time (not import time): the message depends on
-// how the boot failed, and the log path comes from LOG_DIR so Windows and
-// Linux users see their real location instead of a macOS guess. The link
-// opens the log through the window's setWindowOpenHandler, which routes to
-// the platform handler.
-function escapeHtml(value) {
-  return value.replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
-}
-
-function buildErrorPage({ allPortsOccupied }) {
-  const serverLogPath = path.join(LOG_DIR, "server.log");
-  const serverLogHref = pathToFileURL(serverLogPath).href;
-  const reason = allPortsOccupied
-    ? "Every OpenMausBot port answered health checks from another process — likely a second copy of the app, or another program on ports 8799–28799. Quit that program, then quit and reopen OpenMausBot."
-    : "The background server didn't come up in time — this is usually slow startup, not a port conflict. Quit and reopen OpenMausBot.";
-  return (
-    "data:text/html;charset=utf-8," +
-    encodeURIComponent(
-      `<body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh;background:#070707;color:#fcfcfc;font:15px -apple-system,system-ui"><div style="text-align:center;max-width:360px"><div style="font-size:40px">🐭</div><h2 style="font-weight:600;margin:12px 0 6px">Couldn't start the bot server</h2><p style="color:#fcfcfc99;line-height:1.5">${escapeHtml(reason)} If it keeps happening, check <a target="_blank" rel="noopener" href="${serverLogHref}" style="color:#fcfcfc">${escapeHtml(serverLogPath)}</a>.</p></div></body>`,
-    )
-  );
 }
 
 // How long one packaged-server child gets to answer /api/health before the
@@ -1119,151 +779,6 @@ function respondToDisplayMediaRequest(callback, response) {
   if (error && response.video) {
     console.error("[screen-preview] failed to deliver selected source:", error);
   }
-}
-
-function notifyDesktopViewer(open) {
-  if (!desktopViewerOwner?.isDestroyed()) {
-    desktopViewerOwner.send("desktop-viewer:state", {
-      open,
-      contextId: desktopViewerContextId,
-    });
-  }
-}
-
-function desktopViewerErrorPage(message, retryUrl) {
-  const escape = (value) =>
-    String(value)
-      .replaceAll("&", "&amp;")
-      .replaceAll('"', "&quot;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;");
-  return (
-    "data:text/html;charset=utf-8," +
-    encodeURIComponent(`<!doctype html><meta name="color-scheme" content="dark"><title>Desktop unavailable</title>
-      <body style="margin:0;display:grid;place-items:center;height:100vh;background:#070707;color:#f5f5f5;font:14px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif">
-        <main style="max-width:420px;padding:32px;text-align:center"><h2 style="margin:0 0 10px;font-size:18px">Couldn't open the live desktop</h2>
-        <p style="margin:0 0 20px;color:#a1a1aa;line-height:1.5">${escape(message)}</p>
-        <a href="${escape(retryUrl)}" target="_blank" rel="noreferrer" style="display:inline-block;border-radius:9px;background:#fff;color:#111;padding:9px 14px;text-decoration:none;font-weight:600">Open in browser</a></main>
-      </body>`)
-  );
-}
-
-function openDesktopViewer(owner, rawUrl, rawTitle, contextId) {
-  if (!owner || owner.isDestroyed()) throw new Error("The OpenMausBot window is unavailable");
-  const url = desktopViewerUrl(rawUrl);
-  const titleCandidate = Object.prototype.toString.call(rawTitle) === "[object String]" ? rawTitle.trim() : "";
-  const title = titleCandidate ? titleCandidate.slice(0, 80) : "Live desktop";
-
-  const nextContextId =
-    Object.prototype.toString.call(contextId) === "[object String]" ? contextId.slice(0, 120) : null;
-
-  // Desktop URLs contain rotating access tokens. A newly minted URL replaces
-  // the old viewer instead of being retained anywhere after its window closes.
-  // Clear the ref first so the stale window's close handler no-ops; on a bot
-  // change, tell the previous bot to release (same-bot reopen stays quiet).
-  if (desktopViewerWindow && !desktopViewerWindow.isDestroyed()) {
-    const previous = desktopViewerWindow;
-    const previousOwner = desktopViewerOwner;
-    const previousContextId = desktopViewerContextId;
-    desktopViewerWindow = null;
-    previous.close();
-    if (previousContextId !== nextContextId && previousOwner && !previousOwner.isDestroyed()) {
-      previousOwner.send("desktop-viewer:state", { open: false, contextId: previousContextId });
-    }
-  }
-  desktopViewerOwner = owner.webContents;
-  desktopViewerContextId = nextContextId;
-
-  const viewer = new BrowserWindow({
-    width: 1220,
-    height: 820,
-    minWidth: 760,
-    minHeight: 520,
-    parent: owner,
-    // Not modal: the person still needs the app's "Hand control back" button
-    // while the desktop is open. `parent` keeps it floating above the app.
-    modal: false,
-    show: false,
-    title,
-    icon: APP_ICON,
-    backgroundColor: "#070707",
-    autoHideMenuBar: true,
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      sandbox: true,
-      // Keep provider cookies away from the app renderer and discard them on
-      // app exit. The secret-bearing URL is sufficient to authenticate.
-      partition: "openmausbot-desktop-viewer",
-    },
-  });
-  desktopViewerWindow = viewer;
-  const viewerOrigin = url.origin;
-
-  // VNC needs rendering, keyboard/mouse input and WebSockets, plus the few
-  // permission-gated input capabilities a viewer page asks for: keyboard and
-  // pointer capture, the clipboard for paste, full screen. Those go to the
-  // viewer's own origin only — never camera, microphone, geolocation,
-  // notifications, USB, or any other privileged browser capability in this
-  // remote-content window (see desktop-viewer-permissions.mjs).
-  viewer.webContents.session.setPermissionCheckHandler((_webContents, permission, requestingOrigin) =>
-    desktopViewerPermissionAllowed(permission, requestingOrigin, viewerOrigin),
-  );
-  viewer.webContents.session.setPermissionRequestHandler((webContents, permission, callback, details) =>
-    callback(desktopViewerPermissionAllowed(permission, details?.requestingUrl || webContents.getURL(), viewerOrigin)),
-  );
-
-  // A child window floats above the app but does not take the keyboard until
-  // it is focused: clicks land in the VNC canvas either way, keystrokes only
-  // reach the key window. Left unfocused, typing "into the VM" lands in the
-  // composer and ⌘1–9 switch bots while the mouse appears to work.
-  viewer.once("ready-to-show", () => {
-    if (viewer.isDestroyed()) return;
-    viewer.show();
-    viewer.focus();
-    viewer.webContents.focus();
-  });
-  viewer.on("closed", () => {
-    if (desktopViewerWindow !== viewer) return;
-    desktopViewerWindow = null;
-    // The panel drops its "viewer open" state and releases control on this.
-    notifyDesktopViewer(false);
-    desktopViewerOwner = null;
-    desktopViewerContextId = null;
-  });
-  viewer.on("page-title-updated", (event) => {
-    event.preventDefault();
-    viewer.setTitle(title);
-  });
-  viewer.webContents.setWindowOpenHandler(({ url: target }) => {
-    try {
-      const external = desktopViewerUrl(target);
-      void shell.openExternal(external.toString());
-    } catch {
-      // Ignore non-web and insecure URLs from the remote viewer.
-    }
-    return { action: "deny" };
-  });
-  viewer.webContents.on("will-navigate", (event, target) => {
-    if (sameDesktopViewerOrigin(target, viewerOrigin)) return;
-    event.preventDefault();
-    try {
-      void shell.openExternal(desktopViewerUrl(target).toString());
-    } catch {
-      // Keep privileged or malformed navigation out of the viewer.
-    }
-  });
-  viewer.webContents.on("did-fail-load", (_event, code, description, failedUrl, isMainFrame) => {
-    if (!isMainFrame || code === -3 || viewer.isDestroyed() || failedUrl.startsWith("data:")) return;
-    void viewer.loadURL(desktopViewerErrorPage(description || "The viewer did not respond.", url.toString()));
-  });
-
-  notifyDesktopViewer(true);
-  void viewer.loadURL(url.toString()).catch((error) => {
-    if (viewer.isDestroyed()) return;
-    void viewer.loadURL(desktopViewerErrorPage(error?.message ?? "The viewer did not respond.", url.toString()));
-  });
-  return true;
 }
 
 function ensureDesktopWorkspace(owner) {
@@ -2510,10 +2025,10 @@ app.whenReady().then(async () => {
           ? path.join(process.resourcesPath, "ui")
           : path.join(app.getAppPath(), "dist"),
       });
-      SERVER_PORT = desktopCompanionRelay.port;
-      serverReady = true;
+      setServerPort(desktopCompanionRelay.port);
+      setServerReady(true);
     } catch (error) {
-      serverReady = false;
+      setServerReady(false);
       slog(`desktop companion relay failed: ${error?.message ?? error}`);
     }
   } else if (app.isPackaged) {
