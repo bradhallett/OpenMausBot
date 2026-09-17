@@ -1,5 +1,10 @@
 import type { Readable } from "node:stream";
 
+// Method-level payload views (what core.ts reads off each method's params or
+// result) live next door in wire-types.ts and are re-exported here so the
+// protocol module stays the one import surface for the wire.
+export * from "./wire-types.ts";
+
 /** A JSON-RPC 2.0 message as ACP agents actually send them. */
 export interface AcpWireMessage {
   jsonrpc?: "2.0";
@@ -8,6 +13,30 @@ export interface AcpWireMessage {
   params?: unknown;
   result?: unknown;
   error?: { code?: number; message?: string; data?: unknown };
+}
+
+/** A client→agent request frame: id + method + params, result pending. */
+export interface AcpClientRequest extends AcpWireMessage {
+  jsonrpc: "2.0";
+  id: number;
+  method: string;
+}
+
+/** An agent→client response: the frame that settles a pending client
+ *  request with a result or an error. */
+export interface AcpServerResponse extends AcpWireMessage {
+  id: number;
+}
+
+/** An agent→client request (id + method, no result yet). */
+export interface AcpServerRequest extends AcpWireMessage {
+  id: number;
+  method: string;
+}
+
+/** An agent→client notification (method, no id). */
+export interface AcpNotification extends AcpWireMessage {
+  method: string;
 }
 
 /** Complete lines in a stream buffer, plus the unterminated tail to keep. */
@@ -34,9 +63,9 @@ export interface AcpConnectionOptions {
   /** Observe every parsed incoming message before dispatch (native log). */
   onMessage?(message: AcpWireMessage): void;
   /** A server→client request (id + method, no result yet). */
-  onServerRequest?(message: AcpWireMessage): void;
+  onServerRequest?(message: AcpServerRequest): void;
   /** A server→client notification (method, no id). */
-  onNotification?(message: AcpWireMessage): void;
+  onNotification?(message: AcpNotification): void;
   /** Called once when close() marks the connection closed — the kill policy
    *  stays with the driver that owns the process. */
   onClose?(): void;
@@ -56,10 +85,20 @@ export interface AcpConnectionOptions {
 
 /** One client→agent request awaiting its response. */
 interface PendingRpc {
-  resolve(value: any): void;
+  resolve(value: unknown): void;
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout> | null;
 }
+
+/** Dispatch classifiers for one parsed frame — the same truthiness rules
+ *  the read loop has always used, expressed as narrowing so each callback
+ *  receives its role's shape with no runtime change. */
+const isServerResponse = (message: AcpWireMessage): message is AcpServerResponse =>
+  message.id !== undefined && (message.result !== undefined || message.error !== undefined);
+const isServerRequest = (message: AcpWireMessage): message is AcpServerRequest =>
+  message.id !== undefined && Boolean(message.method);
+const isNotification = (message: AcpWireMessage): message is AcpNotification =>
+  Boolean(message.method);
 
 /** One JSON-RPC-2.0-over-stdio connection to an ACP agent. The connection
  *  owns framing, request/response correlation, timeouts, and dispatch of
@@ -96,10 +135,10 @@ export class AcpConnection {
    *  the request waits until the connection ends. `onResult` fires from the
    *  read loop before the awaiting continuation resumes, so an update that
    *  follows the response is still consumed in wire order. */
-  request(method: string, params: unknown, timeoutMs?: number, onResult?: (result: any) => void): Promise<any> {
+  request<T = unknown>(method: string, params: unknown, timeoutMs?: number, onResult?: (result: T) => void): Promise<T> {
     if (this.closed) return Promise.reject(new Error(this.options.closedErrorMessage ?? "The ACP connection is closed."));
     const id = this.nextId++;
-    return new Promise((resolve, reject) => {
+    return new Promise<T>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout> | null = null;
       if (timeoutMs) {
         timer = setTimeout(() => {
@@ -110,13 +149,17 @@ export class AcpConnection {
       }
       this.pending.set(id, {
         resolve: (result) => {
-          onResult?.(result);
-          resolve(result);
+          // the pending map is untyped across methods; the caller owns the
+          // shape of the result it asked for
+          const typed = result as T;
+          onResult?.(typed);
+          resolve(typed);
         },
         reject,
         timer,
       });
-      this.send({ jsonrpc: "2.0", id, method, params });
+      const frame: AcpClientRequest = { jsonrpc: "2.0", id, method, params };
+      this.send(frame);
     });
   }
 
@@ -158,7 +201,7 @@ export class AcpConnection {
         continue;
       }
       this.options.onMessage?.(message);
-      if (message.id !== undefined && (message.result !== undefined || message.error !== undefined)) {
+      if (isServerResponse(message)) {
         const pending = this.pending.get(message.id);
         if (!pending) continue;
         this.pending.delete(message.id);
@@ -170,9 +213,9 @@ export class AcpConnection {
         } else {
           pending.resolve(message.result);
         }
-      } else if (message.id !== undefined && message.method) {
+      } else if (isServerRequest(message)) {
         this.options.onServerRequest?.(message);
-      } else if (message.method) {
+      } else if (isNotification(message)) {
         this.options.onNotification?.(message);
       }
     }

@@ -51,7 +51,25 @@ import { supportsApprovalMode } from "../../../shared/approval-mode.ts";
 import { appendNative } from "../native.ts";
 import { createDriverSessionRuntime, createRefreshModels } from "../driver-runtime.ts";
 import { commandSummary, toolDetailPreview } from "../../tool-summary.ts";
-import { AcpConnection, type AcpWireMessage } from "./protocol.ts";
+import {
+  AcpConnection,
+  type AcpNotification,
+  type AcpServerRequest,
+  type AcpWireMessage,
+} from "./protocol.ts";
+import type {
+  AcpClientFileParams,
+  AcpConfigOption,
+  AcpInitializeResult,
+  AcpLogMessageParams,
+  AcpPromptResult,
+  AcpRequestPermissionParams,
+  AcpSessionConfigResult,
+  AcpSessionStartResult,
+  AcpSessionToolCall,
+  AcpSessionUpdateParams,
+  AcpTokenUsage,
+} from "./wire-types.ts";
 
 export interface AcpConfig {
   cli: string;
@@ -170,6 +188,8 @@ export interface AcpSupport {
    * the wire instead (droid), so this is the only place the pick can land; a
    * throw here fails the turn rather than silently running another model. */
   configureSession?(ctx: {
+    // Promise<any> is load-bearing: supports read method results opaquely
+    // (antigravity reads configOptions straight off set_config_option's).
     request: (method: string, params: unknown, timeoutMs?: number) => Promise<any>;
     sessionId: string;
     config: AcpConfig;
@@ -190,15 +210,16 @@ const NEW_SESSION_TIMEOUT = envOr("OPENMAUS_ACP_NEW_SESSION_TIMEOUT_MS", 300_000
 const LOAD_SESSION_TIMEOUT = envOr("OPENMAUS_ACP_LOAD_SESSION_TIMEOUT_MS", 120_000); // history replay on a long thread is slow
 const CLIENT_FILE_MAX_BYTES = 8 * 1024 * 1024;
 
-function acpVariantOption(result: any): { configId: string; options: ModelVariantOption[]; currentValue?: string } | undefined {
+function acpVariantOption(result: AcpSessionConfigResult | null): { configId: string; options: ModelVariantOption[]; currentValue?: string } | undefined {
   const option = (Array.isArray(result?.configOptions) ? result.configOptions : []).find(
-    (entry: any) => entry?.type === "select" && typeof entry.id === "string"
+    (entry): entry is AcpConfigOption & { id: string } =>
+      entry?.type === "select" && typeof entry.id === "string"
       && (entry.id === "effort" || entry.category === "thought_level"),
   );
   if (!option) return;
   const options: ModelVariantOption[] = [];
   const seen = new Set<string>();
-  const collect = (entries: unknown) => {
+  const collect = (entries: readonly AcpConfigOption[] | undefined) => {
     if (!Array.isArray(entries)) return;
     for (const entry of entries) {
       if (typeof entry?.value === "string" && !seen.has(entry.value)) {
@@ -249,10 +270,11 @@ function sanitizeToolLogValue(value: unknown, budget: { nodes: number; text: num
   }));
 }
 
-function sanitizeAcpToolMessage(message: any): unknown {
-  const isToolUpdate = message?.method === "session/update"
-    && ["tool_call", "tool_call_update"].includes(message?.params?.update?.sessionUpdate);
-  const isPermission = message?.method === "session/request_permission";
+function sanitizeAcpToolMessage(message: AcpWireMessage): unknown {
+  const params = message.params as AcpLogMessageParams | undefined;
+  const isToolUpdate = message.method === "session/update"
+    && ["tool_call", "tool_call_update"].includes(params?.update?.sessionUpdate ?? "");
+  const isPermission = message.method === "session/request_permission";
   if (!isToolUpdate && !isPermission) return message;
   return sanitizeToolLogValue(message, { nodes: 512, text: TOOL_LOG_TEXT_LIMIT });
 }
@@ -275,7 +297,7 @@ function decodeAcpConfig(defaultCli: string) {
 /** What "the same operation" means for a remembered session allow: the
  * tool call's shape with keys sorted, so two identical requests key alike
  * however the agent ordered its JSON. null when nothing identifies it. */
-function sessionOperationKey(toolCall: any): string | null {
+function sessionOperationKey(toolCall: AcpSessionToolCall): string | null {
   const rawInput = toolCall?.rawInput;
   const command = typeof rawInput?.command === "string" ? rawInput.command : undefined;
   const hasInput = rawInput && typeof rawInput === "object" && Object.keys(rawInput).length > 0;
@@ -366,35 +388,40 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
       // ACP content blocks may carry a complete raster image inline. Keep the
       // bytes on the wire, but never duplicate megabytes of base64 into the
       // provider-native diagnostic log in either direction.
-      const nativeLogMessage = (msg: any): unknown => {
-        let redacted = msg;
-        const prompt = msg?.method === "session/prompt" ? msg?.params?.prompt : null;
+      const nativeLogMessage = (message: AcpWireMessage): unknown => {
+        // the raw frame keeps params opaque; the redactor reads the two
+        // shapes it may rewrite (prompt blocks, update content) through one view
+        let params = message.params as AcpLogMessageParams | undefined;
+        let redacted: AcpWireMessage = message;
+        const prompt = message.method === "session/prompt" ? params?.prompt : null;
         if (Array.isArray(prompt)) {
           redacted = {
-            ...msg,
+            ...message,
             params: {
-              ...msg.params,
-              prompt: prompt.map((content: any) =>
+              ...params,
+              prompt: prompt.map((content) =>
                 content?.type === "image" && typeof content.data === "string"
                   ? { ...content, data: `[image data: ${content.data.length} base64 chars]` }
                   : content
               ),
             },
           };
+          params = redacted.params as AcpLogMessageParams;
         }
-        const content = redacted?.params?.update?.content;
+        const update = params?.update;
+        const content = update?.content;
         if (
-          redacted?.method !== "session/update" ||
-          redacted?.params?.update?.sessionUpdate !== "agent_message_chunk" ||
+          redacted.method !== "session/update" ||
+          update?.sessionUpdate !== "agent_message_chunk" ||
           content?.type !== "image" ||
           typeof content.data !== "string"
         ) return support.sanitizeToolPayload ? sanitizeAcpToolMessage(redacted) : redacted;
         redacted = {
           ...redacted,
           params: {
-            ...redacted.params,
+            ...params,
             update: {
-              ...redacted.params.update,
+              ...update,
               content: { ...content, data: `[image data: ${content.data.length} base64 chars]` },
             },
           },
@@ -520,14 +547,14 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         const state = { settled: false, promptSent: false, text: "" };
         const asks = new Map<string, (behavior: string, source?: "user" | "timeout" | "system", message?: string, always?: boolean) => void>();
         let sessionId: string | null = null;
-        let sessionConfigResult: any = null;
-        const modelOf = (result: any): string | null => {
+        let sessionConfigResult: AcpSessionConfigResult | null = null;
+        const modelOf = (result: AcpSessionConfigResult | null): string | null => {
           const option = (Array.isArray(result?.configOptions) ? result.configOptions : []).find(
-            (entry: any) => entry?.id === (support.selectModel?.configId ?? "model"),
+            (entry) => entry?.id === (support.selectModel?.configId ?? "model"),
           );
           return typeof option?.currentValue === "string" ? option.currentValue : null;
         };
-        const receiveModelVariants = (result: any) => {
+        const receiveModelVariants = (result: AcpSessionConfigResult | null) => {
           sessionConfigResult = result;
           if (!support.modelVariants) return;
           const nativeModel = modelOf(result) ?? cliTurn.model;
@@ -583,7 +610,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
           return candidate;
         };
 
-        const handleClientFileRequest = async (msg: any): Promise<void> => {
+        const handleClientFileRequest = async (msg: AcpServerRequest): Promise<void> => {
           const fail = (error: unknown) => send({
             jsonrpc: "2.0",
             id: msg.id,
@@ -591,7 +618,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
           });
           try {
             if (!support.clientFileSystem) throw new Error("Client file access is disabled.");
-            const params = msg.params ?? {};
+            const params = (msg.params ?? {}) as AcpClientFileParams;
             const path = await resolveClientPath(params.path);
             if (msg.method === "fs/read_text_file") {
               const info = await stat(path);
@@ -603,8 +630,8 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
                 send({ jsonrpc: "2.0", id: msg.id, result: { content } });
                 return;
               }
-              const line = Number.isInteger(params.line) && params.line > 0 ? params.line : 1;
-              const limit = Number.isInteger(params.limit) && params.limit >= 0 ? params.limit : undefined;
+              const line = typeof params.line === "number" && Number.isInteger(params.line) && params.line > 0 ? params.line : 1;
+              const limit = typeof params.limit === "number" && Number.isInteger(params.limit) && params.limit >= 0 ? params.limit : undefined;
               const lines = content.split("\n");
               const start = line - 1;
               send({
@@ -646,7 +673,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         };
 
         // server→client permission request → canonical request.opened
-        const handleServerRequest = (msg: any) => {
+        const handleServerRequest = (msg: AcpServerRequest) => {
           if (msg.method === "fs/read_text_file" || msg.method === "fs/write_text_file") {
             void handleClientFileRequest(msg);
             return;
@@ -655,7 +682,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             // never leave an unknown server request hanging — the agent blocks
             return send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "method not found" } });
           }
-          const params = msg.params ?? {};
+          const params = (msg.params ?? {}) as AcpRequestPermissionParams;
           flushAssistantText();
           const options: Array<{ optionId?: string; kind?: string; name?: string }> = Array.isArray(params.options) ? params.options : [];
           const optionFor = (want: "allow" | "reject") =>
@@ -758,11 +785,11 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
           });
         };
 
-        const handleNotification = (msg: any) => {
+        const handleNotification = (msg: AcpNotification) => {
           // Vendor side-channels (e.g. grok's `_x.ai/*`) are teed to the
           // native log but never normalized: the prompt result is the settle.
           if (msg.method !== "session/update") return;
-          const p = msg.params ?? {};
+          const p = (msg.params ?? {}) as AcpSessionUpdateParams;
           if (p._meta?.isReplay === true) return;
           if (support.modelVariants && p.update?.sessionUpdate === "config_option_update") {
             if (!state.settled && sessionId && p.sessionId === sessionId) receiveModelVariants(p.update);
@@ -838,8 +865,8 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
           onNotification: handleNotification,
         });
         const send = (obj: unknown) => acp.send(obj as AcpWireMessage);
-        const request = (method: string, params: unknown, timeoutMs?: number, receive?: (result: any) => void) =>
-          acp.request(method, params, timeoutMs, receive);
+        const request = <T = unknown>(method: string, params: unknown, timeoutMs?: number, receive?: (result: T) => void): Promise<T> =>
+          acp.request<T>(method, params, timeoutMs, receive);
 
         let stderr = "";
         child.stderr.on("data", (c) => {
@@ -873,7 +900,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
 
         (async () => {
           try {
-            const init = await request(
+            const init = await request<AcpInitializeResult>(
               "initialize",
               {
                 protocolVersion: 1,
@@ -920,10 +947,10 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             const cursor = typeof turn.resumeCursor === "string" ? turn.resumeCursor : null;
             // a fresh native session forgets what the previous one allowed
             if (!cursor) sessionAllows.delete(threadId);
-            let sessionResult: any = null;
+            let sessionResult: AcpSessionStartResult | null = null;
             if (cursor) {
               try {
-                sessionResult = await request(
+                sessionResult = await request<AcpSessionStartResult>(
                   support.resumeMethod === "resume" ? "session/resume" : "session/load",
                   { sessionId: cursor, cwd, mcpServers: sessionServers },
                   LOAD_SESSION_TIMEOUT,
@@ -939,7 +966,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               }
             }
             if (!sessionId) {
-              sessionResult = await request("session/new", { cwd, mcpServers: sessionServers }, NEW_SESSION_TIMEOUT, (result) => {
+              sessionResult = await request<AcpSessionStartResult>("session/new", { cwd, mcpServers: sessionServers }, NEW_SESSION_TIMEOUT, (result) => {
                 sessionId = typeof result?.sessionId === "string" ? result.sessionId : null;
                 receiveModelVariants(result);
               });
@@ -1030,13 +1057,13 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               throw new Error(`${support.displayName} changed variant before the prompt`);
             }
             state.promptSent = true;
-            const result = await request("session/prompt", {
+            const result = await request<AcpPromptResult>("session/prompt", {
               sessionId,
               prompt: [{ type: "text", text }, ...imageBlocks],
             });
             // opencode 1.18.18 reports usage at the result root; grok and
             // gemini put it under _meta. Read both rather than lose the count.
-            const usage = result?.usage ?? result?._meta ?? {};
+            const usage: AcpTokenUsage = result?.usage ?? result?._meta ?? {};
             if (typeof usage.inputTokens === "number" || typeof usage.outputTokens === "number") {
               emit({
                 ...base(threadId, turnId),
