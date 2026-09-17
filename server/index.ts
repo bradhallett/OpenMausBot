@@ -1,7 +1,7 @@
 // OpenMausBot server — the harness host. Clients hold no transports
 // (upstream rule): the React app dispatches typed commands over HTTP and
 // folds one SSE event stream; every provider process runs here.
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { extname, join } from "node:path";
 
@@ -10,9 +10,6 @@ import { SharedComputers } from "./shared-computers.ts";
 import { BrowserCleanupCoordinator } from "./browser-lifecycle-cleanup.ts";
 import { createDesktopBridge } from "./desktop-bridge.ts";
 import { flushDecisionLog } from "./decision-log.ts";
-import {
-  cleanupStaleAttachmentPartials,
-} from "./attachments.ts";
 import * as composio from "./composio.ts";
 import {
   containerComputerStatus,
@@ -23,13 +20,10 @@ import {
   instanceConfigs,
   loadConfig,
   localVmMode,
-  threadEventLogRetentionDays,
   saveConfig,
   sharedComputersEnabled,
-  builtInBrowserEnabled,
   DATA_DIR,
 } from "./config.ts";
-import { sweepThreadEventLogs, type ThreadLogRetentionCandidate } from "./thread-retention.ts";
 import { resetPathCache } from "./env-path.ts";
 import {
   flushUsageLedger,
@@ -40,16 +34,8 @@ import { fleetAvailable, fleetRequest, fleetSocketPath } from "./fleet-client.ts
 import { entitled } from "./enterprise.ts";
 
 
-import { closeMessageDb, chatFollowups, settleChatFollowups } from "./message-db.ts";
-import {
-  discardDelegations,
-  drainDelegations,
-  pendingThreads,
-} from "./delegations.ts";
-import {
-  restoreSteeredMessages,
-} from "./steer-queue.ts";
-import { restoreChannelMessages } from "./channel-queue.ts";
+import { closeMessageDb } from "./message-db.ts";
+import { drainDelegations } from "./delegations.ts";
 import { EventBus } from "./harness/bus.ts";
 import { ManagedDesktopProviders } from "./managed-desktop.ts";
 import { withPeerProvenance } from "./peer-provenance.ts";
@@ -57,12 +43,12 @@ import type { Message } from "./store.ts";
 import { flushAllMemoryJournals } from "./memory-journal.ts";
 import { discoverExistingPerBotLocalVms, shouldArmLocalVmIdle } from "./local-vm-inventory.ts";
 
-import * as vps from "./vps-computer.ts";
 import { createBotLifecycle } from "./bot-lifecycle.ts";
 import { createCalendarRooms } from "./calendar-rooms.ts";
 import { createComputerLifecycleWiring } from "./computer-lifecycle-wiring.ts";
 import { createPeerAgentComms } from "./peer-agent-comms.ts";
 import { createEventsPipeline } from "./events-pipeline.ts";
+import { runBootSequence } from "./boot-sequence.ts";
 import { createGroupState } from "./group-state.ts";
 import { createRoutineLifecycle } from "./routine-lifecycle.ts";
 import { createSkillLifecycle } from "./skill-lifecycle.ts";
@@ -97,13 +83,9 @@ import { createDesktopApproval } from "./desktop-approval.ts";
 import { createGroupTurnOperations } from "./group-turn-operations.ts";
 import { createConfigViews } from "./config-views.ts";
 import { createTurnSecrets } from "./turn-secrets.ts";
-import { createGracefulShutdown } from "./graceful-shutdown.ts";
 import {
-  createWorkspaceAccess,
-  describeEdition,
   hostedWorkspaceConfiguration,
   hostedWorkspaceConfigured,
-  loadEnterpriseLayer,
   type WorkspaceAccess,
 } from "./enterprise.ts";
 import { serverVersion } from "./environment.ts";
@@ -134,6 +116,8 @@ import { createComputersRoutes } from "./routes/computers.ts";
 import { createSystemRoutes } from "./routes/system.ts";
 import { createUsageRoutes } from "./routes/usage.ts";
 import { createConfigRoutes } from "./routes/config.ts";
+import { createBrowserLiveRoutes } from "./routes/browser-live.ts";
+import { createFleetRoutes } from "./routes/fleet.ts";
 import type { RouteContext } from "./routes/http.ts";
 import {
   computerSelectionTurns,
@@ -145,7 +129,6 @@ import {
   cfg,
   ENVIRONMENT_ID,
   registry,
-  releaseDataDirLeaseAtExit,
   store,
   workspaceMaintenance,
   workspaceRestore,
@@ -170,7 +153,7 @@ import {
   sessionCookieName,
 } from "./request-auth.ts";
 import { cookieMaxAgeSeconds, SessionRegistry } from "./sessions.ts";
-import { describeBrand, loadBrand } from "./brand.ts";
+import { loadBrand } from "./brand.ts";
 import {
   PhoneSecretBridge,
   PhoneSecretSubmissionRegistry,
@@ -1512,6 +1495,25 @@ const handleSystem = createSystemRoutes({
   configStatus,
 });
 
+const handleBrowserLive = createBrowserLiveRoutes({
+  store,
+  readBody,
+  browserLive,
+  browserIntegration,
+  currentBrowserSession,
+  sessions,
+  HOSTED_WORKSPACE,
+  workspaceAccess: () => workspaceAccess,
+});
+
+const handleFleet = createFleetRoutes({
+  entitled,
+  fleetSocketPath,
+  fleetAvailable,
+  fleetRequest,
+  readBody,
+});
+
 
 const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
   let url: URL;
@@ -1599,51 +1601,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     // relay never has to expose the rest of OpenMausBot's control surface.
     if (await handleWebhooks(req, res, rctx)) return;
 
-    // ── events stream ──
-    // Owner-only (default-deny in request-auth). Never mix login frames into
-    // the general events feed, which is also visible to client-only devices.
-    const liveBrowserMatch = /^\/api\/bots\/([\w-]+)\/browser\/(live|action)$/.exec(path);
-    if (liveBrowserMatch) {
-      res.setHeader("cache-control", "no-store");
-      const bot = store.bot(liveBrowserMatch[1]);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      if (!builtInBrowserEnabled(cfg) || bot.browser === false) {
-        return json(res, 409, { error: "Enable this bot's browser in its profile first." });
-      }
-      const browser = await browserIntegration(bot.id, bot.browserProfile);
-      if (!browser) return json(res, 503, { error: "Install the browser engine first." });
-      // Browser discovery may have awaited while the portal became unavailable
-      // and closed this owner's streams. Do not open a late replacement on
-      // the earlier authorization; once registered, exact-owner close covers it.
-      if (HOSTED_WORKSPACE && auth.kind === "session") {
-        const failure = workspaceAccess
-          ? await workspaceAccess.authorize(req, auth)
-          : { status: 503, error: "Workspace sign-in is unavailable." };
-        if (failure) return json(res, failure.status, { error: failure.error });
-      }
-      const owner = auth.kind === "session" ? auth.session.id : "local-owner";
-      const isCurrent = () => {
-        const current = store.bot(bot.id);
-        return !!current && current.browser !== false && builtInBrowserEnabled(cfg)
-          && currentBrowserSession(current.id, current.browserProfile) === browser.session
-          && (auth.kind !== "session" || sessions.isLive(auth.session.id));
-      };
-      if (method === "GET" && liveBrowserMatch[2] === "live") {
-        req.socket.setTimeout(0);
-        return await browserLive.open({ botId: bot.id, session: browser.session, spec: browser.spec, owner, isCurrent, res });
-      }
-      if (method === "POST" && liveBrowserMatch[2] === "action") {
-        const body = await readBody(req, 32_768);
-        if (!isCurrent()) return json(res, 409, { error: "This browser session changed. Reopen the browser panel." });
-        if (typeof body?.viewerId !== "string") return json(res, 400, { error: "A live browser connection is required." });
-        if (body.type === "restart" && store.bots.some((candidate) => candidate.busy &&
-            currentBrowserSession(candidate.id, candidate.browserProfile) === browser.session)) {
-          return json(res, 409, { error: "Stop every bot using this profile before restarting its browser." });
-        }
-        return json(res, 200, await browserLive.action({ viewerId: body.viewerId, botId: bot.id, owner, body }));
-      }
-      return json(res, 405, { error: "method not allowed" });
-    }
+    if (await handleBrowserLive(req, res, rctx)) return;
     if (eventsRoutes.handle(req, res, path, method, url, auth)) return;
 
     // ── bots ──
@@ -1668,30 +1626,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
 
     if (await handleSystem(req, res, rctx)) return;
 
-    // ── the fleet: client workspaces on this server, through the root agent ──
-    // Admin scope by default plus the `admin` entitlement; the socket's own
-    // permissions decide whether this workspace may drive the agent at all.
-    const fleetRoute = /^\/api\/fleet(?:\/(workspaces(?:\/([a-z0-9-]+)(?:\/(users|suspend|resume))?)?|upgrade))?$/.exec(path);
-    if (fleetRoute) {
-      if (!entitled("admin")) return json(res, 403, { error: "Workspaces need an enterprise licence with the admin feature." });
-      const socket = fleetSocketPath();
-      if (!fleetAvailable(socket)) return json(res, 404, { error: "No fleet agent on this server. Run `openmausbot fleet init --domain … --operator <this user>` as root." });
-      const [, resource, slug, sub] = fleetRoute;
-      let forward: { method: string; path: string; body?: unknown } | null = null;
-      if (method === "GET" && !resource) forward = { method: "GET", path: "/workspaces" };
-      else if (method === "POST" && resource === "workspaces") forward = { method: "POST", path: "/workspaces", body: await readBody(req, 256 * 1024) };
-      else if (method === "POST" && resource === "upgrade") forward = { method: "POST", path: "/upgrade" };
-      else if (slug && method === "POST" && (sub === "users" || sub === "suspend" || sub === "resume")) forward = { method: "POST", path: `/workspaces/${slug}/${sub}`, ...(sub === "users" ? { body: await readBody(req, 8192) } : {}) };
-      else if (slug && method === "DELETE" && !sub) forward = { method: "DELETE", path: `/workspaces/${slug}`, body: await readBody(req, 8192) };
-      if (!forward) return json(res, 405, { error: "no such fleet operation" });
-      res.setHeader("cache-control", "no-store");
-      try {
-        const reply = await fleetRequest(socket, forward.method, forward.path, forward.body);
-        return json(res, reply.status, reply.body ?? {});
-      } catch (error) {
-        return json(res, 502, { error: error instanceof Error ? error.message : String(error) });
-      }
-    }
+    if (await handleFleet(req, res, rctx)) return;
 
     if (await handleUsage(req, res, rctx)) return;
 
@@ -1720,186 +1655,34 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
 
 const server = createServer(handleRequest);
 
-calendarCalls!.start();
-
-// Resolve the edition before accepting requests so /api/edition is never a guess.
-console.log(describeEdition(await loadEnterpriseLayer()));
-workspaceAccess = createWorkspaceAccess({ sessions, cookieName: SESSION_COOKIE, closeSessionStreams });
-// Ten-second cadence plus the bridge's five-second backchannel deadline bounds
-// stale portal access on quiet event/browser streams to fifteen seconds.
-const workspaceAccessTimer = workspaceAccess ? setInterval(() => {
-  void workspaceAccess!.revalidate().catch((error) => console.warn("workspace access revalidation failed", error));
-}, 10_000) : null;
-workspaceAccessTimer?.unref();
-console.log(describeBrand(loadBrand()));
-
-// Reclaim upload partials a previous run crashed out of, and warm the
-// attachment quota cache off the same scan. This used to happen implicitly on
-// every reservation, which is exactly what made uploads quadratic in
-// directory size; do the initial sweep before accepting requests.
-// ponytail: once per boot, not periodic. A partial orphaned while this
-// process is up survives until the next restart — add a timer only if that
-// shows up as real quota pressure.
-try {
-  const reclaimedPartials = cleanupStaleAttachmentPartials();
-  if (reclaimedPartials > 0) console.log(`reclaimed ${reclaimedPartials} abandoned upload partial(s)`);
-} catch (error) {
-  console.warn(`attachments: startup partial cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
-}
-
-// #1280: retention for per-thread event logs. Off unless configured, and
-// even then it only removes log files — transcripts, thread records, and
-// workspace state stay untouched. A thread qualifies only when its newest
-// close or archive stamp is older than the window and it is not busy,
-// unread, or carrying an open direct handoff.
-const THREAD_LOG_RETENTION_SWEEP_MS = 24 * 60 * 60 * 1000;
-
-function sweepThreadEventLogsNow(): void {
-  const retentionDays = threadEventLogRetentionDays(cfg);
-  if (retentionDays === null) return;
-  const candidates: ThreadLogRetentionCandidate[] = store.bots.flatMap((bot) =>
-    (bot.tasks ?? []).map((task) => ({
-      threadId: task.threadId,
-      closedAt: task.closedBy?.at ?? null,
-      archivedAt: task.archivedAt ?? null,
-      unread: task.unread === true,
-      busy: threadBusy(bot.id, task.threadId),
-      openDirectHandoff: roomHandoffs.activeDirect(task.threadId),
-    })));
-  const swept = sweepThreadEventLogs(candidates, retentionDays);
-  if (swept > 0) console.log(`[retention] removed event logs for ${swept} idle thread(s) past ${retentionDays} day(s)`);
-}
-
-try {
-  sweepThreadEventLogsNow();
-} catch (error) {
-  console.warn(`thread event log retention sweep failed: ${error instanceof Error ? error.message : String(error)}`);
-}
-// A days-scale window needs no tighter cadence; unref so the timer never
-// holds the process open.
-setInterval(sweepThreadEventLogsNow, THREAD_LOG_RETENTION_SWEEP_MS).unref();
-
-// A dispatch claim is deliberately committed before transcript/provider work.
-// If we died after that point, its outcome is unknown: recover the user's words
-// and a review notice, never hand them to a model for a second execution.
-for (const row of chatFollowups()) {
-  if (row.status !== "dispatching" && row.status !== "interrupted") continue;
-  const owned = row.kind === "bot"
-    ? Boolean(store.taskByThread(row.ownerId, row.threadId))
-    : Boolean(store.groupByThread(row.threadId)?.id === row.ownerId);
-  if (!owned) { settleChatFollowups([row.id], "cancelled"); continue; }
-  settleChatFollowups([row.id], "interrupted");
-  const messages = store.messagesFor(row.threadId);
-  if (!messages.some((message) => message.queueId === row.id && message.role === "user")) {
-    store.appendMessage(row.threadId, {
-      role: "user", kind: "text", text: row.payload.text, replyToId: row.payload.replyToId,
-      sendId: row.payload.sendId, queueId: row.id,
-      ...(row.kind === "channel" ? { channelMode: row.payload.mode, via: row.payload.via } : {}),
-    });
-  }
-  if (!messages.some((message) => message.queueId === row.id && message.kind === "activity")) {
-    store.appendMessage(row.threadId, {
-      role: "bot", kind: "activity", queueId: row.id,
-      tool: { name: "Queued follow-up interrupted by restart or restore — it may have already run. Review the result before sending it again.", ok: false },
-    });
-  }
-  // The FULL-sync retirement also flushes both transcript writes. Retrying
-  // this sendId now finds the canonical message, without a permanent journal scan.
-  settleChatFollowups([row.id], null);
-}
-restoreSteeredMessages();
-restoreChannelMessages();
-
-server.listen(PORT, "127.0.0.1", () => {
-  companyRuntimeReady();
-  console.log(`openmausbot server on http://127.0.0.1:${PORT}`);
-  followupsReady.set(true);
-  drainQueuedSends();
-  drainQueuedChannelSends();
-  // Startup work uses the same turn dispatcher and local tool endpoint as
-  // ordinary chat. Start only once every registry is initialized and the
-  // endpoint is listening; earlier dispatch can hit uninitialized bindings.
-  routines!.start();
-  const leftover = pendingThreads();
-  if (leftover.length) console.log(`delegations: ${leftover.length} thread(s) with queued handoffs from a previous run — draining`);
-  for (const threadId of leftover) {
-    const run = routines!.runForThread(threadId);
-    // A person can reuse a completed run's task for unrelated work. Only
-    // discard the old run's handoffs, not a later user's persisted queue.
-    const reused = run?.finishedAt !== undefined && store.botByThread(threadId) &&
-      store.activePath(threadId).some((message) => message.role === "user" && message.at > run.finishedAt!);
-    if (run && !["running", "waiting"].includes(run.status) && !reused) discardDelegations(commsBus, threadId);
-    else drainThreadDelegations(threadId);
-  }
-  // After the boot drain, not before it: that drain already expires stale
-  // leftovers, and a sweep ahead of it would wake delegators of stopped
-  // routine runs whose handoffs the loop above discards instead.
-  setInterval(expireDelegationsNow, DELEGATION_SWEEP_MS).unref();
+await runBootSequence({
+  server,
+  handleRequest,
+  calendarCalls: () => calendarCalls,
+  routines: () => routines,
+  webhookIngress: () => webhookIngress,
+  workspaceAccess: { get: () => workspaceAccess, set: (value) => { workspaceAccess = value; } },
+  companyShutdown: { get: () => companyShutdown, set: (value) => { companyShutdown = value; } },
+  sessions,
+  SESSION_COOKIE,
+  closeSessionStreams,
+  PORT,
+  companyRuntimeReady,
+  followupsReady,
+  drainQueuedSends,
+  drainQueuedChannelSends,
+  commsBus,
+  drainThreadDelegations,
+  expireDelegationsNow,
+  DELEGATION_SWEEP_MS,
+  sharedComputers,
+  sharedComputerControl,
+  browserLive,
+  localVmIdles,
+  watchdog,
+  managedDesktop,
+  temporaryBrowserSessions,
+  forgetTemporaryBrowser,
+  browserRuntime,
+  roomHandoffs,
 });
-
-// A second listener for `openmausbot serve --tunnel` (server/tunnel.ts): the
-// connector gateway on this machine forwards public traffic to this IPC path.
-// Nothing changes about the loopback bind above. Requests arriving here have
-// no peer address, which request-auth treats as "through a proxy": a session
-// is required, never loopback trust, whatever headers the request carries.
-const TUNNEL_SOCKET = process.env.OMB_TUNNEL_SOCKET?.trim() || null;
-let tunnelListener: ReturnType<typeof createServer> | null = null;
-if (TUNNEL_SOCKET) {
-  if (process.platform !== "win32") rmSync(TUNNEL_SOCKET, { force: true });
-  tunnelListener = createServer(handleRequest);
-  tunnelListener.listen(TUNNEL_SOCKET, () => {
-    console.log(`openmausbot tunnel listener on ${TUNNEL_SOCKET}`);
-  });
-}
-
-const gracefulShutdown = createGracefulShutdown({
-  cleanup: [
-    () => {
-      followupsReady.set(false);
-      companyShutdown = true;
-      if (workspaceAccessTimer) clearInterval(workspaceAccessTimer);
-      // Child MCP processes and the HTTP listener can remain alive while the
-      // asynchronous shutdown jobs drain. Invalidate their turn bearers before
-      // any cleanup function reaches an await.
-      revokeAllInternalCapabilities();
-      sharedComputers.close();
-      sharedComputerControl.close();
-      browserLive.closeAll();
-      for (const idle of localVmIdles.values()) idle.cancel();
-      vps.closeAllVpsDesktopTunnels();
-      watchdog.stop();
-      routines?.stop();
-      calendarCalls?.stop();
-      webhookIngress?.server.close();
-      tunnelListener?.close();
-    },
-    async () => { await managedDesktop.close(); await registry.disposeAll(); },
-    async () => {
-      await Promise.all([...temporaryBrowserSessions.keys()].map((botId) => forgetTemporaryBrowser(botId)));
-      await browserRuntime.closeAll();
-    },
-    () => flushAllProfileHistory(),
-    () => flushAllMemoryJournals(),
-    () => flushUsageLedger(DATA_DIR),
-    () => flushDecisionLog(DATA_DIR),
-  ],
-  // Cleanup jobs run concurrently. Release only after they settle (or reach
-  // the shutdown deadline), immediately before the process exits, so no new
-  // server can overlap with a still-mutating old one.
-  exit: (code) => {
-    try { sessions.close(); }
-    catch {
-      // An uncleared marker makes saved account sessions require sign-in on
-      // the next boot; never label failed persistence a clean shutdown.
-      console.error("Session persistence failed during shutdown; account sign-in will be required again.");
-      code = 1;
-    }
-    closeMessageDb();
-    releaseDataDirLeaseAtExit();
-    process.exit(code);
-  },
-});
-
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, gracefulShutdown);
-}
