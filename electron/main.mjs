@@ -1,4 +1,4 @@
-import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, Menu, nativeImage, powerMonitor, powerSaveBlocker, safeStorage, screen, session, shell, systemPreferences, utilityProcess } from "electron";
+import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, Menu, powerMonitor, powerSaveBlocker, safeStorage, screen, session, shell, systemPreferences } from "electron";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -6,7 +6,6 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startCua, stopCua, registerCuaIpc, setCuaStateListener } from "./cua.mjs";
-import { createAndroidDeviceController } from "./android-device.mjs";
 import { finishSpeech, startSpeech, stopSpeech } from "./speech.mjs";
 import { openBlankTerminal } from "./terminal-launch.mjs";
 import { attachUpdaterWindow, startUpdater, registerUpdaterIpc } from "./updater.mjs";
@@ -14,24 +13,13 @@ import {
   diagnosticsFileName,
   installDesktopCrashListeners,
 } from "./diagnostics.mjs";
-import { workspaceCredentialEnv } from "./workspace-credentials.mjs";
 import { activateExistingWindow, releaseSingleInstanceLock } from "./single-instance.mjs";
-import { pollServerIdentity } from "./server-boot-probe.mjs";
 import { createServerSupervisor } from "./server-supervisor.mjs";
-import { packageUrlFromCommandLine, packageUrlFromDeepLink } from "./package-link.mjs";
+import { packageUrlFromCommandLine } from "./package-link.mjs";
 import { windowChromeOptions } from "./window-chrome.mjs";
 import { collisionFreeDownloadPath, defaultSaveName, withSavableFile } from "./save-file.mjs";
 import { appPermissionAllowed, externalWebUrl } from "./app-permissions.mjs";
-import {
-  ensureManagedComposioCredentials,
-  managedComposioAccess,
-  managedComposioChildEnvironment,
-} from "./managed-composio.mjs";
-import {
-  createPhoneSecretSaveCoordinator,
-  decodePhoneSecretSaveRequest,
-  phoneSecretPrivateKeyMessage,
-} from "./phone-secret-identity.mjs";
+import { ensureManagedComposioCredentials } from "./managed-composio.mjs";
 import {
   desktopCompanionAccess,
   desktopCompanionRendererArguments,
@@ -66,7 +54,6 @@ import {
   SERVER_PORT,
   serverProc,
   serverReady,
-  utilityServerExits,
   stopUtilityServer,
   setServerPort,
   setServerReady,
@@ -86,7 +73,6 @@ import {
   ensureCompanionAccountService,
   ensurePhoneSecretIdentity,
   installationDisplayName,
-  phoneSecretIdentity,
   refreshDesktopCompanionTailscale,
   startDesktopCompanion,
   stopDesktopCompanion,
@@ -136,43 +122,45 @@ import {
   ensureManagedDesktop,
   localWorkspaceOnly,
   managedDesktop,
-  managedDesktopRelay,
   setDesktopRemoteAccess,
   setDesktopShutdownStarted,
-  syncDesktopMutationToken,
   workspaceOnly,
 } from "./main/company-backup.mjs";
+import {
+  applyUnreadBadge,
+  deliverPackageInstall,
+  queuePackageInstall,
+  serverUnavailableWindows,
+  setPendingPackageInstallUrl,
+} from "./main/unread-badge.mjs";
+import {
+  installDesktopMutationHeader,
+  startServerOn,
+  startServerPackaged,
+  syncManagedComposioCredentials,
+  wireServerBootDeps,
+} from "./main/server-boot.mjs";
+import {
+  androidDevice,
+  bumpDisplayMediaRequestCount,
+  cuaReady,
+  displayMediaGuard,
+  displayMediaRequestCount,
+  getCuaReady,
+  respondToDisplayMediaRequest,
+  setCuaReady,
+} from "./main/cua-media.mjs";
 
 const { desktopCapabilities, nativeDesktopActions } = capabilitiesModule;
 const nativeActions = nativeDesktopActions(process.platform);
 const require = createRequire(import.meta.url);
-const { createDisplayMediaGuard, invokeDisplayMediaCallback, selectCaptureSource } = require(
-  "./screen-preview.cjs",
-);
+const { selectCaptureSource } = require("./screen-preview.cjs");
 const { STAGE_PREFIX: APPIMAGE_CUA_STAGE_PREFIX } = require("./cua-linux-bundle.cjs");
 const { createTrustedApprovalModeCoordinator } = require("./approval-trusted-mode.cjs");
-const { DESKTOP_MUTATION_HEADER, desktopServerHeaders } = require("./desktop-server-auth.cjs");
-const { MIN_BOUNDS, normalizeUnreadCount, resolveWindowState } = require("./window-state.cjs");
+const { desktopServerHeaders } = require("./desktop-server-auth.cjs");
+const { MIN_BOUNDS, resolveWindowState } = require("./window-state.cjs");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-let pendingPackageInstallUrl = packageUrlFromCommandLine(process.argv);
-const serverUnavailableWindows = new WeakSet();
-let unreadCount = 0;
-let unreadOverlayIcon = null;
-
-function applyUnreadBadge(win = mainWindow) {
-  const count = normalizeUnreadCount(unreadCount);
-  if (process.platform === "win32") {
-    if (!win || win.isDestroyed()) return;
-    unreadOverlayIcon ??= nativeImage.createFromPath(APP_ICON).resize({ width: 16, height: 16 });
-    win.setOverlayIcon(
-      count > 0 && !unreadOverlayIcon.isEmpty() ? unreadOverlayIcon : null,
-      count > 0 ? `${count} unread conversation${count === 1 ? "" : "s"}` : "No unread conversations",
-    );
-    return;
-  }
-  if (process.platform === "darwin" || process.platform === "linux") app.setBadgeCount(count);
-}
 
 // GNOME groups the window with its installed desktop entry only when both
 // identities match. This must run before Electron becomes ready. Ubuntu also
@@ -202,34 +190,6 @@ if (!app.requestSingleInstanceLock()) {
 // would allow a concurrent second instance.
 nativeAutoUpdater.on("before-quit-for-update", () => releaseSingleInstanceLock(app));
 
-function deliverPackageInstall(win) {
-  if (!pendingPackageInstallUrl || !win || win.isDestroyed()) return;
-  if (win.webContents.isLoadingMainFrame()) return;
-  // A package installs into THIS computer's workspace, so it is handed to the
-  // local UI only. Showing a remote server: switch back to Local first; the
-  // pending link is delivered when that page finishes loading.
-  let showingLocal = false;
-  try {
-    showingLocal = new URL(win.webContents.getURL()).origin === rendererOrigin();
-  } catch {}
-  if (!showingLocal) {
-    if (activeEnvironment(environmentsState)) void workspaceMenuAction(() => switchEnvironment(LOCAL_ID));
-    return;
-  }
-  win.webContents.send("package:install", pendingPackageInstallUrl);
-  pendingPackageInstallUrl = null;
-}
-
-function queuePackageInstall(rawLink) {
-  const packageUrl = packageUrlFromDeepLink(rawLink);
-  if (!packageUrl) return false;
-  pendingPackageInstallUrl = packageUrl;
-  activateExistingWindow(BrowserWindow.getAllWindows());
-  const target = BrowserWindow.getAllWindows().find((win) => !win.isDestroyed());
-  deliverPackageInstall(target);
-  return true;
-}
-
 app.on("open-url", (event, url) => {
   if (!queuePackageInstall(url)) return;
   event.preventDefault();
@@ -237,7 +197,7 @@ app.on("open-url", (event, url) => {
 
 app.on("second-instance", (_event, commandLine) => {
   const packageUrl = packageUrlFromCommandLine(commandLine);
-  if (packageUrl) pendingPackageInstallUrl = packageUrl;
+  if (packageUrl) setPendingPackageInstallUrl(packageUrl);
   activateExistingWindow(BrowserWindow.getAllWindows());
   const target = BrowserWindow.getAllWindows().find((win) => !win.isDestroyed());
   deliverPackageInstall(target);
@@ -302,7 +262,7 @@ import { createRoutineWakeHold, rememberRoutineWake, routineWakeSettings } from 
  * android-device.mjs. Declared before any handler registration below: a
  * const declared later would be in its temporal dead zone at module load.
  */
-const { isLocalSender: senderIsLocal, localOnly, localOnlySync, setLocalOrigin } = localOriginModule;
+const { isLocalSender: senderIsLocal, localOnly, setLocalOrigin } = localOriginModule;
 
 // Keep this computer awake for scheduled routines (electron/routine-wake.mjs):
 // the scheduler lives in the local server, which cannot run while the Mac
@@ -340,246 +300,31 @@ installDesktopCrashListeners({
 // taken by another process — decides which error-page message renders.
 let serverStartConflictOnly = false;
 
+// server-boot.mjs reads these main-owned bindings through wiring-time
+// deps: the supervisor, trusted-approval coordinator and data-dir lease are
+// created above, saveWorkspaceCredential is the hoisted function further
+// down, and serverStartConflictOnly is assigned from both files (the
+// supervisor's onReady resets it here; startServerPackaged sets it inside
+// server-boot.mjs).
+wireServerBootDeps({
+  setServerStartConflictOnly: (value) => {
+    serverStartConflictOnly = value;
+  },
+  desktopDataDirLease: () => desktopDataDirLease,
+  serverSupervisor: () => serverSupervisor,
+  trustedApprovalMode: () => trustedApprovalMode,
+  saveWorkspaceCredential,
+});
 
-
-
-
-
-
-/** Run one private cleanup request at most once and acknowledge only after
- * Chromium confirms its session data is gone. Duplicate retries join the
- * same promise; a retry whose success ACK was lost receives a cached ACK. */
-
-function syncPhoneSecretKey(proc) {
-  const message = phoneSecretPrivateKeyMessage(phoneSecretIdentity);
-  if (!message) return;
-  try {
-    proc.postMessage(message);
-  } catch (error) {
-    slog(`phone credential key sync failed: ${error?.message ?? error}`);
-  }
-}
-
-function installDesktopMutationHeader() {
-  session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
-    let ownsTarget = false;
-    try {
-      const target = new URL(details.url);
-      ownsTarget = serverReady && target.protocol === "http:" &&
-        target.hostname === "127.0.0.1" &&
-        Number(target.port || 80) === SERVER_PORT;
-    } catch {}
-    if (!ownsTarget) {
-      callback({ requestHeaders: details.requestHeaders });
-      return;
-    }
-    callback({
-      requestHeaders: {
-        ...details.requestHeaders,
-        [DESKTOP_MUTATION_HEADER]: desktopMutationToken,
-      },
-    });
-  });
-}
-
-const savePhoneSecretOnce = createPhoneSecretSaveCoordinator((target, value) =>
-  saveWorkspaceCredential(target, value),
-);
-
-function receivePhoneSecretSave(proc, rawMessage) {
-  const request = decodePhoneSecretSaveRequest(rawMessage);
-  if (!request) return false;
-  void savePhoneSecretOnce(request).then((result) => {
-    try {
-      proc.postMessage(result);
-    } catch (error) {
-      slog(`phone credential save result failed: ${error?.message ?? error}`);
-    }
-  });
-  return true;
-}
-
-async function startServerOn(port) {
-  if (desktopShutdownStarted) return { proc: null, abort: true };
-  const entry = path.join(process.resourcesPath, "server", "index.js");
-  const childEnv = managedComposioChildEnvironment(composioBrokerUrl(), secureCredentials, {
-    ...process.env,
-    // The desktop parent owns the durable data-directory lease. Each utility
-    // server gets only a private capability that validates that same live
-    // owner; fallback-port children must not race to replace the parent lease.
-    ...desktopDataDirLease.utilityServerLeaseEnvironment(),
-    OMB_DATA_DIR: desktopDataDir(),
-    // A packaged utility child must never fall back to a descriptor inherited
-    // from the launching shell. It starts fail-closed until this exact main
-    // process sends the private in-memory connection after spawn.
-    OMB_DESKTOP_PARENT: "1",
-    OMB_STATIC_DIR: path.join(process.resourcesPath, "ui"),
-    OMB_RESOURCES_PATH: process.resourcesPath,
-    OMB_SKILLS_DIR: path.join(process.resourcesPath, "skills"),
-    OMB_PORT: String(port),
-    // the server advertises this to remote clients so version skew is visible
-    OMB_APP_VERSION: app.getVersion(),
-    OMB_USER_DATA: app.getPath("userData"),
-    ...(secureCredentials.composioApiKey
-      ? { COMPOSIO_API_KEY: secureCredentials.composioApiKey }
-      : {}),
-    // "we could not read your keys" must not reach the UI as "you have none"
-    OMB_CREDENTIAL_STORE: credentialStoreUnavailable ? "unavailable" : "ok",
-    // one env var per stored workspace secret (xai/box/voice/OpenCode Go);
-    // the server prefers these over config.json, whose plaintext fields
-    // the boot migration has deleted
-    ...workspaceCredentialEnv(secureCredentials),
-  });
-  delete childEnv.OMB_BROWSER_CONNECTION;
-  slog(`fork ${entry} port=${port}`);
-  const proc = utilityProcess.fork(entry, [], {
-    env: childEnv,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let resolveServerExit;
-  utilityServerExits.set(proc, new Promise((resolve) => {
-    resolveServerExit = resolve;
-  }));
-  proc.stdout?.on("data", (d) => slog(`[out] ${String(d).trimEnd()}`));
-  proc.stderr?.on("data", (d) => slog(`[err] ${String(d).trimEnd()}`));
-  proc.on("message", (message) => {
-    if (!serverSupervisor.isCurrent(proc)) return;
-    try {
-      if (trustedApprovalMode.receive(proc, message)) return;
-      if (managedDesktopRelay.receive(proc, message)) return;
-      if (receivePhoneSecretSave(proc, message)) return;
-    } catch (error) {
-      slog(`desktop private sync rejected: ${error?.message ?? error}`);
-    }
-  });
-  proc.once("spawn", () => {
-    slog(`spawned pid=${proc.pid}`);
-    if (!serverSupervisor.isCurrent(proc)) return;
-    syncDesktopMutationToken(proc);
-    syncPhoneSecretKey(proc);
-  });
-  let exited = false;
-  proc.once("exit", (code) => {
-    exited = true;
-    trustedApprovalMode.rejectProcess(proc);
-    managedDesktopRelay.rejectProcess(proc);
-    resolveServerExit();
-    slog(`exited code=${code}`);
-  });
-  serverSupervisor.watch(proc);
-  // wait for the port to answer (fresh machine: first boot writes data dirs).
-  // Identity check is by PID: a dev harness server has the same API shape,
-  // so only the child we actually forked (matching pid + static serving)
-  // counts as ours.
-  // The budget is wall-clock, not a fixed poll count: a healthy boot can take
-  // well past 20s on cold machines or when pre-listen network calls stall
-  // (issue #506), and reaping an about-to-listen child reads to the user as
-  // "something else is using its ports" even though nothing was on them.
-  // The probe itself is deadline-bounded (a hung health endpoint cannot wedge
-  // us here forever) and reports WHY it gave up, so the error page can tell
-  // port conflict apart from slow startup.
-  const identity = await pollServerIdentity({
-    port,
-    // Getter, not value: proc.pid stays undefined until the async `spawn`
-    // event fires, and capturing it here would make the probe judge our own
-    // child a "foreign owner" on its first health answer.
-    pid: () => proc.pid,
-    bootTimeoutMs: SERVER_BOOT_TIMEOUT_MS,
-    isExited: () => exited || desktopShutdownStarted,
-  });
-  if (identity.outcome === "ready" && serverSupervisor.isCurrent(proc)) return { proc };
-  if (identity.outcome === "exited") {
-    slog(`child on port ${port} exited before answering /api/health`);
-  } else {
-    slog(
-      identity.outcome === "foreign-owner"
-        ? `port ${port} answered health checks from another process`
-        : `child on port ${port} did not answer /api/health within ${SERVER_BOOT_TIMEOUT_MS / 1000}s`,
-    );
-  }
-  const stopped = await stopUtilityServer(proc);
-  if (!stopped) {
-    slog(`child on port ${port} did not exit after termination; refusing to start a sibling server`);
-  }
-  return { proc: null, reason: stopped ? identity.outcome : "stuck-child", abort: !stopped };
-}
-
-async function startServerPackaged() {
-  // two passes: a quit-and-reopen relaunch can race the dying instance's
-  // server during teardown — one settle-and-retry covers it
-  let everyPortForeignOwned = true;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    for (const port of [8799, 18799, 28799]) {
-      if (desktopShutdownStarted) return false;
-      const started = await startServerOn(port);
-      if (started.proc) {
-        setServerPort(port);
-        if (serverSupervisor.ready(started.proc)) return true;
-      }
-      if (started.abort) return false;
-      // A child that exited or timed out is not evidence of a port conflict —
-      // only "another process answered health checks" is.
-      if (started.reason !== "foreign-owner") everyPortForeignOwned = false;
-    }
-    await new Promise((r) => setTimeout(r, 2500));
-  }
-  serverStartConflictOnly = everyPortForeignOwned;
-  return false;
-}
-
-function syncManagedComposioCredentials() {
-  if (!serverProc) return;
-  try {
-    serverProc.postMessage({
-      type: "openmausbot:managed-composio",
-      access: managedComposioAccess(composioBrokerUrl(), secureCredentials),
-    });
-  } catch (error) {
-    slog(`connected-apps credential sync failed: ${error?.message ?? error}`);
-  }
-}
-
-// How long one packaged-server child gets to answer /api/health before the
-// parent reaps it and tries the next port. Wall-clock, deliberately generous:
-// first boots write data dirs and pre-listen network calls (managed composio,
-// workspace credentials) can stall a healthy child far past 20s on some
-// machines, which used to surface as the misleading "ports are busy" page.
-const SERVER_BOOT_TIMEOUT_MS = 60_000;
-
-let cuaReady = Promise.resolve({ mode: "unavailable", reason: "not-started" });
-const androidDevice = createAndroidDeviceController({ resourcesPath: process.resourcesPath });
-const displayMediaGuard = createDisplayMediaGuard();
-let displayMediaRequestCount = 0;
-
-// environments.mjs reads these main-owned live bindings through getters —
-// cross-module let reads need the accessor boundary server-runtime.mjs
-// established for writes. desktopRemoteAccess and cuaReady are reassigned
-// by later regions of this file; the getters keep the moved code live.
+// environments.mjs reads these live bindings through getters — cross-module
+// let reads need the accessor boundary server-runtime.mjs established for
+// writes. desktopRemoteAccess is reassigned by later regions of this file;
+// cuaReady is owned by cua-media.mjs, and the getter keeps the moved code
+// live.
 wireEnvironmentsDeps({
   desktopRemoteAccess: () => desktopRemoteAccess,
   desktopMutationToken: () => desktopMutationToken,
-  cuaReady: () => cuaReady,
-});
-
-function respondToDisplayMediaRequest(callback, response) {
-  const error = invokeDisplayMediaCallback(callback, response);
-  // An empty response intentionally rejects the renderer request, and Electron
-  // can surface that rejection by throwing from the callback. A selected
-  // source should never fail delivery, so keep that path visible in logs.
-  if (error && response.video) {
-    console.error("[screen-preview] failed to deliver selected source:", error);
-  }
-}
-
-ipcMain.on("screen:preview-intent", localOnlySync("screen:preview-intent", (event) => {
-  event.returnValue = displayMediaGuard.begin(event.senderFrame);
-}));
-
-ipcMain.on("desktop:unread-count", (event, value) => {
-  const sender = BrowserWindow.fromWebContents(event.sender);
-  if (!sender || sender !== mainWindow || sender.isDestroyed()) return;
-  unreadCount = normalizeUnreadCount(value);
-  applyUnreadBadge(sender);
+  cuaReady: () => getCuaReady(),
 });
 
 /**
@@ -1316,7 +1061,7 @@ async function broadcastDesktopCapabilities() {
 }
 
 setCuaStateListener((connection) => {
-  cuaReady = Promise.resolve(connection);
+  setCuaReady(Promise.resolve(connection));
   void broadcastDesktopCapabilities().catch((error) => {
     console.error("[desktop] capability broadcast failed:", error);
   });
@@ -1364,7 +1109,7 @@ app.whenReady().then(async () => {
   if (process.platform === "darwin" || process.platform === "linux") {
     session.defaultSession.setDisplayMediaRequestHandler(
       (request, callback) => {
-        displayMediaRequestCount += 1;
+        bumpDisplayMediaRequestCount();
         if (!displayMediaGuard.consume(request, rendererOrigin())) {
           respondToDisplayMediaRequest(callback, {});
           return;
@@ -1414,13 +1159,14 @@ app.whenReady().then(async () => {
   // Start the CUA daemon before the window so the harness can pick up the
   // connection descriptor on first render. Never blocks window creation on
   // failure — computer use degrades to "unavailable", the rest still works.
-  cuaReady =
+  setCuaReady(
     !desktopRemoteAccess && (process.platform === "darwin" || process.platform === "linux" || process.platform === "win32")
       ? startCua().catch((e) => {
           console.error("[cua] start failed:", e);
           return { mode: "unavailable", reason: String(e) };
         })
-      : Promise.resolve({ mode: "unavailable", reason: "unsupported-platform" });
+      : Promise.resolve({ mode: "unavailable", reason: "unsupported-platform" }),
+  );
   if (desktopRemoteAccess) {
     try {
       desktopCompanionRelay = await startDesktopCompanionRelay({
