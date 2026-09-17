@@ -13,8 +13,7 @@
 import { homedir } from "node:os";
 
 import { stripWorkspaceCredentialEnv } from "../../config.ts";
-import { describeSpawnFailure, execCli, killCliTree, spawnCli } from "../../procs.ts";
-import { isHarnessOwnedMcpEnvName } from "../../mcp-registry.ts";
+import { describeSpawnFailure, killCliTree, spawnCli } from "../../procs.ts";
 
 import type {
   DriverCreateInput,
@@ -27,15 +26,11 @@ import type {
 import { newId } from "../../contracts.ts";
 import { decodeCodexSelection, readCodexModelCatalog, STATIC_CODEX_MODELS } from "../codex-catalog.ts";
 import {
-  additionalPermissionSummary,
   customApprovalParams,
-  grantedPermissions,
-  mcpAppApprovalForm,
   namedApprovalParams,
   type CodexApprovalParams,
 } from "../codex-approvals.ts";
 import { createDriverSessionRuntime, createRefreshModels } from "../driver-runtime.ts";
-import { codexLocalProviderArgs } from "../local-inject.ts";
 import { augmentedPath } from "../../env-path.ts";
 import { classifyError, computeBackoff, interruptibleDelay, RETRY_MAX_ATTEMPTS } from "../retry.ts";
 import { appendNative } from "../native.ts";
@@ -43,19 +38,34 @@ import { commandSummary, toolDetailPreview } from "../../tool-summary.ts";
 import { codexDeveloperInstructions, syncCodexInstructions } from "../codex-instructions.ts";
 import type { ApprovalMode } from "../../../shared/approval-mode.ts";
 import { CodexDeviceAuthController } from "../codex-device-auth.ts";
-import { codexAccountEmail } from "../codex-identity.ts";
 import { classifyResumeFailure, mayReplay, recoveryPromptFor } from "../../resume-recovery.ts";
 import { CodexRpcError, missingNativeCodexThread } from "./rpc.ts";
-import { codexAstraUpdate } from "./update.ts";
-import { type CodexConfig, decodeConfig, managedCodexArgs } from "./config.ts";
+import { type CodexConfig, decodeConfig } from "./config.ts";
 import { codexNativeIncomingLogMessage, codexNativeLogMessage, permissionProfileUnsupported } from "./logs.ts";
-import { mountMcpServer, noteSkippedSseServer } from "./mcp.ts";
+import { assertCompanyTurnAllowed, assertNoReservedMcpEnv, codexAppServerArgs } from "./launch.ts";
+import {
+  bundledQuestionResponse,
+  classifyServerRequest,
+  DENY_TIMEOUT_NOTE,
+  questionAnswersResult,
+  QUESTION_TIMEOUT_NOTE,
+  serverRequestChoices,
+  serverRequestResult,
+  serverRequestSummary,
+  serverRequestTool,
+  unsupportedServerRequestResponse,
+} from "./requests.ts";
+import { codexSnapshot } from "./snapshot.ts";
+import {
+  completedStopReason,
+  exitBeforeCompletedMessage,
+  itemStartedTitle,
+  normalizeTokenUsage,
+  turnUsageDelta,
+  usageUpdateFields,
+} from "./wire.ts";
 
 const DRIVER_KIND = "codex";
-
-const QUESTION_TIMEOUT_NOTE = "No answer was given — use your best judgment.";
-const DENY_TIMEOUT_NOTE =
-  "OpenMausBot: nobody answered this permission request in time. Skip this action and finish what you can without it.";
 
 export const CodexDriver: ProviderDriver<CodexConfig> = {
   driverKind: DRIVER_KIND,
@@ -123,22 +133,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
     const { emit, base } = runtime;
 
     const sendTurn = async (turn: SendTurnInput) => {
-      if (config.managed) {
-        // One blanket refusal hides which prerequisite broke; name it so the
-        // person can fix the actual gap instead of reconnecting blind.
-        if (!turn.model) {
-          throw new Error("Company model access is unavailable: no model is selected. Reconnect your organization; personal billing will not be used.");
-        }
-        if (!config.managed.models.includes(turn.model)) {
-          throw new Error("Company model access is unavailable: " + turn.model + " is not approved for your organization. Reconnect your organization; personal billing will not be used.");
-        }
-        if (!input.environment.OPENMAUSBOT_COMPANY_API_KEY) {
-          throw new Error("Company model access is unavailable: OPENMAUSBOT_COMPANY_API_KEY is missing. Reconnect your organization; personal billing will not be used.");
-        }
-        if (!input.environment.CODEX_HOME) {
-          throw new Error("Company model access is unavailable: CODEX_HOME is missing. Reconnect your organization; personal billing will not be used.");
-        }
-      }
+      assertCompanyTurnAllowed(config, turn, input.environment);
       // One driver instance serves many threads. Interrupt state belongs to
       // this turn so activity elsewhere cannot cancel or revive its retry.
       let stopRequested = false;
@@ -152,13 +147,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       // instance's legacy fullAuto setting. Harness turns always send an
       // explicit mode, which takes precedence.
       const approvalMode: ApprovalMode = turn.approvalMode ?? (config.fullAuto ? "full" : "ask");
-      for (const [name, server] of Object.entries(turn.integrations?.custom ?? {})) {
-        if ("url" in server) continue;
-        const reserved = Object.keys(server.env).find(isHarnessOwnedMcpEnvName);
-        if (reserved) {
-          throw new Error(`Custom MCP server “${name}” cannot set reserved environment variable “${reserved}”`);
-        }
-      }
+      assertNoReservedMcpEnv(turn);
       let autoAcceptPermissions = approvalMode === "full";
       // MCP servers this app-server process owns: the ones mounted below
       // with harness config, plus the app-server natively hosted app
@@ -183,42 +172,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
 
       const launchAttempt = async (attempt: number): Promise<void> => {
         const env = childEnv();
-        const appServerArgs = ["app-server", ...(config.managed ? managedCodexArgs(config.managed) : codexLocalProviderArgs(env, turn.model))];
-        if (turn.integrations?.composio) {
-          mountMcpServer(appServerArgs, env, "openmausbot_connectors", turn.integrations.composio);
-        }
-        if (turn.integrations?.agents) {
-          mountMcpServer(appServerArgs, env, "agents", turn.integrations.agents);
-        }
-        if (turn.integrations?.localComputer) {
-          // The host daemon and isolated Local VM both arrive as a direct Cua
-          // Driver stdio MCP server. Codex sees the same computer tool surface.
-          mountMcpServer(appServerArgs, env, "computer", turn.integrations.localComputer);
-        }
-        if (turn.integrations?.browser) {
-          mountMcpServer(appServerArgs, env, "browser", turn.integrations.browser);
-        }
-        for (const [name, server] of Object.entries(turn.integrations?.custom ?? {})) {
-          // codex speaks streamable HTTP to a remote server, not the older
-          // SSE transport: such an entry still reaches Claude bots, and is
-          // left out here rather than mounted as something it is not
-          if ("url" in server && server.type === "sse") {
-            noteSkippedSseServer(name);
-            continue;
-          }
-          mountMcpServer(appServerArgs, env, name, server, false);
-        }
-        if (turn.integrations?.phone) {
-          const bridge = turn.integrations.phone;
-          Object.assign(env, bridge.env);
-          const prefix = "mcp_servers.openmausbot_phone";
-          appServerArgs.push(
-            "-c", `${prefix}.command=${JSON.stringify(bridge.command)}`,
-            "-c", `${prefix}.args=${JSON.stringify(bridge.args)}`,
-            "-c", `${prefix}.env_vars=${JSON.stringify(Object.keys(bridge.env))}`,
-            "-c", `${prefix}.default_tools_approval_mode="auto"`,
-          );
-        }
+        const appServerArgs = codexAppServerArgs(config, turn, env);
 
         const child = spawnCli(config.cli, appServerArgs, {
           cwd: turn.cwd ?? homedir(),
@@ -394,34 +348,13 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       // local-computer-block backstop applies to remembered always-allows.
       const controlsHost = turn.integrations?.localComputer?.scope === "local-computer";
       const handleServerRequest = (msg: any) => {
-        const method = msg.method as string;
-        const params = msg.params ?? {};
-        const legacy = method === "execCommandApproval" || method === "applyPatchApproval";
-        const isMcpElicitation = method === "mcpServer/elicitation/request";
-        const isLegacyMcpPermission =
-          method === "mcpServer/elicitation/request" &&
-          params?._meta?.codex_approval_kind === "mcp_tool_call";
-        const mcpAppApproval = isMcpElicitation ? mcpAppApprovalForm(params) : null;
-        const isMcpPermission = isLegacyMcpPermission || mcpAppApproval !== null;
-        const isQuestion = method === "item/tool/requestUserInput";
-        const isAdditionalPermission = method === "item/permissions/requestApproval";
-        const isPermission = legacy || isMcpPermission || isAdditionalPermission ||
-          method === "item/commandExecution/requestApproval" ||
-          method === "item/fileChange/requestApproval";
+        const r = classifyServerRequest(msg);
         // A normal MCP elicitation is a form or URL asking for real user input,
         // not a permission. We cannot safely synthesize its structured answer.
         // Unknown future server requests also fail closed instead of being
         // mistaken for commands and accepted by Full Access.
-        if (!isQuestion && !isPermission) {
-          if (isMcpElicitation) {
-            send({ jsonrpc: "2.0", id: msg.id, result: { action: "decline" } });
-          } else {
-            send({
-              jsonrpc: "2.0",
-              id: msg.id,
-              error: { code: -32601, message: `Unsupported server request: ${method}` },
-            });
-          }
+        if (!r.isQuestion && !r.isPermission) {
+          send(unsupportedServerRequestResponse(r));
           return;
         }
         // One ask card carries one question honestly: its choices would come
@@ -429,93 +362,34 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         // timeout note) would be copied into every question id (#1237).
         // Refuse the bundled call with a teaching error instead of
         // fabricating per-question answers.
-        if (isQuestion && (!Array.isArray(params.questions) || params.questions.length !== 1)) {
-          const bundled = Array.isArray(params.questions) && params.questions.length > 1;
-          send({
-            jsonrpc: "2.0",
-            id: msg.id,
-            error: {
-              code: -32602,
-              message: bundled
-                ? `ask supports one question per call; this request bundled ${params.questions.length}. Split it into separate asks, one question each.`
-                : Array.isArray(params.questions)
-                ? "ask supports one question per call; this request sent none."
-                : "ask supports one question per call; params.questions must be an array with exactly one question.",
-            },
-          });
+        if (r.isQuestion && (!Array.isArray(r.params.questions) || r.params.questions.length !== 1)) {
+          send(bundledQuestionResponse(r));
           return;
         }
-        const mcpTool = isLegacyMcpPermission
-          ? String(params.message ?? "").match(/tool "([^"]+)"/)?.[1]
-          : undefined;
-        const tool =
-          mcpAppApproval
-            ? mcpAppApproval.tool
-            : isLegacyMcpPermission
-            ? (mcpTool ?? "mcp")
-            : isAdditionalPermission
-              ? "permissions"
-            : method === "item/fileChange/requestApproval" || method === "applyPatchApproval"
-            ? "edit"
-            : isQuestion
-              ? "ask_user"
-              : "shell";
-        const permissionResult = (allow: boolean) =>
-          isMcpPermission
-            ? allow
-              ? (mcpAppApproval?.allowResult ?? { action: "accept", content: {} })
-              : { action: "decline" }
-            : isAdditionalPermission
-              ? { permissions: allow ? grantedPermissions(params.permissions) : {}, scope: "turn" }
-              : { decision: allow ? (legacy ? "approved" : "accept") : legacy ? "denied" : "decline" };
+        const tool = serverRequestTool(r);
         const trustedMcpServer =
-          typeof params.serverName === "string" && trustedMcpServers.has(params.serverName);
+          typeof r.params.serverName === "string" && trustedMcpServers.has(r.params.serverName);
         // Full access auto-approves harness approvals, but an MCP elicitation
         // wins automatic approval only from an app-server-owned server name;
         // a custom server look-alike form goes to the person.
-        if (autoAcceptPermissions && isPermission && (!isMcpPermission || trustedMcpServer)) {
-          return send({
-            jsonrpc: "2.0",
-            id: msg.id,
-            result: permissionResult(true),
-          });
+        if (autoAcceptPermissions && r.isPermission && (!r.isMcpPermission || trustedMcpServer)) {
+          return send({ jsonrpc: "2.0", id: msg.id, result: serverRequestResult(r, true) });
         }
         const requestId = newId();
-        const summary =
-          isAdditionalPermission
-            ? additionalPermissionSummary(params.permissions, params.reason)
-            : isMcpPermission
-            ? (mcpAppApproval?.summary ?? (typeof params.message === "string" ? params.message : "MCP access requested"))
-            : typeof params.command === "string"
-            ? params.command
-            : Array.isArray(params.questions)
-              ? params.questions.map((q: any) => q.question ?? q.header).filter(Boolean).join(" · ")
-              : typeof params.reason === "string"
-                ? params.reason
-                : tool;
-        const choices = isQuestion
-          ? (params.questions?.[0]?.options ?? []).map((o: any) => o.label).slice(0, 5)
-          : undefined;
+        const summary = serverRequestSummary(r);
+        const choices = serverRequestChoices(r);
         const finish = (behavior: "allow" | "deny" | "answer", message?: string, source: "user" | "timeout" | "system" = "user") => {
           if (!asks.delete(requestId)) return;
           clearTimeout(timer);
-          if (isQuestion) {
-            const answers: Record<string, { answers: string[] }> = {};
-            for (const q of Array.isArray(params.questions) ? params.questions : []) {
-              answers[q.id] = { answers: [message || QUESTION_TIMEOUT_NOTE] };
-            }
-            send({ jsonrpc: "2.0", id: msg.id, result: { answers } });
+          if (r.isQuestion) {
+            send({ jsonrpc: "2.0", id: msg.id, result: questionAnswersResult(r, message) });
           } else {
-            send({
-              jsonrpc: "2.0",
-              id: msg.id,
-              result: permissionResult(behavior === "allow"),
-            });
+            send({ jsonrpc: "2.0", id: msg.id, result: serverRequestResult(r, behavior === "allow") });
           }
           emit({ ...base(threadId, turnId), type: "request.resolved", requestId, behavior, source });
         };
         const timer = setTimeout(
-          () => (isQuestion ? finish("answer", QUESTION_TIMEOUT_NOTE, "timeout") : finish("deny", DENY_TIMEOUT_NOTE, "timeout")),
+          () => (r.isQuestion ? finish("answer", QUESTION_TIMEOUT_NOTE, "timeout") : finish("deny", DENY_TIMEOUT_NOTE, "timeout")),
           15 * 60_000,
         );
         timer.unref?.();
@@ -524,12 +398,12 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           ...base(threadId, turnId),
           type: "request.opened",
           requestId,
-          requestType: isQuestion ? "question" : "permission",
+          requestType: r.isQuestion ? "question" : "permission",
           tool,
           summary,
           choices,
           approvalScope: controlsHost ? "local-computer" : undefined,
-          requiresExplicitApproval: isAdditionalPermission || undefined,
+          requiresExplicitApproval: r.isAdditionalPermission || undefined,
         });
       };
 
@@ -551,7 +425,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
             // turn before any model call, so a genuine first reading cannot
             // land here.)
             const t = p.tokenUsage.total;
-            state.usageBaseline = { input: t.inputTokens ?? 0, output: t.outputTokens ?? 0, cachedInput: t.cachedInputTokens ?? 0 };
+            state.usageBaseline = normalizeTokenUsage(t);
             return;
           }
           if (!codexTurnId) {
@@ -589,16 +463,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           }
           case "item/started": {
             const item = p.item ?? {};
-            const title =
-              item.type === "commandExecution"
-                ? String(item.command ?? "shell")
-                : item.type === "fileChange"
-                  ? "edit"
-                  : item.type === "mcpToolCall"
-                    ? (item.tool ?? item.name ?? "mcp")
-                    : item.type === "webSearch"
-                      ? "web_search"
-                      : null;
+            const title = itemStartedTitle(item);
             if (title) {
               emit({
                 ...base(threadId, turnId),
@@ -664,33 +529,18 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
             // can say how much was context re-read rather than new text.
             const t = p.tokenUsage?.total;
             const last = p.tokenUsage?.last;
-            const shape = (u: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number }) => ({
-              input: u.inputTokens ?? 0, output: u.outputTokens ?? 0, cachedInput: u.cachedInputTokens ?? 0,
-            });
             // (A total that arrived before this turn was named became the
             // baseline upstream and never reaches this switch.)
             if (t) {
-              const b = state.usageBaseline ?? { input: 0, output: 0, cachedInput: 0 };
-              const now = shape(t);
-              state.usage = {
-                input: Math.max(0, now.input - b.input),
-                output: Math.max(0, now.output - b.output),
-                ...(typeof t.cachedInputTokens === "number" ? { cachedInput: Math.max(0, now.cachedInput - b.cachedInput) } : {}),
-              };
+              state.usage = turnUsageDelta(t, state.usageBaseline);
             } else if (last) {
               state.usage = { input: last.inputTokens ?? 0, output: last.outputTokens ?? 0, ...(typeof last.cachedInputTokens === "number" ? { cachedInput: last.cachedInputTokens } : {}) };
             }
             if (t) {
-              const window = p.tokenUsage?.modelContextWindow;
               emit({
                 ...base(threadId, turnId),
                 type: "thread.token-usage.updated",
-                input: t.inputTokens ?? 0,
-                output: t.outputTokens ?? 0,
-                ...(typeof t.cachedInputTokens === "number" ? { cachedInput: t.cachedInputTokens } : {}),
-                // the last call's prompt is what fills the window
-                ...(last && typeof last.inputTokens === "number" ? { contextTokens: last.inputTokens } : {}),
-                ...(typeof window === "number" && window > 0 ? { contextWindow: window } : {}),
+                ...usageUpdateFields(t, last, p.tokenUsage?.modelContextWindow),
               });
             }
             break;
@@ -704,8 +554,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
                 ...(classifyError({ text: message }).reason === "auth" ? { setup: true } : {}),
               });
             }
-            void settle(t.status === "completed", t.status === "completed" ? null :
-              (classifyError({ text: message || state.lastError }).reason === "provider_safety" ? "provider_safety" : (message || t.status || "failed")));
+            void settle(t.status === "completed", completedStopReason(t, message, state.lastError));
             break;
           }
           case "error":
@@ -850,9 +699,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         emit({
           ...base(threadId, turnId),
           type: "runtime.error",
-          message: `codex exited ${code}${signal ? ` (signal ${signal})` : ""} before turn/completed${
-            recentStderr ? `: ${recentStderr.slice(-300)}` : hadStreamedOutput && stderr.trim() ? "; no stderr after the last app-server output" : ""
-          }`,
+          message: exitBeforeCompletedMessage(code, signal, recentStderr, hadStreamedOutput, stderr),
         });
         void settle(false, "exit_before_result");
       });
@@ -1057,33 +904,13 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
     return { turnId };
   };
 
-  const snapshot = async (): Promise<ProviderSnapshot> => {
-    const env = childEnv();
-    const version = await new Promise<string | null>((resolve) => {
-      execCli(config.cli, ["--version"], { timeout: 8000, env }, (err, stdout) =>
-        resolve(err ? null : stdout.trim()),
-      );
+  const snapshot = async (): Promise<ProviderSnapshot> =>
+    codexSnapshot({
+      config,
+      env: childEnv(),
+      companyAuthenticated: Boolean(input.environment.OPENMAUSBOT_COMPANY_API_KEY && input.environment.CODEX_HOME),
+      models: catalog.models,
     });
-    if (!version) return { state: "unavailable", reason: `\`${config.cli}\` CLI not found` };
-    if (config.managed) return { state: "available", version, authenticated: Boolean(input.environment.OPENMAUSBOT_COMPANY_API_KEY && input.environment.CODEX_HOME), billing: "metered" };
-    const authenticated = await new Promise<boolean>((resolve) => {
-      execCli(config.cli, ["login", "status"], { timeout: 8000, env }, (err, stdout, stderr) =>
-        resolve(!err && /^logged in\b/im.test(`${stdout}\n${stderr ?? ""}`)),
-      );
-    });
-    // Display identity only, so Settings can say whose ChatGPT account the
-    // bots run on; the status command above stays the authority on sign-in.
-    const email = authenticated ? await codexAccountEmail(config.cli, env) : null;
-    // childEnv drops OPENAI_API_KEY on purpose — turns run on the ChatGPT login
-    return {
-      state: "available",
-      version,
-      authenticated,
-      ...(email ? { account: { email } } : {}),
-      update: codexAstraUpdate(version, catalog.models, config.cli),
-      billing: "subscription",
-    };
-  };
 
   return {
     instanceId,
