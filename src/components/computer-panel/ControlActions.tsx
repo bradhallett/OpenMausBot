@@ -161,7 +161,7 @@ export function ControlActions({
               <button
                 onClick={() => onRun("sleep")}
                 // the server refuses sleep while a turn owns the box (409)
-                disabled={pending === "sleep" || profileBotBusy}
+                disabled={pending !== null || profileBotBusy}
                 className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-control px-3 py-2 text-[13px] text-ink hover:bg-raised-hover disabled:opacity-50"
                 title={t("computer.sleepTitle")}
               >
