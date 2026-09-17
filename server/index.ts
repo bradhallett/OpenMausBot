@@ -69,15 +69,14 @@ import {
   type UsageTrigger,
 } from "./usage-ledger.ts";
 import type { RequestAuth } from "./request-auth.ts";
-import { assertWithinBudget } from "./spend.ts";
 import { fleetAvailable, fleetRequest, fleetSocketPath } from "./fleet-client.ts";
 import { entitled } from "./enterprise.ts";
 import { HOSTED_CONTRACT_HEADER, HOSTED_CONTRACT_METADATA, HOSTED_CONTRACT_VERSION } from "./hosted-contract.ts";
 import type { Notification } from "./notify.ts";
-import type { RuntimeEvent, SteerOutcome } from "./contracts.ts";
+import type { RuntimeEvent } from "./contracts.ts";
 
 import type { CommsBus } from "./comms-visibility.ts";
-import { closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups } from "./message-db.ts";
+import { closeMessageDb, chatFollowups, settleChatFollowups } from "./message-db.ts";
 import { promptWithReply } from "./replies.ts";
 import {
   discardDelegations,
@@ -88,32 +87,25 @@ import {
   releaseDelegationsWaitingOn,
 } from "./delegations.ts";
 import {
-  cancelSteeredMessage,
   drainSteeredMessages,
-  holdSteeredQueue,
   onSteeredQueueChange,
-  queuedSteeredMessage,
   queuedThreadPosition,
   queueSteeredMessage,
-  restoreHeldSteeredQueue,
   restoreSteeredMessages,
-  settleHeldSteeredQueue,
 } from "./steer-queue.ts";
 import { restoreChannelMessages } from "./channel-queue.ts";
-import { acceptedSendMatch, parseSendId, sendFingerprint, SendSequencer } from "./send-idempotency.ts";
+import { SendSequencer } from "./send-idempotency.ts";
 import { EventBus } from "./harness/bus.ts";
 import { ManagedDesktopProviders } from "./managed-desktop.ts";
-import { cancelPeerApprovalsFor, dismissStalePeerCards, resolvePeerComms, type ApprovalBus } from "./peer-approval.ts";
+import { cancelPeerApprovalsFor, dismissStalePeerCards, type ApprovalBus } from "./peer-approval.ts";
 import { withPeerProvenance } from "./peer-provenance.ts";
 import {
-  isProjectEmoji,
   sectionKey,
   type BotRecord,
   type GroupDefaultResponder,
   type GroupRecord,
   type Message,
 } from "./store.ts";
-import { extractTurnImages } from "./turn-images.ts";
 import type { TurnOwner } from "./turn-resources.ts";
 import { isMemoryTopicName } from "./workspace.ts";
 import { readMemoryTopic } from "./workspace.ts";
@@ -171,7 +163,6 @@ import { listenWebhookIngress, type WebhookIngress } from "./webhook-ingress.ts"
 import { WebhookManager } from "./webhooks.ts";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 import { loadBundledSkills, loadUserSkills, mergeSkills } from "./skill-library.ts";
-import { parseSurface } from "./surface.ts";
 import { createDeferredResumes } from "./deferred-resumes.ts";
 import { createDelegationWatch } from "./delegation-watch.ts";
 import { createTurnIntegrations } from "./turn-integrations.ts";
@@ -224,10 +215,12 @@ import { createMcpRoutes } from "./routes/mcp.ts";
 import { createTtsRoutes } from "./routes/tts.ts";
 import { createConnectorRoutes } from "./routes/connectors.ts";
 import { createWebhookRoutes } from "./routes/webhooks.ts";
-import { createMessageRoutes, createRequirePinnedClientThread } from "./routes/messages.ts";
+import { createMessageRoutes } from "./routes/messages.ts";
 import { createTeamRoutes } from "./routes/teams.ts";
 import { createBotRoutes } from "./routes/bots.ts";
 import { createBotManagementRoutes } from "./routes/bot-management.ts";
+import { createBotThreadOpsRoutes } from "./routes/bot-thread-ops.ts";
+import { createBotTasksRoutes } from "./routes/bot-tasks.ts";
 import { createAuthSessionRoutes } from "./routes/auth-session.ts";
 import { createComputersRoutes } from "./routes/computers.ts";
 import { createSystemRoutes } from "./routes/system.ts";
@@ -243,7 +236,7 @@ import {
   revokeAllInternalCapabilities,
   revokeInternalCapabilitiesForThread,
 } from "./internal-capabilities.ts";
-import { answerRequest, closeOpenApprovals, requestBehavior } from "./turn-fold.ts";
+import { closeOpenApprovals } from "./turn-fold.ts";
 import {
   cfg,
   ENVIRONMENT_ID,
@@ -3386,6 +3379,45 @@ const handleBotManagement = createBotManagementRoutes({
   forgetTemporaryBrowser,
   deleteBotWithLifecycle,
 });
+const handleBotThreadOps = createBotThreadOpsRoutes({
+  routines: () => routines,
+  DESKTOP_MANAGED,
+  noteTurnTrigger,
+  sendSequencer,
+  resolveReplyTarget,
+  clearUnattended,
+  drainQueuedSends,
+  startOrQueueDirectMessage,
+  phoneSecretSubmissions,
+  startTurn,
+  resolveAndSendTeamSetup,
+  resolveAndSendRoutine,
+  resolveAndSendProfile,
+  resolveSkillRequest,
+  sendSkillResolution,
+  approvalBus,
+  interruptDirectThread,
+  cancelDirectTurnDispatch,
+  activeGroupTurnForBot,
+  cancelGroupTurnOperations,
+  runningTurnInstance,
+});
+const handleBotTasks = createBotTasksRoutes({
+  routines: () => routines,
+  broadcast,
+  wireBot,
+  wireTask,
+  DESKTOP_MANAGED,
+  phoneSecretSubmissions,
+  checkedModelSelection,
+  checkedTaskModelSwitch,
+  stagedSkillCleanupsForThread,
+  rejectDeletedThreadSkillStages,
+  roomHandoffs,
+  cancelTeamSetupResumesForThread,
+  settleDirectFollowup,
+  directTurnGenerationByThread,
+});
 const handleAuthSession = createAuthSessionRoutes({
   sessions,
   SESSION_COOKIE,
@@ -3822,7 +3854,6 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     // Paired sessions are authenticated above. The companion marker may
     // only narrow behavior (including its capability-free local dev proxy);
     // it never grants authority or replaces the existing request gate.
-    const requirePinnedClientThread = createRequirePinnedClientThread(auth, req);
     if (await handleMessages(req, res, rctx)) return;
 
     if (await handleTeams(req, res, rctx)) return;
@@ -4244,672 +4275,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       });
       return json(res, 200, { message: patched });
     }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/messages$/);
-    if (m && method === "POST") {
-      const body = await readBody(req);
-      if (!body || typeof body !== "object" || Array.isArray(body)) {
-        return json(res, 400, { error: "body must be a JSON object" });
-      }
-      const text = String(body.text ?? "").trim();
-      if (!text) return json(res, 400, { error: "text required" });
-      const bot = store.bot(m[1]);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      requirePinnedClientThread(bot.id, body.threadId);
-      if (body.threadId !== undefined && (typeof body.threadId !== "string" || !/^[\w-]+$/.test(body.threadId))) {
-        return json(res, 400, { error: "threadId must be a task id" });
-      }
-      // A retry carries its original task. That lets us return the canonical
-      // receipt after a task switch, while a genuinely new send still has to
-      // target the task that is active now.
-      const threadId = body.threadId ?? bot.threadId;
-      noteTurnTrigger(threadId, auth);
-      // The send is acknowledged before the turn starts, so a workspace at its
-      // spend limit is refused here, where the person can see it.
-      try {
-        assertWithinBudget(cfg, DATA_DIR);
-      } catch (error) {
-        return json(res, 409, { error: error instanceof Error ? error.message : String(error), code: "spend_cap" });
-      }
-      if (!store.taskByThread(bot.id, threadId)) {
-        return json(res, 409, { error: "the bot switched tasks before it could receive the message" });
-      }
-      const sendId = parseSendId(body.sendId);
-      const replyTo = resolveReplyTarget(threadId, body.replyToId);
-      const receipt = await sendSequencer.run(
-        sendId ? `bot:${bot.id}:${threadId}:${sendId}` : undefined,
-        sendFingerprint(text, replyTo?.id),
-        async () => {
-          if (sendId) {
-            if (cancelledChatFollowup("bot", bot.id, threadId, sendId)) {
-              throw Object.assign(new Error("this queued sendId was cancelled; send a new message to try again"), { status: 409 });
-            }
-            const accepted = acceptedSendMatch(store.messagesFor(threadId), sendId, text, replyTo?.id);
-            if (accepted.kind === "conflict") {
-              throw Object.assign(new Error("sendId already belongs to another message"), { status: 409 });
-            }
-            if (accepted.kind === "match") {
-              const canonical = {
-                ok: true as const,
-                threadId,
-                message: accepted.message,
-              };
-              return accepted.message.steered
-                ? { ...canonical, steered: true as const }
-                : canonical;
-            }
-            const queued = queuedSteeredMessage(bot.id, threadId, sendId);
-            if (queued) {
-              if (queued.text !== text || queued.replyToId !== replyTo?.id) {
-                throw Object.assign(new Error("sendId already belongs to another message"), { status: 409 });
-              }
-              return { ok: true as const, queued: true as const, queueId: queued.id, threadId, reason: queued.reason };
-            }
-          }
+    if (await handleBotThreadOps(req, res, rctx)) return;
 
-          const currentAtStart = store.projectBotForTask(bot.id, threadId);
-          if (!currentAtStart) throw Object.assign(new Error("no such bot"), { status: 404 });
-          if (!store.taskByThread(currentAtStart.id, threadId)) {
-            throw Object.assign(new Error("the target task no longer exists"), { status: 409 });
-          }
-
-          // Claude can accept the message inside its live turn. If the write
-          // loses a race with turn settlement, or the engine cannot steer, the
-          // existing server-side queue records it atomically for the next turn.
-          if (currentAtStart.busy) {
-            const instance = runningTurnInstance(currentAtStart, threadId);
-            let steered: SteerOutcome = "refused";
-            // A live text steer has no image side channel. Keep an attachment
-            // message intact for the next ordinary turn, where central image
-            // admission can hand it to the provider natively.
-            const carriesImages = extractTurnImages(text).images.length > 0;
-            if (!carriesImages && !computerSelectionTurns.get(threadId)?.selected && instance?.adapter.capabilities.queueing && instance.adapter.steer) {
-              steered = await instance.adapter
-                .steer(threadId, promptWithReply(text, replyTo, cfg.profile?.name?.trim() || "User"))
-                .catch((): SteerOutcome => "indeterminate");
-            }
-            // steer() is awaited adapter work. The turn can settle, the task can
-            // switch, or the whole bot can be deleted before its acknowledgement
-            // arrives. Re-read every ownership invariant before appending even a
-            // successful steer; otherwise that late acknowledgement writes a user
-            // message into a task the bot no longer owns. A conflict leaves the
-            // text in the client's composer/outbox to resend deliberately.
-            const current = store.projectBotForTask(bot.id, threadId);
-            if (!current) throw Object.assign(new Error("no such bot"), { status: 404 });
-            if (!store.taskByThread(bot.id, threadId)) {
-              throw Object.assign(new Error("the target task no longer exists"), { status: 409 });
-            }
-            const delivered = steered !== "refused";
-            if (delivered) {
-              if (steered === "steered" && !current.busy) {
-                throw Object.assign(
-                  new Error("the running turn ended before the steered message could be recorded"),
-                  { status: 409 },
-                );
-              }
-              // "indeterminate" falls through to the same record: the words
-              // may already be folded into a turn whose acknowledgement was
-              // lost, and handing them back for a resend could run them
-              // twice. Recording them once is the honest outcome.
-              // A person steering a webhook turn is present, and auto mode may
-              // follow them again. But this route is also reachable from the
-              // bot's own shell on a headless server (loopback is the owner
-              // there), and "continue" typed by the turn itself must not be
-              // the thing that lifts the block written against it — so only
-              // a request that proves a person (a paired session, or the
-              // desktop's owner capability, which every mutation there has
-              // already shown) clears the mark.
-              if (auth.kind === "session" || DESKTOP_MANAGED) clearUnattended(threadId);
-              const message = store.appendMessage(threadId, {
-                role: "user",
-                kind: "text",
-                text,
-                replyToId: replyTo?.id,
-                sendId,
-                steered: true,
-              });
-              return { ok: true as const, steered: true as const, threadId, message };
-            }
-            if (!current.busy) {
-              return startOrQueueDirectMessage(bot.id, threadId, text, replyTo, sendId);
-            }
-            const queued = queueSteeredMessage(current.id, threadId, text, {
-              replyToId: replyTo?.id,
-              sendId,
-              prompt: promptWithReply(text, replyTo, cfg.profile?.name?.trim() || "User"),
-            });
-            return { ok: true as const, queued: true as const, queueId: queued.id, threadId };
-          }
-          return startOrQueueDirectMessage(bot.id, threadId, text, replyTo, sendId);
-        },
-      );
-      return json(res, 202, receipt);
-    }
-
-    m = path.match(/^\/api\/bots\/([\w-]+)\/queue\/([\w-]+)$/);
-    if (m && method === "DELETE") {
-      const body = await readBody(req);
-      requirePinnedClientThread(m[1], body?.threadId);
-      const bot = requestedTaskBot(m[1], body?.threadId);
-      const queueId = m[2];
-      if (!cancelSteeredMessage(bot.id, queueId, bot.threadId)) {
-        return json(res, 404, { error: "no such queued message" });
-      }
-      return json(res, 200, { ok: true });
-    }
-
-    // Steer a queued message into the RUNNING turn (no interrupt). Engines
-    // without a live steer keep the queue; this never ends the current turn.
-    m = path.match(/^\/api\/bots\/([\w-]+)\/queue\/([\w-]+)\/steer$/);
-    if (m && method === "POST") {
-      const body = await readBody(req);
-      requirePinnedClientThread(m[1], body?.threadId);
-      const bot = requestedTaskBot(m[1], body?.threadId);
-      noteTurnTrigger(bot.threadId, auth);
-      // Lift the whole queue atomically: a settle racing this request can
-      // drain it as a follow-up, or this request can steer it into the live
-      // turn — never both for the same words.
-      const held = holdSteeredQueue(bot.id, bot.threadId, m[2]);
-      if (!held) return json(res, 404, { error: "no such queued message" });
-      // A live steer has no image side channel. Attachment words wait for a
-      // real turn where central admission can hand the images to the engine.
-      if (held.items.some((item) => extractTurnImages(item.text).images.length > 0)) {
-        restoreHeldSteeredQueue(held);
-        return json(res, 200, { ok: true, queued: true, threadId: bot.threadId });
-      }
-      const currentAtStart = store.projectBotForTask(bot.id, bot.threadId);
-      const instance = currentAtStart?.busy ? runningTurnInstance(currentAtStart, bot.threadId) : undefined;
-      const prompt = held.items.map((item) => item.prompt).join("\n\n");
-      let steered: SteerOutcome = "refused";
-      if (currentAtStart?.busy && instance?.adapter.capabilities.queueing && instance.adapter.steer) {
-        steered = await instance.adapter
-          .steer(bot.threadId, prompt)
-          .catch((): SteerOutcome => "indeterminate");
-      }
-      // The steer was awaited adapter work: re-read every ownership
-      // invariant before writing anything, exactly like the live-send path.
-      const current = store.projectBotForTask(bot.id, bot.threadId);
-      // "indeterminate" never restores: the words may already be folded into
-      // the turn that was live when they were sent, and replaying them into
-      // a fresh follow-up turn would run them twice. Record them whenever
-      // the destination still exists, busy or not.
-      if (
-        (steered === "steered" && current?.busy ||
-          steered === "indeterminate" && current) &&
-        store.taskByThread(bot.id, bot.threadId)
-      ) {
-        if (auth.kind === "session" || DESKTOP_MANAGED) clearUnattended(bot.threadId);
-        const messages = held.items.map((item) => store.appendMessage(bot.threadId, {
-          role: "user",
-          kind: "text",
-          text: item.text,
-          replyToId: item.replyToId,
-          sendId: item.sendId,
-          queueId: item.messageId,
-          peerAsk: item.peerAsk,
-          steered: true,
-        }));
-        const queueIds = held.items.map((item) => item.messageId);
-        settleHeldSteeredQueue(held);
-        return json(res, 200, { ok: true, steered: true, threadId: bot.threadId, messages, queueIds });
-      }
-      if (steered === "indeterminate") {
-        // No destination is left: settle so a restart cannot replay words a
-        // dead turn may already have run.
-        settleHeldSteeredQueue(held);
-        if (!store.taskByThread(bot.id, bot.threadId)) {
-          throw Object.assign(new Error("the target task no longer exists"), { status: 409 });
-        }
-        throw Object.assign(new Error("no such bot"), { status: 404 });
-      }
-      restoreHeldSteeredQueue(held);
-      // The turn may have settled while the steer was refused; a queue that
-      // is now drainable must not strand behind a missed settle.
-      if (current && !current.busy) drainQueuedSends();
-      return json(res, 200, { ok: true, queued: true, threadId: bot.threadId });
-    }
-
-    // edit a user message → fork the conversation there and rerun the turn.
-    // Rewinding a live thread is refused, exactly like switching versions
-    // below: interrupting mid-flight and branching under the dying turn is
-    // how a conversation ends up with two tails. Stop, then edit.
-    m = path.match(/^\/api\/bots\/([\w-]+)\/messages\/([\w-]+)\/edit$/);
-    if (m && method === "POST") {
-      const messageId = m[2];
-      const body = await readBody(req);
-      requirePinnedClientThread(m[1], body?.threadId);
-      const bot = requestedTaskBot(m[1], body.threadId);
-      const text = String(body.text ?? "").trim();
-      if (!text) return json(res, 400, { error: "text required" });
-      // everything from here down is synchronous, so two racing edits can
-      // never both get past this check: startTurn flips busy before the
-      // next request is handled
-      if (threadBusy(bot.id, bot.threadId)) return json(res, 409, { error: "the thread is working — stop it before editing" });
-      if (phoneSecretSubmissions.hasThread(bot.threadId)) {
-        return json(res, 409, { error: "this task is securely saving a credential — try again when it finishes" });
-      }
-      const source = store.messagesFor(bot.threadId).find((msg) => msg.id === messageId);
-      if (!source || source.role !== "user" || source.kind !== "text") {
-        return json(res, 404, { error: "only user messages can be edited" });
-      }
-      if (!registry.get(bot.modelSelection.instanceId)) {
-        return json(res, 409, {
-          error: `provider instance "${bot.modelSelection.instanceId}" is unavailable — pick another model in settings`,
-        });
-      }
-      // startTurn admits the rerun before branching. A shared-resource or
-      // concurrency-limit refusal must leave the original transcript intact.
-      const replyTo = source.replyToId ? resolveReplyTarget(bot.threadId, source.replyToId) : undefined;
-      const message = await startTurn(bot.id, text, { threadId: bot.threadId, editedMessageId: messageId, replyTo });
-      return json(res, 202, { ok: true, message });
-    }
-
-    // switch which fork of the conversation is visible (no new turn)
-    m = path.match(/^\/api\/bots\/([\w-]+)\/active-branch$/);
-    if (m && method === "POST") {
-      const body = await readBody(req);
-      requirePinnedClientThread(m[1], body?.threadId);
-      const bot = requestedTaskBot(m[1], body.threadId);
-      if (threadBusy(bot.id, bot.threadId)) return json(res, 409, { error: "the thread is working — stop it before switching versions" });
-      if (phoneSecretSubmissions.hasThread(bot.threadId)) {
-        return json(res, 409, { error: "this task is securely saving a credential — try again when it finishes" });
-      }
-      const leaf = store.setActiveLeaf(bot.threadId, String(body.messageId ?? ""));
-      if (!leaf) return json(res, 404, { error: "no such message" });
-      // provider sessions still hold the other branch — next turn replays
-      store.patchTask(bot.id, bot.threadId, { rewound: true });
-      return json(res, 200, { activeLeafId: leaf });
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/respond$/);
-    if (m && method === "POST") {
-      const body = await readBody(req);
-      const selected = requestedTaskBot(m[1], body.threadId);
-      const bot = botForThread(selected.id, selected.threadId)!;
-      const behavior = requestBehavior(body.behavior);
-      const reviewedSha256 = typeof body.reviewedSha256 === "string" ? body.reviewedSha256 : undefined;
-      if (!behavior) return json(res, 400, { error: "behavior must be allow, deny, or answer" });
-      if (await resolveAndSendTeamSetup(res, {
-        botId: bot.id, threadId: bot.threadId, requestId: String(body.requestId), behavior,
-      }, auth.kind === "loopback" ? DESKTOP_MANAGED || Boolean(req.headers.origin) && !store.bots.some((bot) => bot.busy || activeGroupTurnForBot(bot.id)) : auth.scopes.includes("admin"))) return;
-      if (resolveAndSendRoutine(res, {
-        botId: bot.id,
-        botName: bot.name,
-        threadId: bot.threadId,
-        requestId: String(body.requestId),
-        behavior,
-      })) return;
-      if (resolveAndSendProfile(res, {
-        botId: bot.id,
-        botName: bot.name,
-        threadId: bot.threadId,
-        requestId: String(body.requestId),
-        behavior,
-      })) return;
-      if (sendSkillResolution(res, resolveSkillRequest({
-        botId: bot.id,
-        botName: bot.name,
-        threadId: bot.threadId,
-        requestId: String(body.requestId),
-        behavior,
-        reviewedSha256,
-      }))) return;
-      // peer-approval intercept: harness-native cards carry a requestId
-      // that lives in peer-approval's pending map. Resolve them here so
-      // the provider adapter never sees a request it didn't raise.
-      if (store.messagesFor(bot.threadId).some((message) => message.card?.requestId === String(body.requestId)) &&
-        resolvePeerComms(approvalBus, String(body.requestId), behavior)) {
-        return json(res, 200, { ok: true, outcome: behavior === "allow" ? "allowed-once" : "rejected" });
-      }
-      const outcome = await answerRequest(bot.threadId, bot.modelSelection.instanceId, String(body.requestId), behavior, body.message, { id: bot.id, name: bot.name }, body.always === true);
-      return json(res, 200, { ok: true, outcome });
-    }
-    // Answer by THREAD, so a request raised inside a room can be answered
-    // too: a member's turn runs on the room's thread, and the bot that
-    // owns the pending request is the one currently speaking there.
-    m = path.match(/^\/api\/threads\/([\w-]+)\/respond$/);
-    if (m && method === "POST") {
-      const threadId = m[1];
-      const body = await readBody(req);
-      const behavior = requestBehavior(body.behavior);
-      const reviewedSha256 = typeof body.reviewedSha256 === "string" ? body.reviewedSha256 : undefined;
-      if (!behavior) return json(res, 400, { error: "behavior must be allow, deny, or answer" });
-      const requestId = String(body.requestId);
-      const skillCard = store.messagesFor(threadId).find(
-        (message) => message.card?.requestId === requestId && message.card.skillRequest,
-      );
-      if (skillCard?.card?.skillRequest) {
-        const skillBotId = skillCard.from?.botId ?? store.botByThread(threadId)?.id;
-        if (!skillBotId) return json(res, 400, { error: "this skill request has no valid owner" });
-        const skillOwner = store.bot(skillBotId);
-        if (sendSkillResolution(res, resolveSkillRequest({
-          botId: skillBotId,
-          botName: skillOwner?.name,
-          threadId,
-          requestId,
-          behavior,
-          reviewedSha256,
-        }))) return;
-      }
-      const routineCard = store.messagesFor(threadId).find(
-        (message) => message.card?.requestId === requestId && message.card.routineRequest,
-      );
-      if (routineCard?.card?.routineRequest) {
-        // Derive the owner from the conversation, not from the executable
-        // payload being authorized. Room cards carry their trusted sender;
-        // one-to-one tasks resolve through the store's thread ownership.
-        const routineBotId = routineCard.from?.botId ?? store.botByThread(threadId)?.id;
-        if (!routineBotId) return json(res, 400, { error: "this routine request has no valid owner" });
-        const routineOwner = store.bot(routineBotId);
-        if (resolveAndSendRoutine(res, {
-          botId: routineBotId,
-          botName: routineOwner?.name,
-          threadId,
-          requestId,
-          behavior,
-        })) return;
-      }
-      const setupCard = store.messagesFor(threadId).find((message) => message.card?.requestId === requestId && message.card.teamSetupRequest);
-      if (setupCard) {
-        const setupBotId = setupCard.from?.botId ?? store.botByThread(threadId)?.id;
-        if (!setupBotId) return json(res, 400, { error: "This team setup has no valid owner" });
-        if (await resolveAndSendTeamSetup(res, { botId: setupBotId, threadId, requestId, behavior },
-          auth.kind === "loopback" ? DESKTOP_MANAGED || Boolean(req.headers.origin) && !store.bots.some((bot) => bot.busy || activeGroupTurnForBot(bot.id)) : auth.scopes.includes("admin"))) return;
-      }
-      const profileCard = store.messagesFor(threadId).find(
-        (message) => message.card?.requestId === requestId && message.card.profileRequest,
-      );
-      if (profileCard?.card?.profileRequest) {
-        const profileBotId = profileCard.from?.botId ?? store.botByThread(threadId)?.id;
-        if (!profileBotId) return json(res, 400, { error: "this profile request has no valid owner" });
-        const profileOwner = store.bot(profileBotId);
-        if (resolveAndSendProfile(res, {
-          botId: profileBotId,
-          botName: profileOwner?.name,
-          threadId,
-          requestId,
-          behavior,
-        })) return;
-      }
-      // peer-approval intercept (see /api/bots/:id/respond above). A peer card
-      // belongs to the bus rather than to a speaker, so resolve it before we go
-      // looking for one — a room between turns has no speaker to find.
-      if (store.messagesFor(threadId).some((message) => message.card?.requestId === requestId) &&
-        resolvePeerComms(approvalBus, requestId, behavior)) {
-        return json(res, 200, { ok: true, outcome: behavior === "allow" ? "allowed-once" : "rejected" });
-      }
-      const group = store.groupByThread(threadId);
-      // busyBotId is in-memory only, so an approval that outlives its turn — or
-      // the process — leaves a durable card with no speaker behind it. Fall back
-      // to the member that raised it, and answer even when that member is gone:
-      // answerRequest closes an unreachable card, and a pending approval owns
-      // the composer, so a dead end here locks the room for good.
-      const pending = store.messagesFor(threadId).find((message) => message.card?.requestId === requestId);
-      const owner = group
-        ? (group.busyBotId ? store.bot(group.busyBotId) : undefined) ??
-          (pending?.from ? store.bot(pending.from.botId) : undefined)
-        : store.botByThread(threadId);
-      if (!owner && !pending) return json(res, 404, { error: "nothing is waiting on an answer in this conversation" });
-      const requestOwner = owner ? botForThread(owner.id, threadId) : null;
-      const outcome = await answerRequest(threadId, requestOwner?.modelSelection.instanceId ?? "", requestId, behavior, body.message, owner ? { id: owner.id, name: owner.name } : undefined, body.always === true);
-      return json(res, 200, { ok: true, outcome });
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/interrupt$/);
-    if (m && method === "POST") {
-      const bot = store.bot(m[1]);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      const rawBody = await readBody(req);
-      if (rawBody !== null && (typeof rawBody !== "object" || Array.isArray(rawBody))) {
-        return json(res, 400, { error: "body must be a JSON object" });
-      }
-      const body = rawBody ?? {};
-      requirePinnedClientThread(bot.id, body.threadId);
-      const expectedThreadId = body.threadId;
-      if (expectedThreadId !== undefined && (typeof expectedThreadId !== "string" || !/^[\w-]+$/.test(expectedThreadId))) {
-        return json(res, 400, { error: "threadId must be a task id" });
-      }
-      // Explicit thread targets never fall through to another routine or
-      // channel just because it belongs to the same bot.
-      if (typeof expectedThreadId === "string" && store.taskByThread(bot.id, expectedThreadId)) {
-        const routine = routines!.activeBotRunForBot(bot.id);
-        if (routine?.threadId === expectedThreadId) await routines!.cancelRun(routine.id);
-        else await interruptDirectThread(bot.id, expectedThreadId);
-        return json(res, 200, { ok: true });
-      }
-      const directClaim = directTurnDispatchClaims.get(bot.threadId);
-      const routineRun = routines!.activeBotRunForBot(bot.id);
-      if (routineRun) {
-        if (expectedThreadId !== undefined && routineRun.threadId !== expectedThreadId) {
-          return json(res, 409, { error: "this bot is running a routine in another conversation" });
-        }
-        cancelDirectTurnDispatch(bot.id, routineRun.threadId ?? expectedThreadId);
-        if (routineRun.threadId) {
-          revokeInternalCapabilitiesForThread(routineRun.threadId);
-        }
-        await routines!.cancelRun(routineRun.id);
-        return json(res, 200, { ok: true });
-      }
-      const instance = registry.get((botForThread(bot.id, expectedThreadId ?? bot.threadId) ?? bot).modelSelection.instanceId);
-      // a bot busy in a ROOM is running on the room's thread — stopping it
-      // from its own chat must reach that turn, not just the 1:1 thread
-      const busyGroup = activeGroupTurnForBot(bot.id);
-      if (busyGroup) {
-        if (expectedThreadId !== undefined && busyGroup.threadId !== expectedThreadId) {
-          return json(res, 409, { error: `this bot is working in channel ${busyGroup.group.name}` });
-        }
-        cancelGroupTurnOperations(busyGroup.group.id, busyGroup.threadId);
-        revokeInternalCapabilitiesForThread(busyGroup.threadId);
-        await instance?.adapter.interruptTurn(busyGroup.threadId).catch(() => {});
-        closeOpenApprovals(busyGroup.threadId);
-        return json(res, 200, { ok: true });
-      }
-      if (
-        expectedThreadId !== undefined &&
-        !busyGroup &&
-        bot.threadId !== expectedThreadId &&
-        directClaim?.threadId !== expectedThreadId
-      ) {
-        return json(res, 409, { error: "the bot switched tasks before it could be interrupted" });
-      }
-      await interruptDirectThread(bot.id, expectedThreadId ?? bot.threadId);
-      return json(res, 200, { ok: true });
-    }
-
-    // ── tasks: a bot's separate contexts ────────────────────────────────
-    // The bot record answers with its messages because switching tasks
-    // changes which transcript is live, and a partial patch would leave
-    // the client showing the previous task's conversation.
-    const botWithThread = (bot: NonNullable<ReturnType<typeof store.bot>>) => ({
-      ...wireBot(bot),
-      messages: store.messagesFor(bot.threadId),
-      activeLeafId: store.activeLeaf(bot.threadId),
-      tasks: store.tasks(bot.id).map(wireTask),
-    });
-
-    // Folders organize one bot's threads; they never own settings,
-    // transcripts or working directories. The project wire names stay stable.
-    m = path.match(/^\/api\/bots\/([\w-]+)\/projects\/order$/);
-    if (m && method === "PATCH") {
-      const bot = store.bot(m[1]);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      const body = await readBody(req);
-      if (!body || typeof body !== "object" || Array.isArray(body) ||
-        Object.keys(body).some((key) => key !== "projectIds") ||
-        !Array.isArray(body.projectIds) || body.projectIds.some((id: unknown) => typeof id !== "string")) {
-        return json(res, 400, { error: "projectIds must be an array of folder IDs" });
-      }
-      const projects = store.reorderProjects(bot.id, body.projectIds);
-      if (!projects) return json(res, 400, { error: "projectIds must include each of this bot's folders exactly once" });
-      return json(res, 200, { projects, bot: botWithThread(bot) });
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/projects(?:\/([\w-]+))?$/);
-    if (m && ((method === "POST" && !m[2]) || (method === "PATCH" && m[2]) || (method === "DELETE" && m[2]))) {
-      const bot = store.bot(m[1]);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      if (m[2] && !store.project(bot.id, m[2])) return json(res, 404, { error: "no such folder" });
-      if (method === "DELETE") {
-        const updated = store.deleteProject(bot.id, m[2]!);
-        return json(res, 200, { bot: botWithThread(updated!) });
-      }
-      const body = await readBody(req);
-      if (!body || typeof body !== "object" || Array.isArray(body)) return json(res, 400, { error: "body must be a JSON object" });
-      if (Object.keys(body).some((key) => key !== "name" && key !== "emoji")) {
-        return json(res, 400, { error: "unsupported folder setting" });
-      }
-      if ((method === "POST" || body.name !== undefined) &&
-        (typeof body.name !== "string" || !body.name.trim() || body.name.trim().length > 80)) {
-        return json(res, 400, { error: "folder name must be between 1 and 80 characters" });
-      }
-      if (body.emoji !== undefined && body.emoji !== null && !isProjectEmoji(body.emoji)) {
-        return json(res, 400, { error: "folder emoji must be one emoji, or null to reset it" });
-      }
-      const patch: Parameters<typeof store.patchProject>[2] = {};
-      if (body.name !== undefined) patch.name = body.name.trim();
-      if (body.emoji !== undefined) patch.emoji = body.emoji;
-      const project = method === "POST"
-        ? store.createProject(bot.id, patch.name!, patch.emoji)
-        : store.patchProject(bot.id, m[2]!, patch);
-      return json(res, method === "POST" ? 201 : 200, { project, bot: botWithThread(bot) });
-    }
-
-    m = path.match(/^\/api\/bots\/([\w-]+)\/tasks$/);
-    if (m && method === "POST") {
-      const body = await readBody(req);
-      const bot = store.bot(m[1]);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      if (phoneSecretSubmissions.hasBot(bot.id)) {
-        return json(res, 409, { error: "this bot is securely saving a credential — try again when it finishes" });
-      }
-      if (body.projectId !== undefined && (typeof body.projectId !== "string" || !store.project(bot.id, body.projectId))) {
-        return json(res, 400, { error: "projectId must belong to this bot" });
-      }
-      const task = store.createTask(bot.id, typeof body.title === "string" ? body.title : undefined, true, body.projectId);
-      if (!task) return json(res, 500, { error: "couldn't create that task" });
-      const fresh = botWithThread(store.bot(bot.id)!);
-      broadcast({ kind: "bot", bot: fresh });
-      return json(res, 201, { bot: fresh, task: wireTask(task) });
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/tasks\/([\w-]+)$/);
-    if (m && method === "POST") {
-      const bot = store.bot(m[1]);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      if (phoneSecretSubmissions.hasBot(bot.id)) {
-        return json(res, 409, { error: "this bot is securely saving a credential — try again when it finishes" });
-      }
-      // Navigation only: execution owns its thread, never this selected id.
-      const switched = store.switchTask(bot.id, m[2]);
-      if (!switched) return json(res, 404, { error: "no such task" });
-      const fresh = botWithThread(switched);
-      broadcast({ kind: "bot", bot: fresh });
-      const responseBot = url.searchParams.get("messages") === "0"
-        ? { ...wireBot(switched), tasks: store.tasks(switched.id).map(wireTask) }
-        : fresh;
-      return json(res, 200, { bot: responseBot });
-    }
-    if (m && method === "PATCH") {
-      const body = await readBody(req);
-      if (!body || typeof body !== "object" || Array.isArray(body)) return json(res, 400, { error: "body must be a JSON object" });
-      const current = store.projectBotForTask(m[1], m[2]);
-      if (!current) return json(res, 404, { error: "no such task" });
-      const allowed = new Set(["title", "projectId", "modelSelection", "updateBotDefault", "resetApprovalToAsk", "approvalMode", "autoApprove", "requireAvailableModel", "pinnedMessageId", "acknowledgeLocalAuto", "archivedAt", "surface"]);
-      if (Object.keys(body).some((key) => !allowed.has(key))) return json(res, 400, { error: "unsupported thread setting" });
-      for (const key of ["requireAvailableModel", "acknowledgeLocalAuto", "updateBotDefault", "resetApprovalToAsk"] as const) {
-        if (body[key] !== undefined && typeof body[key] !== "boolean") return json(res, 400, { error: `${key} must be a boolean` });
-      }
-      if (body.requireAvailableModel === true && body.modelSelection === undefined) return json(res, 400, { error: "requireAvailableModel requires modelSelection" });
-      if (body.updateBotDefault === true && body.modelSelection === undefined) return json(res, 400, { error: "updateBotDefault requires modelSelection" });
-      if (body.resetApprovalToAsk === true && (body.modelSelection === undefined ||
-        (body.approvalMode !== undefined && body.approvalMode !== "ask") || body.autoApprove === true)) {
-        return json(res, 400, { error: "resetApprovalToAsk requires a model selection and cannot be combined with another approval mode" });
-      }
-      const patch: Parameters<typeof store.patchTask>[2] = {};
-      if (body.projectId !== undefined) {
-        if (body.projectId === null) patch.projectId = undefined;
-        else if (typeof body.projectId === "string" && store.project(current.id, body.projectId)) patch.projectId = body.projectId;
-        else return json(res, 400, { error: "projectId must belong to this bot, or null to ungroup the thread" });
-      }
-      if (body.title !== undefined) {
-        if (typeof body.title !== "string") return json(res, 400, { error: "title must be a string" });
-        patch.title = body.title;
-      }
-      if (body.archivedAt !== undefined) {
-        if (body.archivedAt === null) patch.archivedAt = undefined;
-        else if (typeof body.archivedAt === "number" && Number.isFinite(body.archivedAt) && body.archivedAt >= 0) patch.archivedAt = body.archivedAt;
-        else return json(res, 400, { error: "archivedAt must be a timestamp, or null to unarchive" });
-      }
-      if (body.surface !== undefined) {
-        if (threadBusy(current.id, current.threadId)) return json(res, 409, { error: "Stop this thread before changing its computer destination." });
-        // Where this conversation works, chosen from the composer. Null follows
-        // the bot's Works on again. Reachability is the turn's to judge.
-        if (body.surface === null) patch.surface = undefined;
-        else if (parseSurface(body.surface)) patch.surface = parseSurface(body.surface);
-        else return json(res, 400, { error: "surface must be cloud, vm, local, browser, or null to follow the bot" });
-      }
-      if (body.pinnedMessageId !== undefined) {
-        if (body.pinnedMessageId === null || body.pinnedMessageId === "") patch.pinnedMessageId = undefined;
-        else if (typeof body.pinnedMessageId === "string" && store.messagesFor(current.threadId).some((message) => message.id === body.pinnedMessageId)) patch.pinnedMessageId = body.pinnedMessageId;
-        else return json(res, 400, { error: "pinnedMessageId must belong to this thread" });
-      }
-      if (body.modelSelection !== undefined) {
-        if (current.approvalGrant) return json(res, 409, { error: "the bot's approval mode is still being confirmed" });
-        const checked = checkedModelSelection(body.modelSelection, { selection: current.modelSelection, busy: threadBusy(current.id, current.threadId) }, body.requireAvailableModel === true);
-        if (!checked.ok) return json(res, checked.status, { error: checked.error });
-        patch.modelSelection = checked.selection;
-      }
-      if (body.approvalMode !== undefined || body.autoApprove !== undefined) {
-        if (body.autoApprove !== undefined && typeof body.autoApprove !== "boolean") return json(res, 400, { error: "autoApprove must be a boolean" });
-        const mode = body.approvalMode ?? (body.autoApprove ? "auto" : "ask");
-        // Elevated modes still require the trusted desktop transition. A
-        // thread settings PATCH cannot manufacture that grant.
-        if (mode !== "ask" && mode !== "auto" && mode !== "edits") return json(res, 403, { error: "Full and Custom access require trusted desktop confirmation" });
-        if (approvalModeFor(current) === "custom") return json(res, 403, { error: "Leaving Custom approval requires confirmation in the packaged desktop app" });
-        if (!supportsApprovalMode(registry.cliTarget((patch.modelSelection ?? current.modelSelection).instanceId)?.driverKind, mode)) {
-          return json(res, 400, { error: "This provider does not support the selected approval level" });
-        }
-        if (threadBusy(current.id, current.threadId)) return json(res, 409, { error: "stop this thread before changing its approval mode" });
-        if (current.approvalGrant) return json(res, 409, { error: "the bot's approval mode is still being confirmed" });
-        if (mode === "auto" && approvalModeFor(current) !== "auto" && auth.kind === "loopback" && !DESKTOP_MANAGED && !req.headers.origin && store.bots.some((bot) => bot.busy)) {
-          return json(res, 409, { error: "Change approval mode from the app or a paired device while bots are working." });
-        }
-        if (mode === "auto" && current.computer === "local" && approvalModeFor(current) !== "auto" && body.acknowledgeLocalAuto !== true) {
-          return json(res, 400, { error: "Auto mode on this computer requires confirming the warning first (acknowledgeLocalAuto)" });
-        }
-        patch.approvalMode = mode;
-        patch.autoApprove = mode === "auto";
-      }
-      if (patch.modelSelection) {
-        const checked = checkedTaskModelSwitch({ ...current,
-          ...(patch.approvalMode ? { approvalMode: patch.approvalMode, autoApprove: patch.autoApprove } : {}),
-        }, patch.modelSelection, body.updateBotDefault === true, body.resetApprovalToAsk === true, body.requireAvailableModel === true);
-        if (!checked.ok) return json(res, checked.status, { error: checked.error });
-      }
-      const task = patch.modelSelection
-        ? store.switchTaskModel(m[1], m[2], patch.modelSelection, body.updateBotDefault === true, body.resetApprovalToAsk === true, patch)!
-        : store.patchTask(m[1], m[2], patch)!;
-      const fresh = botWithThread(store.bot(m[1])!);
-      broadcast({ kind: "bot", bot: fresh });
-      return json(res, 200, { task: wireTask(task), bot: fresh });
-    }
-    if (m && method === "DELETE") {
-      const bot = store.bot(m[1]);
-      if (!bot || !store.taskByThread(bot.id, m[2])) {
-        return json(res, 404, { error: "no such task" });
-      }
-      if (phoneSecretSubmissions.hasThread(m[2])) {
-        return json(res, 409, { error: "this task is securely saving a credential — try again when it finishes" });
-      }
-      if (threadBusy(bot.id, m[2]) || routines!.isActiveThread(m[2])) {
-        return json(res, 409, { error: "this task is running — stop it first" });
-      }
-      const stagedSkillCleanups = stagedSkillCleanupsForThread(m[2]);
-      roomHandoffs.cancelDirect(m[2], "The source conversation was deleted");
-      cancelTeamSetupResumesForThread(m[2]);
-      const updated = store.deleteTask(m[1], m[2]);
-      if (!updated) return json(res, 404, { error: "no such task" });
-      settleDirectFollowup(directTurnGenerationByThread.get(m[2]));
-      rejectDeletedThreadSkillStages(stagedSkillCleanups);
-      const fresh = botWithThread(updated);
-      broadcast({ kind: "bot", bot: fresh });
-      return json(res, 200, { bot: fresh });
-    }
+    if (await handleBotTasks(req, res, rctx)) return;
 
     if (await handleComputers(req, res, rctx)) return;
 
