@@ -23,7 +23,6 @@ import {
 import { escapeAttribute } from "../shared/attachments.ts";
 import { credentialResumeOutcome, credentialIsConfigured, isCredentialTargetId } from "../shared/credential-request.ts";
 
-import { approvalModeForOrigin, delegationInheritsFullAccess } from "./auto-approve.ts";
 import { updateClaudeCli } from "./claude-update.ts";
 import {
   configuredAccountDirectory,
@@ -45,7 +44,6 @@ import { appendDecision, readDecisions, flushDecisionLog } from "./decision-log.
 import { validateBotCwd } from "./bot-cwd.ts";
 import {
   ATTACHMENTS_DIR,
-  attachmentExists,
   cleanupStaleAttachmentPartials,
   deleteAttachment,
   extensionForMime,
@@ -78,19 +76,15 @@ import { parseBotProfilePatch } from "./bot-profile.ts";
 import * as box from "./box.ts";
 import { computerBackendFor } from "./computer-backend.ts";
 import { TeamComputers, teamComputerAssignment, teamComputerCreate, teamComputerOwner } from "./team-computers.ts";
-import type { WireBot, WireGroup, WireTask } from "../shared/wire.ts";
+import type { WireGroup } from "../shared/wire.ts";
 import { boxCreateRecoverySnapshot, retireDeletedBoxCreate } from "./box-create-idempotency.ts";
 import { boxDeletionSnapshot } from "./box-delete-journal.ts";
 import { boxAccountResourceChangeError, cloudBackendChangeError, vpsAliasResourceChangeError } from "./cloud-backend.ts";
 import * as composio from "./composio.ts";
-import { chiefOfStaffSystemPrompt } from "./chief-of-staff.ts";
 import {
   canAccessTeam,
   canReachPeer,
-  peerRosterSystemPrompt,
-  reachablePeers,
 } from "./peer-roster.ts";
-import { openMausStatusSystemPrompt } from "./openmaus-status-capsule.ts";
 import {
   containerComputerAction,
   containerComputerExists,
@@ -129,7 +123,6 @@ import {
   DATA_DIR,
   EVENTS_DIR,
   NATIVE_DIR,
-  customMcpServers,
 } from "./config.ts";
 import { sweepThreadEventLogs, type ThreadLogRetentionCandidate } from "./thread-retention.ts";
 import { augmentedPath, findCliCandidates, resetPathCache } from "./env-path.ts";
@@ -180,7 +173,6 @@ import {
   drainSteeredMessages,
   holdSteeredQueue,
   onSteeredQueueChange,
-  queuedSteerSnapshot,
   queuedSteeredMessage,
   queuedThreadPosition,
   queueSteeredMessage,
@@ -210,17 +202,13 @@ import {
   type GroupDefaultResponder,
   type GroupRecord,
   type Message,
-  type TaskRecord,
-  toWireTask,
 } from "./store.ts";
 import * as tts from "./tts/index.ts";
 import { toUtterances } from "./tts/speech-text.ts";
 import { extractTurnImages } from "./turn-images.ts";
 import type { TurnOwner } from "./turn-resources.ts";
 import {
-  supportsWorkspaceFiles,
   isMemoryTopicName,
-  memorySystemPrompt,
   workspaceDir,
 } from "./workspace.ts";
 import { readMemoryTopic } from "./workspace.ts";
@@ -239,7 +227,6 @@ import {
   readSections,
   sectionContextKey,
   sectionContextLabel,
-  sectionContextSystemPrompt,
   writeSectionContext,
   SECTION_CONTEXT_MAX_BYTES,
 } from "./section-context.ts";
@@ -253,29 +240,16 @@ import {
   rejectStagedSkillWrite,
   removeSkill,
   setSkillEnabled,
-  skillsSystemPrompt,
 } from "./skills.ts";
 import { fetchSkillFromSource } from "./skill-fetch.ts";
-import { setupModeActive, setupSystemPrompt } from "./setup-mode.ts";
 import type { SkillRequestCardData } from "../shared/skill-request.ts";
 import { readSoulDrift, soulFile, writeSoulMirror } from "./bot-folder.ts";
-import {
-  buildSystemPrompt,
-  computerPrompt,
-  COMPOSIO_PROMPT,
-  customMcpPrompt,
-  CREDENTIAL_PROMPT,
-  PROFILE_PROMPT,
-  ROUTINE_PROMPT,
-  type ComputerPromptKind,
-} from "./system-prompt.ts";
 import { discoverExistingPerBotLocalVms, shouldArmLocalVmIdle } from "./local-vm-inventory.ts";
 import { redactSecretsInText } from "./redact.ts";
 import * as vps from "./vps-computer.ts";
 import { createRoutineWiring } from "./routine-wiring.ts";
 import { RoutineManager, type RoutineRun } from "./routines.ts";
 import { CalendarCallManager, type CalendarCall } from "./calendar-calls.ts";
-import { BUILT_IN_BROWSER_SYSTEM_PROMPT } from "./browser-engine.ts";
 import {
   browserEngineEncryptionKey,
   clearBrowserSessionState,
@@ -286,7 +260,6 @@ import {
   browserSessionId,
 } from "./browser-engine.ts";
 import { RoutineRequestService } from "./routine-requests.ts";
-import { buildBotOverview, type BotOverview, connectedAppsFacts } from "./bot-overview.ts";
 import { ProfileRequestService } from "./profile-requests.ts";
 import { TeamSetupError, TeamSetupRequestService } from "./team-setup-requests.ts";
 import type { TeamSetupRequest } from "../shared/team-setup.ts";
@@ -306,7 +279,7 @@ import { loadBundledSkills, loadUserSkills, mergeSkills } from "./skill-library.
 import { createBotPackageExport } from "./package-export.ts";
 import { createTeamBackup, importTeamBackup } from "./team-backup.ts";
 import { MAX_TEAM_BACKUP_BYTES } from "../shared/team-backup.ts";
-import { parseSurface, resolveSurface, surfacePrompt } from "./surface.ts";
+import { parseSurface } from "./surface.ts";
 import { createDeferredResumes } from "./deferred-resumes.ts";
 import { createDelegationWatch } from "./delegation-watch.ts";
 import { createTurnIntegrations } from "./turn-integrations.ts";
@@ -321,6 +294,7 @@ import {
   hasUnboundDiscardedGroupGoalTurn,
   removeGroupGoalCoordinatorTurn,
 } from "./group-coordination.ts";
+import { createBotViews, setActiveCoordinationForThread } from "./bot-views.ts";
 import {
   checkedExportSkillNames,
   checkedGroupResponder,
@@ -331,7 +305,7 @@ import {
 import { createDesktopApproval } from "./desktop-approval.ts";
 import { createScreenPollers } from "./screen-pollers.ts";
 import { createComputerLifecycle, type RemoteComputerProvider } from "./computer-lifecycle.ts";
-import { createGroupTurn, type GroupTurnOperation, type GroupTurnOrchestration } from "./group-turn.ts";
+import { createGroupTurn, type GroupTurnOperation } from "./group-turn.ts";
 import { createGracefulShutdown } from "./graceful-shutdown.ts";
 import {
   createWorkspaceAccess,
@@ -1066,283 +1040,31 @@ try {
 // failed, leave the committed journal in place and profile reuse blocked.
 if (browserCleanupReferencesReconciled) browserCleanup.startPending();
 
-/** A bot as a client may see it: no provider session bookkeeping.
- *
- * `resumeCursors` is the harness's own bookkeeping — the native session id
- * to resume, per instance, per task. No client has ever used it, and a
- * paired phone has even less business holding provider session identifiers
- * than the desktop window did. Stripped here rather than at each call site
- * so a new broadcast cannot forget. */
-let activeCoordinationForThread = (_threadId: string): boolean => false;
-const wireTask = (task: TaskRecord): WireTask =>
-  activeCoordinationForThread(task.threadId) && !task.busy
-    ? { ...toWireTask(task), busy: true, activity: "working" as const }
-    : toWireTask(task);
-
-const wireBot = (bot: BotRecord): WireBot => {
-  const { resumeCursors: _resumeCursors, tasks, approvalGrant, lastProfileRequestId: _lastProfileRequestId, lastTeamSetupReceipt: _lastTeamSetupReceipt, ...rest } = bot;
-  // An elevated selection is inert until the desktop confirms its exact
-  // private reply. Every ordinary client sees the effective Ask state during
-  // that two-phase window, never a grant that may still roll back.
-  const visible = approvalGrant && !approvalGrant.threadOnly
-    ? { ...rest, approvalMode: "ask" as const, autoApprove: false }
-    : rest;
-  return { ...visible, ...(activeCoordinationForThread(bot.threadId) && !visible.busy ? { busy: true, activity: "working" as const } : {}),
-    avatarUrl: visible.avatarUrl ?? null, ...(tasks ? { tasks: tasks.map(wireTask) } : {}) };
-};
-
-/** The correlated private response carries the requested value so Electron
- * can validate it before sending the confirmation that makes it effective. */
-const wireTrustedApprovalBot = (bot: NonNullable<ReturnType<typeof store.bot>>) => {
-  const { resumeCursors: _resumeCursors, tasks, approvalGrant: _approvalGrant, lastProfileRequestId: _lastProfileRequestId, lastTeamSetupReceipt: _lastTeamSetupReceipt, ...rest } = bot;
-  return { ...rest, approvalMode: approvalModeFor(rest), avatarUrl: rest.avatarUrl ?? null, ...(tasks ? { tasks: tasks.map(wireTask) } : {}) };
-};
-
-/** A settings-based preview, not a receipt of a dispatched turn. No
- * provisioning or credentials are needed to inspect it. The selected engine
- * bounds advertised tools; task-specific context is added only at dispatch. */
-function previewSystemPrompt(bot: BotRecord) {
-  // `cfg` is the module-level config (`const cfg = loadConfig()` near the
-  // top of index.ts), the same object the turn code reads.
-  const persona = [
-    `You are ${bot.name}, a personal bot in OpenMausBot.`,
-    bot.title && `Role: ${bot.title}.`,
-    bot.description && `About: ${bot.description}`,
-  ]
-    .filter(Boolean)
-    .join(" ");
-  const instance = turnInstance(bot);
-  const caps = instance?.adapter.capabilities;
-  const teamComputer = inheritedTeamComputer(bot);
-  const previewComputer = teamComputer ? "cloud" : bot.computer;
-  const computerPromptKind: ComputerPromptKind | null =
-    previewComputer === "vm"
-      ? caps?.computerMcp ? localVmMode(cfg) === "per-bot" ? "vm-private" : "vm-shared" : null
-      : previewComputer === "cloud"
-        ? instance?.driverKind === "boxAgent" ? "box-agent" : caps?.computerMcp ? computerBackendFor(bot).kind : null
-        : previewComputer === "local"
-          ? caps?.localComputerMcp ? "local" : null
-          : null;
-  const peers = reachablePeers(store.bots, bot);
-  const coordination = bot.chiefOfStaff
-    ? chiefOfStaffSystemPrompt(bot.id, store.bots, true, openMausStatusSystemPrompt())
-    : peers.length > 0
-      ? peerRosterSystemPrompt(peers)
-      : "";
-  // Same gate a real turn applies: the block only goes to a bot whose
-  // engine actually mounts agent tools, since it names propose_profile,
-  // propose_routine and request_credential.
-  const agentsMounted = caps?.agentsMcp === true;
-  // The preview asks the same question a dispatch asks, through the same
-  // policy, so "what the model sees" cannot drift from what a turn sends.
-  // Spelling the browser rule out a second time here is what let Off keep a
-  // browser in one place while the preview said it had none.
-  const previewPlan = resolveSurface({
-    destination: previewComputer,
-    browserOn: caps?.browserMcp === true && builtInBrowserEnabled(cfg) && bot.browser !== false,
-  });
-  const privateWorkspace = instance && supportsWorkspaceFiles(instance.driverKind);
-  const built = buildSystemPrompt(persona, bot.soul ?? "", [
-    {
-      id: "setup",
-      label: "Setup",
-      text: setupSystemPrompt(agentsMounted && setupModeActive({ soul: bot.soul, description: bot.description, text: "" }), {
-        skills: skillAuthoringEnabled(cfg),
-        cwd: bot.cwd,
-      }),
-    },
-    { id: "computer", label: "Computer", text: computerPrompt(computerPromptKind) },
-    { id: "team-computer", label: "Team computer", text: teamComputerPrompt(teamComputer) },
-    // Auto cannot know its place until dispatch, so the preview stays silent
-    // there and only carries the note; explicit settings preview the paragraph.
-    { id: "plan", label: "Surface", text: previewPlan.computer === undefined ? "" : surfacePrompt({
-      computer: previewPlan.computer && previewPlan.computer !== "off" && computerPromptKind ? previewPlan.computer : null,
-      browser: previewPlan.computer === undefined ? false : previewPlan.browser,
-    }, { note: previewPlan.note }) },
-    { id: "composio", label: "Connected apps", text: caps?.composioMcp && bot.composio !== false && composio.configured(cfg) ? COMPOSIO_PROMPT : "" },
-    { id: "mcp", label: "MCP servers", text: caps?.customMcp ? customMcpPrompt(Object.keys(customMcpServers(cfg, bot.mcpServers))) : "" },
-    { id: "browser", label: "Browser", text: previewPlan.browser ? BUILT_IN_BROWSER_SYSTEM_PROMPT : "" },
-    { id: "coordination", label: "Team", text: agentsMounted && coordination ? ` ${coordination}` : "" },
-    { id: "credential", label: "Credentials", text: agentsMounted ? CREDENTIAL_PROMPT : "" },
-    { id: "routine", label: "Routines", text: agentsMounted ? ROUTINE_PROMPT : "" },
-    { id: "profile", label: "Profile changes", text: agentsMounted ? PROFILE_PROMPT : "" },
-    { id: "section-context", label: "Section context", text: sectionContextSystemPrompt(bot.section) },
-    { id: "memory", label: "Memory", text: memorySystemPrompt(bot.id, { managedWrites: agentsMounted, fileTools: Boolean(privateWorkspace) }) },
-    { id: "skills", label: "Skills index", text: privateWorkspace ? skillsSystemPrompt(bot.id) : "" },
-  ]);
-  const totalBytes = built.sections.reduce((n, s) => n + s.bytes, 0);
-  return {
-    sections: built.sections,
-    totalBytes,
-    approxTokens: Math.ceil(totalBytes / 4),
-    note:
-      "Preview from current bot settings, not the exact prompt of a running task. Task folders, notes, recall, selected skills and available connections can change the dispatched prompt. Token count is an estimate.",
-  };
-}
-
-/** The plain-language "what does this bot do" facts, gathered once from
- * every server-only source (engine capabilities, connected-apps inventory,
- * routines/webhooks/skills, and recent history) and handed to the pure
- * sentence builder. The phones (step 5) and the web settings dialog both
- * read this same route, so they can never disagree about what a bot does. */
-async function botOverview(bot: BotRecord): Promise<BotOverview> {
-  const connectedApps = await connectedAppsFacts(
-    composio.configured(cfg),
-    composio.connectorAvailability(cfg),
-    () => composio.connectedServices(cfg),
-  );
-  const engine = registry.get(bot.modelSelection.instanceId)?.adapter.capabilities ?? null;
-  const sectionPeers = reachablePeers(store.bots, bot).length;
-  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  // Same flush as GET /history: profile-change rows queue in
-  // profile-versions.ts and land asynchronously, so a client checking the
-  // overview right after causing a change must see its own row.
-  await flushProfileHistory(bot.id);
-  const recent = readHistory(bot.id, 5).map((r) => ({ at: r.at, summary: r.summary }));
-  return buildBotOverview({
-    bot: {
-      name: bot.name,
-      title: bot.title,
-      description: bot.description,
-      soul: bot.soul,
-      computer: bot.computer,
-      cloudBackend: bot.cloudBackend,
-      cwd: bot.cwd,
-      autoApprove: bot.autoApprove,
-      approvalMode: approvalModeForTurn(bot),
-      approvePeerComms: bot.approvePeerComms,
-      peers: bot.peers,
-      composio: bot.composio,
-      browser: bot.browser,
-      chiefOfStaff: bot.chiefOfStaff,
-      managedSections: bot.managedSections,
-    },
-    routines: routines!.listRoutines()
-      .filter((routine) => routine.botId === bot.id)
-      .map((routine) => ({
-        id: routine.id,
-        name: routine.name,
-        enabled: routine.enabled,
-        schedule: routine.schedule,
-        nextRunAt: routine.nextRunAt,
-      })),
-    runs: routines!.listRuns()
-      .filter((run) => run.botId === bot.id)
-      .map((run) => ({
-        routineId: run.routineId,
-        status: run.status,
-        finishedAt: run.finishedAt,
-        startedAt: run.startedAt,
-        scheduledFor: run.scheduledFor,
-      })),
-    webhooks: webhooks.list()
-      .filter((webhook) => webhook.botId === bot.id)
-      .map((webhook) => ({ name: webhook.name, enabled: webhook.enabled })),
-    skills: listSkills(bot.id).map((skill) => ({
-      name: skill.name,
-      description: skill.description,
-      enabled: skill.enabled,
-    })),
-    engine,
-    browserEnabled: builtInBrowserEnabled(cfg),
-    connectedApps,
-    sectionPeers,
-    timeZone,
-    recent,
-  });
-}
-
-/** Defense in depth for hand-edited/corrupt durable records: elevated
- * approval semantics require an implemented provider mapping. The trusted transition enforces
- * this too, but no provider dispatch or later permission callback relies on
- * persistence having been produced exclusively by that route. Delegation
- * uses the receiving bot's grant, never the sender's (approvalModeForOrigin) —
- * with one deliberate exception: a Chief of Staff with Full access makes the
- * threads it delegates Full too (delegatedFullAccess), so the grant the
- * person gave the Chief covers the work the Chief hands out. */
-const approvalModeForTurn = (bot: BotRecord, peerInitiated = false): ApprovalMode => {
-  const mode = approvalModeForOrigin(approvalModeFor(bot), { peerInitiated });
-  if (!supportsApprovalMode(registry.cliTarget(bot.modelSelection.instanceId)?.driverKind, mode)) {
-    return "ask";
-  }
-  return mode;
-};
-
-/** Full belongs to the requesting conversation, not whichever sibling is
- * selected in the UI or the bot's default for future conversations. */
-function fullAccessForSource(botId: string, threadId: string): boolean {
-  const owner = connectorThread(botId, threadId);
-  if (!owner) return false;
-  const bot = store.projectBotForTask(botId, threadId) ?? owner.bot;
-  // Origin changes Custom to Auto, never Full; no live-turn state is needed.
-  return approvalModeForTurn(bot) === "full";
-}
-
-function peerReviewRequired(bot: BotRecord, threadId: string): boolean {
-  return Boolean(bot.approvePeerComms && !fullAccessForSource(bot.id, threadId));
-}
-
-/** Full access flows down a Chief of Staff's delegation. The person gave the
- * Chief Full access so its work runs without prompts; a teammate stopping
- * that same work to ask defeats the grant — and in practice the person was
- * answering every one of those cards, all day, for the whole team. So a
- * teammate a Full-access Chief delegates to runs Full for that work: the
- * recipient switches, whatever its own level says. The recipient's engine
- * has to implement Full (supportsApprovalMode); otherwise the work keeps the
- * recipient's own level, as before. Only a Chief passes access on — an
- * ordinary bot's delegation still uses the recipient's setting. */
-function delegatedFullAccess(from: BotRecord, fromThreadId: string, target: BotRecord): boolean {
-  return delegationInheritsFullAccess({
-    senderIsChief: Boolean(from.chiefOfStaff),
-    senderHasFullAccess: fullAccessForSource(from.id, fromThreadId),
-    sameBot: from.id === target.id,
-    recipientDriverKind: registry.cliTarget(target.modelSelection.instanceId)?.driverKind,
-  });
-}
-
-/** Make a delegated thread Full and say so in it once, so the level the
- * chip shows and the level the turns run at agree, and the person can see
- * where the access came from. Idempotent: a pair conversation is reused
- * across delegations and must not collect a chip per request. */
-function grantDelegatedFullAccess(from: BotRecord, target: BotRecord, threadId: string): void {
-  if (store.taskByThread(target.id, threadId)?.approvalMode === "full") return;
-  store.patchTask(target.id, threadId, { approvalMode: "full", autoApprove: false, alwaysAllow: [] });
-  store.appendMessage(threadId, {
-    role: "bot",
-    kind: "activity",
-    tool: { name: `Full access — delegated by ${from.name}, a Chief of Staff with Full access`, ok: true },
-  });
-}
-
-/** A room member's level for one turn. Work a Full-access Chief hands out
- * in a room runs Full for that turn: the room thread is shared, so the
- * level is not stored on it — it rides the handoff. */
-function roomTurnApprovalMode(bot: BotRecord, orchestration?: GroupTurnOrchestration): ApprovalMode {
-  const handoff = orchestration?.roomHandoffId ? roomHandoffs.nodes.get(orchestration.roomHandoffId) : undefined;
-  const source = handoff?.parentId ? roomHandoffs.nodes.get(handoff.parentId) : undefined;
-  const from = source ? store.bot(source.botId) : undefined;
-  if (from && source && delegatedFullAccess(from, source.threadId, bot)) return "full";
-  return approvalModeForTurn(bot, Boolean(orchestration?.roomHandoffId));
-}
-
-// The Electron-only trusted approval state machine (this handler) lives in
-// ./desktop-approval.ts; createDesktopApproval is wired near the top of this
-// file, just before the parentPort listener that dispatches to it.
-
-/** Profile URLs are app-owned references, not merely strings with a trusted
- * prefix. Resolve them before persistence so every accepted avatar can be
- * fetched immediately and a deleted/guessed attachment id cannot become a
- * dangling profile reference. */
-const storedAvatarExists = (avatarUrl: string): boolean =>
-  attachmentExists(avatarUrl.slice("/api/attachments/".length));
-
-const publicBot = (bot: NonNullable<ReturnType<typeof store.bot>>) => ({
-  ...wireBot(bot),
-  messages: store.messagesFor(bot.threadId),
-  activeLeafId: store.activeLeaf(bot.threadId),
-  tasks: store.tasks(bot.id).map(wireTask),
+// ── bot wire views ──────────────────────────────────────────────────────
+// The client-facing wire views and the approval-policy predicates live in
+// ./bot-views.ts: wireTask/wireBot/wireTrustedApprovalBot/publicBot with
+// the queued-steer snapshot, the system-prompt preview and overview
+// builders, and the approvalModeForTurn/fullAccessForSource family.
+// index.ts wires createBotViews at the cluster's original site —
+// turnInstance, inheritedTeamComputer and teamComputerPrompt, produced by
+// createComputerLifecycle above, arrive by value; connectorThread,
+// roomHandoffs, routines and webhooks, declared after this site, arrive as
+// thunks. activeCoordinationForThread is module state there, bound to
+// roomHandoffs.activeDirect at its original assignment site below.
+const {
+  wireTask, wireBot, wireTrustedApprovalBot, previewSystemPrompt, botOverview,
+  approvalModeForTurn, fullAccessForSource, peerReviewRequired, delegatedFullAccess,
+  grantDelegatedFullAccess, roomTurnApprovalMode, storedAvatarExists, publicBot,
+  publicBotQueuedMessages,
+} = createBotViews({
+  lateBound: {
+    connectorThread: (botId, threadId) => connectorThread(botId, threadId),
+    roomHandoffs: () => roomHandoffs,
+    routines: () => routines,
+    webhooks: () => webhooks,
+  },
+  helpers: { turnInstance, inheritedTeamComputer, teamComputerPrompt },
 });
-const publicBotQueuedMessages = () => queuedSteerSnapshot((botId, threadId) => Boolean(store.taskByThread(botId, threadId)));
 
 // ── group coordination ─────────────────────────────────────────────────
 // The group-coordination registry and coordination copy/policy helpers
@@ -1626,7 +1348,7 @@ const roomHandoffs: RoomHandoffs = new RoomHandoffs(join(DATA_DIR, "room-handoff
   groupProviderHandshakeSettled,
   interruptDirectThread,
 }));
-activeCoordinationForThread = threadId => roomHandoffs.activeDirect(threadId);
+setActiveCoordinationForThread(threadId => roomHandoffs.activeDirect(threadId));
 function publicGroupState(group: GroupRecord): WireGroup {
   return { ...group, working: groupIsWorking(group) || [...roomHandoffs.nodes.values()].some(n => n.groupId === group.id && !["completed", "failed", "cancelled"].includes(n.status)) };
 }
