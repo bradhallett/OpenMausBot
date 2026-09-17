@@ -1,14 +1,11 @@
 // OpenMausBot server — the harness host. Clients hold no transports
 // (upstream rule): the React app dispatches typed commands over HTTP and
 // folds one SSE event stream; every provider process runs here.
-import { timingSafeEqual } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { extname, join } from "node:path";
 
-import { z } from "zod";
 import { SharedComputers } from "./shared-computers.ts";
-import { SharedComputerControl } from "./shared-computer-control.ts";
 
 import {
   BrowserCleanupCoordinator,
@@ -18,7 +15,6 @@ import { flushDecisionLog } from "./decision-log.ts";
 import {
   cleanupStaleAttachmentPartials,
 } from "./attachments.ts";
-import { TeamComputers } from "./team-computers.ts";
 import * as composio from "./composio.ts";
 import {
   containerComputerStatus,
@@ -45,7 +41,6 @@ import type { RequestAuth } from "./request-auth.ts";
 import { fleetAvailable, fleetRequest, fleetSocketPath } from "./fleet-client.ts";
 import { entitled } from "./enterprise.ts";
 import { HOSTED_CONTRACT_HEADER, HOSTED_CONTRACT_METADATA, HOSTED_CONTRACT_VERSION } from "./hosted-contract.ts";
-import type { RuntimeEvent } from "./contracts.ts";
 
 
 import { closeMessageDb, chatFollowups, settleChatFollowups } from "./message-db.ts";
@@ -58,18 +53,18 @@ import {
   restoreSteeredMessages,
 } from "./steer-queue.ts";
 import { restoreChannelMessages } from "./channel-queue.ts";
-import { SendSequencer } from "./send-idempotency.ts";
 import { EventBus } from "./harness/bus.ts";
 import { ManagedDesktopProviders } from "./managed-desktop.ts";
 import { withPeerProvenance } from "./peer-provenance.ts";
 import type { Message } from "./store.ts";
-import type { TurnOwner } from "./turn-resources.ts";
 import { flushAllMemoryJournals } from "./memory-journal.ts";
 import { discoverExistingPerBotLocalVms, shouldArmLocalVmIdle } from "./local-vm-inventory.ts";
 
 import * as vps from "./vps-computer.ts";
 import { createBotLifecycle } from "./bot-lifecycle.ts";
 import { createCalendarRooms } from "./calendar-rooms.ts";
+import { createComputerLifecycleWiring } from "./computer-lifecycle-wiring.ts";
+import { createPeerAgentComms } from "./peer-agent-comms.ts";
 import { createEventsPipeline } from "./events-pipeline.ts";
 import { createGroupState } from "./group-state.ts";
 import { createRoutineLifecycle } from "./routine-lifecycle.ts";
@@ -90,7 +85,6 @@ import {
 import { flushAllProfileHistory } from "./profile-versions.ts";
 import { listenWebhookIngress, type WebhookIngress } from "./webhook-ingress.ts";
 import { WebhookManager } from "./webhooks.ts";
-import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 import { loadBundledSkills, loadUserSkills, mergeSkills } from "./skill-library.ts";
 import { createDelegationWatch } from "./delegation-watch.ts";
 import { createTurnIntegrations } from "./turn-integrations.ts";
@@ -103,8 +97,6 @@ import {
 import { createBotViews } from "./bot-views.ts";
 import { createCheckedInputs } from "./checked-inputs.ts";
 import { createDesktopApproval } from "./desktop-approval.ts";
-import { createScreenPollers } from "./screen-pollers.ts";
-import { createComputerLifecycle } from "./computer-lifecycle.ts";
 import { createGroupTurnOperations } from "./group-turn-operations.ts";
 import { createConfigViews } from "./config-views.ts";
 import { createTurnSecrets } from "./turn-secrets.ts";
@@ -120,8 +112,8 @@ import {
 import { environmentDescriptor, serverVersion } from "./environment.ts";
 import { createWorkspaceBackupRoutes, isWorkspaceBackupSessionControl } from "./workspace-backup-http.ts";
 import { json, readBody } from "./http.ts";
+import { createInternalRoutes } from "./routes/internal.ts";
 import { createRoutinesRoutes } from "./routes/routines.ts";
-import { createInternalRoutes, type AskBotOutcome, type InternalCapability } from "./routes/internal.ts";
 import { createCalendarCallRoutes } from "./routes/calendar-calls.ts";
 import { createInstanceRoutes } from "./routes/instances.ts";
 import { createMcpRoutes } from "./routes/mcp.ts";
@@ -146,10 +138,7 @@ import { createUsageRoutes } from "./routes/usage.ts";
 import { createConfigRoutes } from "./routes/config.ts";
 import type { RouteContext } from "./routes/http.ts";
 import {
-  activeInternalGenerationByThread,
   computerSelectionTurns,
-  internalCapabilities,
-  mintInternalCapability,
   revokeAllInternalCapabilities,
   revokeInternalCapabilitiesForThread,
 } from "./internal-capabilities.ts";
@@ -160,23 +149,18 @@ import {
   registry,
   releaseDataDirLeaseAtExit,
   store,
-  teamComputerTurns,
   workspaceMaintenance,
   workspaceRestore,
 } from "./runtime.ts";
 import {
-  botAtThreadCapacity,
   botForThread,
   claimTurnResource,
   directTurnBots,
-  directTurnDispatchClaims,
   threadBusy,
   turnComputerResources,
   turnResourceOwners,
-  turnResources,
 } from "./turn-admission.ts";
 import { createProviderFleet } from "./provider-fleet.ts";
-import { createTurnCleanup } from "./turn-cleanup.ts";
 import { createCustomDomainVerifier, customDomainIpv4, normalizeCustomDomain } from "./custom-domain.ts";
 import { allowedScopes, createEmailSignIn, parseAllowList } from "./account-signin.ts";
 import { ProviderAuthSessions } from "./provider-auth-sessions.ts";
@@ -479,106 +463,24 @@ utilityParentPort?.on("message", event => {
 });
 
 // ── peer-agent comms wiring ────────────────────────────────────────────
-// The capability store, generation registries, and the mint/revoke helpers
-// live in ./internal-capabilities.ts. The bearer predicates stay here:
-// internalCapabilityIsActive also reads the team-computer turn table and
-// the local VM lease pool, which remain index-local.
-
-/** Resolve a high-entropy bearer to its immutable server-side claims.
- * Constant-time comparisons keep the check independent of matching prefix
- * length; only capabilities for currently active turns are retained. */
-function authorizedInternalCapability(header: string | string[] | undefined): InternalCapability | null {
-  const got = Buffer.from(Array.isArray(header) ? "" : (header ?? ""));
-  for (const [token, capability] of internalCapabilities) {
-    if (!internalCapabilityIsActive(capability)) {
-      internalCapabilities.delete(token);
-      continue;
-    }
-    const expected = Buffer.from(`Bearer ${token}`);
-    if (got.length === expected.length && timingSafeEqual(got, expected)) return capability;
-  }
-  return null;
-}
-
-function internalCapabilityIsActive(capability: InternalCapability): boolean {
-  const switching = computerSelectionTurns.get(capability.threadId);
-  if ((capability.kind === "computer" || capability.kind === "browser") &&
-      switching?.generation === capability.generation && switching.selected) return false;
-  if (capability.teamComputerId) {
-    const pinned = teamComputerTurns.get(capability.threadId);
-    if (pinned?.computerId !== capability.teamComputerId || pinned.owner.generation !== capability.generation ||
-        pinned.botId !== capability.botId) return false;
-  }
-  if (capability.localVmTarget) {
-    const owner = localVmLeaseFor(capability.localVmTarget).current(localVmOwnerBusy);
-    if (localVmThreadTargets.get(capability.threadId) !== capability.localVmTarget ||
-        owner?.threadId !== capability.threadId || owner.botId !== capability.botId) return false;
-  }
-  return (
-    capability.orphanExpiresAt > Date.now() &&
-    activeInternalGenerationByThread.get(capability.threadId) === capability.generation
-  );
-}
-// Cap message chains: depth 0 = a user-initiated turn (may ask a peer);
-// a peer invoked via ask_bot runs at depth 1 and gets NO agents tool, so
-// A→B is allowed but B→C (and A→B→A loops) never start.
-const MAX_COMMS_DEPTH = 1;
-const MAX_WORKSPACE_BOTS = 100;
-const createSidebarSectionSchema = z.object({
-  name: z.string(),
-  botIds: z.array(z.string().regex(/^[\w-]+$/)).max(MAX_WORKSPACE_BOTS).default([]),
-}).strict();
-const createGroupTaskRequestSchema = z.object({ title: z.string().optional() });
-// Resolved from the server root — see server/proxy-paths.ts. This descending
-// path happened to survive bundling, but it goes through the same anchor so
-// there is exactly one way proxies are located.
-const agentsProxyPath = SPAWNED_PROXIES.agents;
-const phoneProxyPath = SPAWNED_PROXIES.phone;
-// in the packaged app process.execPath is Electron — run the proxy as node
-const AGENTS_NODE_FLAG = { ELECTRON_RUN_AS_NODE: "1" };
-
-function agentsIntegration(
-  botId: string,
-  threadId: string,
-  depth: number,
-  skillAuthoring: boolean,
-  generation: string,
-  roomHandoffId?: string,
-  roomCoordination = false,
-  ownThreadCreation = false,
-) {
-  const token = mintInternalCapability({
-    botId,
-    threadId,
-    generation,
-    depth,
-    kind: "agents",
-    skillAuthoring,
-    createdBots: 0,
-    openedThreads: 0,
-    roomHandoffId,
-    roomCoordination,
-    ownThreadCreation,
-  });
-  return {
-    command: process.execPath,
-    args: [agentsProxyPath],
-    env: {
-      ...AGENTS_NODE_FLAG,
-      OMB_HARNESS_URL: `http://127.0.0.1:${PORT}`,
-      OMB_BOT_ID: botId,
-      OMB_THREAD_ID: threadId,
-      OMB_COMMS_TOKEN: token,
-      OMB_TURN_DEPTH: String(depth),
-      OMB_ROOM_TURN: roomCoordination ? "1" : "0",
-      OMB_OWN_THREAD_CREATION: ownThreadCreation ? "1" : "0",
-      OMB_SKILL_AUTHORING_ENABLED: skillAuthoring ? "1" : "0",
-      // The shared-computer tools are advertised only while the workspace
-      // gate is on; the routes behind them refuse regardless.
-      OMB_SHARED_COMPUTERS_ENABLED: sharedComputersEnabled(cfg) ? "1" : "0",
-    },
-  };
-}
+// The internal-capability bearer predicates, the workspace sidebar and
+// group-task schemas, and the agents proxy integration live in
+// ./peer-agent-comms.ts; index.ts wires the factory at the region's
+// original site and rebinds the names below. The local-VM lease names
+// internalCapabilityIsActive reads -- produced by the computer lifecycle
+// wired further down this file -- cross as thunks resolved at call time.
+const {
+  authorizedInternalCapability, internalCapabilityIsActive, MAX_COMMS_DEPTH, MAX_WORKSPACE_BOTS,
+  createSidebarSectionSchema, createGroupTaskRequestSchema, phoneProxyPath, AGENTS_NODE_FLAG,
+  agentsIntegration,
+} = createPeerAgentComms({
+  helpers: { PORT },
+  lateBound: {
+    localVmOwnerBusy: () => localVmOwnerBusy,
+    localVmLeaseFor: (target) => localVmLeaseFor(target),
+    localVmThreadTargets: () => localVmThreadTargets,
+  },
+});
 
 
 // ── provider/turn integrations ──────────────────────────────────────────
@@ -651,13 +553,17 @@ const {
 
 
 // ── computer / VM lifecycle ──────────────────────────────────────────────────────────
-// The computer/VM lifecycle cluster lives in ./computer-lifecycle.ts: the
-// local-VM lease/idle/thread registries, the Box/VPS provider busy-sets and
-// claim lanes, team-computer control accounting, and the surface/provider
-// resolution a turn or route asks for. It is wired here because the
-// screen-pollers factory just below is the earliest module-level by-value
-// consumer (botComputerControlSnapshot); thunks cover the consts this file
-// declares after this site.
+// The computer/VM lifecycle wiring -- the createComputerLifecycle and
+// createScreenPollers rebinding, the shared-computer control surface, the
+// turn cleanup with bindTurnComputer and the direct-thread interruptors,
+// the ask_bot waiter, the team-computer store with the send sequencer and
+// the browser-cleanup profile reconciliation -- lives in
+// ./computer-lifecycle-wiring.ts; index.ts wires the factory at the
+// region's original site and rebinds the names below. The names this file
+// declares after the site (roomHandoffs, broadcast, startTurn, the events
+// pipeline's timeout constants, isUnattended, routines and the local-VM
+// busy flags) cross as thunks; followupsReady is reassigned by the listen
+// and shutdown handlers, so it crosses back as a { get, set } accessor.
 const {
   localVmOwnerBusy, localVmLeases, localVmLifecycleBusy, localVmThreadTargets, localVmActiveThreads,
   localVmSeen, noteLocalVmSeen, activeVpsThreads, boxLifecycleBusyBots, vpsPreviewRequests,
@@ -671,206 +577,28 @@ const {
   runningTurnInstance, providerTransitionForTurn, claimBoxInventoryRequest, claimManagedBoxMutation,
   claimBotComputerLifecycle, claimManagedVpsMutation, localVmTargetForBot, localVmLeaseFor, localVmIdleFor,
   releaseLocalVmThread, localVmInventoryPayload,
-} = createComputerLifecycle({
+  screenPollers, SCREEN_SETTLE_TIMEOUT_MS, startScreenPoller, pokeScreenPoller, stopScreenPoller, finalScreenFrame,
+  sharedComputerControl, turnCleanup, releaseTurnResources, interruptDirectThread, settlingResourceOwners,
+  autoVmClaims, bindTurnComputer, parksBehindCoordination, unattendedDispatchState, interruptAllDirectThreads,
+  askBotAndWait, teamComputers, sendSequencer, followupsReady,
+} = createComputerLifecycleWiring({
+  helpers: {
+    bus, browserCleanup, activeGroupTurnForBot, controlIntegration, computerControl, computerControlRevision,
+    currentBrowserSession, cancelDirectTurnDispatch, shouldIgnoreProviderEvent,
+    DirectTurnSetupCancelled, directTurnGenerationByThread,
+  },
   lateBound: {
     routines: () => routines,
-    computerControl: () => computerControl,
-    teamComputers: () => teamComputers,
-    autoVmClaims: () => autoVmClaims,
     localVmImageBusy: () => localVmImageBusy,
     startTurn: (botId, text, opts) => startTurn(botId, text, opts),
-  },
-  helpers: {
-    bindTurnComputer, controlIntegration, activeGroupTurnForBot,
-  },
-  state: {
-    directTurnGenerationByThread,
-  },
-});
-
-// The live-screen pollers live in ./screen-pollers.ts. Their functions were
-// hoisted declarations here — usable from module start — so the factory is
-// wired before the first consumer (turnCleanup below) with thunks for the
-// consts declared after this site.
-const {
-  screenPollers, SCREEN_SETTLE_TIMEOUT_MS,
-  startScreenPoller, pokeScreenPoller, stopScreenPoller, finalScreenFrame,
-} = createScreenPollers({
-  lateBound: {
-    broadcast: () => broadcast,
-    computerControlRevision: () => computerControlRevision,
-  },
-  helpers: {
-    currentBrowserSession,
-    botComputerControlSnapshot,
-  },
-});
-const sharedComputerControl = new SharedComputerControl(turnResources, () => store.bots.some(bot => botComputerControlSnapshot(bot.id).held));
-const turnCleanup = createTurnCleanup({
-  store,
-  turnResources,
-  turnResourceOwners,
-  turnComputerResources,
-  teamComputerTurns,
-  directTurnGenerationByThread,
-  stopScreenPoller,
   roomHandoffs: () => roomHandoffs,
-  botForThread,
-  cancelDirectTurnDispatch,
-  revokeInternalCapabilitiesForThread,
-  runningTurnInstance,
-  closeOpenApprovals,
+    broadcast: () => broadcast,
+    ASK_BOT_TIMEOUT_MS: () => ASK_BOT_TIMEOUT_MS,
+    GROUP_GOAL_WAIT_MAX_MS: () => GROUP_GOAL_WAIT_MAX_MS,
+    isUnattended: (botId, threadId) => isUnattended(botId, threadId),
+  },
 });
-const { releaseTurnResources, interruptDirectThread, settlingResourceOwners, autoVmClaims } = turnCleanup;
 
-async function bindTurnComputer(owner: TurnOwner, resource: string, exclusive = false): Promise<void> {
-  const active = () => activeInternalGenerationByThread.get(owner.threadId) === owner.generation &&
-    turnResourceOwners.get(owner.threadId)?.generation === owner.generation;
-  let waitingMessage: Message | undefined;
-  const deadline = Date.now() + GROUP_GOAL_WAIT_MAX_MS;
-  try {
-    while (true) {
-      if (!active()) throw new DirectTurnSetupCancelled("Computer wait cancelled");
-      if (!exclusive || claimTurnResource(owner, resource)) break;
-      if (!waitingMessage) {
-        const blocker = turnResources.blocker(resource, owner);
-        const holderBot = blocker && store.botByThread(blocker.threadId);
-        const holderTask = holderBot && blocker && store.taskByThread(holderBot.id, blocker.threadId);
-        const holder = holderBot ? `${holderBot.name}${holderTask?.title ? ` / ${holderTask.title}` : ""}`
-          : blocker && store.groupByThread(blocker.threadId)?.name;
-        waitingMessage = store.appendMessage(owner.threadId, {
-          role: "bot", kind: "activity",
-          tool: { name: `Waiting for computer${holder ? ` — ${holder} is using it` : ""}; will continue automatically` },
-          ...(holderBot && holderTask ? { threadRef: { botId: holderBot.id, threadId: holderTask.threadId, title: holderTask.title } } : {}),
-        });
-      }
-      if (Date.now() >= deadline) throw new Error("Computer is still busy. Stop the turn using it, then retry.");
-      await new Promise<void>(resolve => setTimeout(resolve, 100));
-    }
-  } finally {
-    if (waitingMessage) store.patchMessage(owner.threadId, waitingMessage.id, {
-      tool: { name: active() && turnResources.owns(resource, owner) ? "Computer available — continuing" : "Computer wait ended", ok: true },
-    });
-  }
-  turnResourceOwners.set(owner.threadId, owner);
-  turnComputerResources.set(owner.threadId, { owner, resource });
-}
-
-/** Opt-in direct-chat parking (#1194): when this bot's person chose to queue
- * messages behind running work, a message that arrives while delegated
- * assignments are still out waits in the steer queue — room-style parking —
- * instead of steering the conversation immediately. */
-function parksBehindCoordination(botId: string, threadId: string): boolean {
-  if (!roomHandoffs.activeDirect(threadId)) return false;
-  return (store.projectBotForTask(botId, threadId) ?? store.bot(botId))?.parkDirectMessages === true;
-}
-
-/** Routine and webhook dispatch shares startTurn's admission preconditions
- * instead of waiting for whole-bot idleness: a free thread slot and no
- * active group turn. A group turn blocks scheduled starts the same way it
- * blocks every other turn kind; it does not consume a capacity slot. */
-function unattendedDispatchState(botId: string): "ready" | "busy" | "missing" {
-  const bot = store.bot(botId);
-  return !bot ? "missing" : botAtThreadCapacity(botId) || activeGroupTurnForBot(botId) ? "busy" : "ready";
-}
-
-async function interruptAllDirectThreads(botId: string): Promise<void> {
-  const threads = store.tasks(botId).filter((task) => task.busy || directTurnDispatchClaims.has(task.threadId) || roomHandoffs.activeDirect(task.threadId));
-  // Revoke every sibling before yielding to any provider teardown.
-  for (const task of threads) {
-    cancelDirectTurnDispatch(botId, task.threadId);
-    revokeInternalCapabilitiesForThread(task.threadId);
-  }
-  await Promise.all(threads.map((task) => interruptDirectThread(botId, task.threadId)));
-}
-
-/** Run a turn on `targetBotId` and resolve with its assistant text — the
- * synchronous half of ask_bot. Subscribes to the bus, folds assistant_text
- * for that thread, resolves on turn.completed (or a 4-min ceiling). */
-function askBotAndWait(targetBotId: string, message: string, depth: number, fromBotId?: string, fromThreadId?: string, targetThreadId?: string): Promise<AskBotOutcome> {
-  const target = store.bot(targetBotId);
-  if (!target) return Promise.resolve({ status: "error", text: "(no such bot)" });
-  const threadId = targetThreadId ?? target.threadId;
-  return new Promise((resolve) => {
-    let text = "";
-    let done = false;
-    const finish = (out: AskBotOutcome) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      unsub();
-      resolve(out);
-    };
-    const unsub = bus.subscribe((e: RuntimeEvent) => {
-      // A cancelled provider may flush text/completion after its replacement
-      // has started on the same thread. Retired turn ids must never satisfy a
-      // newer ask_bot waiter with the old partial reply.
-      if (shouldIgnoreProviderEvent(e)) return;
-      if (e.threadId !== threadId) return;
-      if (e.type === "item.completed" && e.itemType === "assistant_text") {
-        text += (text ? "\n" : "") + e.text;
-      } else if (e.type === "turn.completed") {
-        if (e.ok) finish({ status: "reply", text: text || "(the bot finished without a text reply)" });
-        else finish({ status: "failed", text, stopReason: e.stopReason ?? null });
-      }
-    });
-    // Timing out does NOT stop the peer's turn — the caller decides whether
-    // the still-running work becomes a delegation claim ticket instead.
-    const timer = setTimeout(() => finish({ status: "timeout", text }), ASK_BOT_TIMEOUT_MS);
-    // The asker's identity rides on the stored line as well as in the note
-    // prefixed to it: the wording is for the model reading this turn, the
-    // field is for anything that reads the transcript later.
-    const asker = fromBotId ? store.bot(fromBotId) : undefined;
-    const unattended = isUnattended(fromBotId, fromThreadId);
-    startTurn(targetBotId, message, {
-      threadId,
-      commsDepth: depth + 1,
-      unattended,
-      peerAsk: asker
-        ? unattended
-          ? { botId: asker.id, name: asker.name, unattended: true }
-          : { botId: asker.id, name: asker.name }
-        : undefined,
-      onDispatchError: (reason) => finish({ status: "error", text: `(couldn't start that bot: ${reason})` }),
-    }).catch((err) =>
-      finish({ status: "error", text: `(couldn't start that bot: ${err instanceof Error ? err.message : String(err)})` }),
-    );
-  });
-}
-// The checked-input validators live in ./checked-inputs.ts: the pure ones
-// (checkedExportSkillNames, collectExportSkills) are imported directly,
-// checkedGroupResponder and checkedMemberIds by ./group-state.ts, while
-// checkedModelSelection and
-// checkedTaskModelSwitch come from the createCheckedInputs factory wired near
-// the top of this file — they read the providerInstancesChanging set this
-// file destructures from providerFleet far below. askBotAndWait stays here:
-// it orchestrates turns over the module bus and the late-bound startTurn.
-const teamComputers = new TeamComputers(join(DATA_DIR, "team-computers.json"), ENVIRONMENT_ID);
-let followupsReady = false;
-const sendSequencer = new SendSequencer();
-// A committed profile cleanup means both its config deletion and bot-reference
-// cleanup were intended to be durable. Reconcile stale secondary references
-// before Electron can ACK and remove the journal: a crash between those writes
-// in an older build must not let id reuse attach a bot to somebody else's new
-// account. Prepared entries remain untouched because their deletion is
-// ambiguous and must never authorize either mutation or a wipe.
-let browserCleanupReferencesReconciled = true;
-try {
-  const committedProfileIds = new Set(browserCleanup.committedProfileIds());
-  for (const bot of store.bots) {
-    if (bot.browserProfile && committedProfileIds.has(bot.browserProfile)) {
-      store.patchBot(bot.id, { browserProfile: undefined });
-    }
-  }
-} catch (error) {
-  browserCleanupReferencesReconciled = false;
-  console.error(
-    `browser cleanup: could not reconcile committed profile references: ${error instanceof Error ? error.message : String(error)}`,
-  );
-}
-// Replay only after the secondary write above is durable. If reconciliation
-// failed, leave the committed journal in place and profile reuse blocked.
-if (browserCleanupReferencesReconciled) browserCleanup.startPending();
 
 // ── bot wire views ──────────────────────────────────────────────────────
 // The client-facing wire views and the approval-policy predicates live in
@@ -952,7 +680,7 @@ const {
     drainQueuedSends: () => drainQueuedSends(),
     retryDelegationsWaitingOn: (botId) => retryDelegationsWaitingOn(botId),
     startTurn: (botId, text, opts) => startTurn(botId, text, opts),
-    followupsReady: () => followupsReady,
+    followupsReady: () => followupsReady.get(),
     localVmImageBusy: () => localVmImageBusy,
     localVmModeChangeBusy: () => localVmModeChangeBusy,
     setLocalVmProvisionBusy: (value) => { localVmProvisionBusy = value; },
@@ -1275,7 +1003,7 @@ const {
   lateBound: {
     commsBus: () => commsBus,
     approvalBus: () => approvalBus,
-    followupsReady: () => followupsReady,
+    followupsReady: () => followupsReady.get(),
   },
 });
 
@@ -2266,7 +1994,7 @@ restoreChannelMessages();
 server.listen(PORT, "127.0.0.1", () => {
   companyRuntimeReady();
   console.log(`openmausbot server on http://127.0.0.1:${PORT}`);
-  followupsReady = true;
+  followupsReady.set(true);
   drainQueuedSends();
   drainQueuedChannelSends();
   // Startup work uses the same turn dispatcher and local tool endpoint as
@@ -2308,7 +2036,7 @@ if (TUNNEL_SOCKET) {
 const gracefulShutdown = createGracefulShutdown({
   cleanup: [
     () => {
-      followupsReady = false;
+      followupsReady.set(false);
       companyShutdown = true;
       if (workspaceAccessTimer) clearInterval(workspaceAccessTimer);
       // Child MCP processes and the HTTP listener can remain alive while the
