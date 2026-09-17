@@ -8,16 +8,14 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { extname, join } from "node:path";
 
 import { z } from "zod";
-import { SharedComputers, sharedComputerRegistration } from "./shared-computers.ts";
+import { SharedComputers } from "./shared-computers.ts";
 import { SharedComputerControl } from "./shared-computer-control.ts";
 import { RoomHandoffs } from "./room-handoffs.ts";
-import { CLOUD_COMPUTER_BUSY_ERROR } from "../shared/computer-contention.ts";
 import {
   approvalModeFor,
   supportsApprovalMode,
 } from "../shared/approval-mode.ts";
 import { escapeAttribute } from "../shared/attachments.ts";
-import { credentialResumeOutcome, credentialIsConfigured, isCredentialTargetId } from "../shared/credential-request.ts";
 
 import {
   BrowserCleanupCoordinator,
@@ -30,8 +28,7 @@ import {
   cleanupStaleAttachmentPartials,
 } from "./attachments.ts";
 import * as box from "./box.ts";
-import { computerBackendFor } from "./computer-backend.ts";
-import { TeamComputers, teamComputerOwner } from "./team-computers.ts";
+import { TeamComputers } from "./team-computers.ts";
 import type { WireGroup } from "../shared/wire.ts";
 import { boxCreateRecoverySnapshot } from "./box-create-idempotency.ts";
 import { boxDeletionSnapshot } from "./box-delete-journal.ts";
@@ -80,7 +77,6 @@ import {
   discardDelegations,
   drainDelegations,
   expireStaleDelegations,
-  pendingDelegationSnapshot,
   pendingThreads,
   releaseDelegationsWaitingOn,
 } from "./delegations.ts";
@@ -158,7 +154,7 @@ import {
 } from "./checked-inputs.ts";
 import { createDesktopApproval } from "./desktop-approval.ts";
 import { createScreenPollers } from "./screen-pollers.ts";
-import { createComputerLifecycle, type RemoteComputerProvider } from "./computer-lifecycle.ts";
+import { createComputerLifecycle } from "./computer-lifecycle.ts";
 import { createGroupTurn } from "./group-turn.ts";
 import {
   createGroupTurnOperations,
@@ -198,6 +194,9 @@ import { createBotTasksRoutes } from "./routes/bot-tasks.ts";
 import { createBotProfileRoutes } from "./routes/bot-profile.ts";
 import { createBotMemoryRoutes } from "./routes/bot-memory.ts";
 import { createAuthSessionRoutes } from "./routes/auth-session.ts";
+import { createBotCardsRoutes } from "./routes/bot-cards.ts";
+import { createBotComputerRoutes } from "./routes/bot-computer.ts";
+import { createWorkspaceCommsRoutes } from "./routes/workspace-comms.ts";
 import { createComputersRoutes } from "./routes/computers.ts";
 import { createSystemRoutes } from "./routes/system.ts";
 import { createUsageRoutes } from "./routes/usage.ts";
@@ -205,7 +204,6 @@ import { createConfigRoutes } from "./routes/config.ts";
 import type { RouteContext } from "./routes/http.ts";
 import {
   activeInternalGenerationByThread,
-  beginInternalCapabilityGeneration,
   computerSelectionTurns,
   internalCapabilities,
   mintInternalCapability,
@@ -257,7 +255,6 @@ import {
 import { cookieMaxAgeSeconds, SessionRegistry } from "./sessions.ts";
 import { describeBrand, loadBrand } from "./brand.ts";
 import {
-  PHONE_SECRET_PROTOCOL_VERSION,
   PhoneSecretBridge,
   PhoneSecretSubmissionRegistry,
 } from "./phone-secret.ts";
@@ -604,16 +601,6 @@ const createSidebarSectionSchema = z.object({
   botIds: z.array(z.string().regex(/^[\w-]+$/)).max(MAX_WORKSPACE_BOTS).default([]),
 }).strict();
 const createGroupTaskRequestSchema = z.object({ title: z.string().optional() });
-const phoneSecretEnvelopeSchema = z.object({
-  version: z.literal(PHONE_SECRET_PROTOCOL_VERSION),
-  threadId: z.string().regex(/^[\w-]{1,128}$/),
-  keyId: z.string().regex(/^[A-Za-z0-9_-]{22}$/),
-  deviceId: z.string().regex(/^[\w-]{1,128}$/),
-  target: z.string().regex(/^[A-Za-z][A-Za-z0-9]{0,63}$/),
-  requestKey: z.string().regex(/^[\w-]{1,128}$/),
-  encapsulatedKey: z.string().regex(/^[A-Za-z0-9_-]{87}$/),
-  ciphertext: z.string().regex(/^[A-Za-z0-9_-]{23,5483}$/),
-}).strict();
 // Resolved from the server root — see server/proxy-paths.ts. This descending
 // path happened to survive bundling, but it goes through the same anchor so
 // there is exactly one way proxies are located.
@@ -3472,6 +3459,13 @@ const handleAuthSession = createAuthSessionRoutes({
   customDomainStatus,
   customDomainVerifier,
 });
+const handleWorkspaceComms = createWorkspaceCommsRoutes({
+  sessions,
+  sharedComputers,
+  sharedComputerControl,
+  MAX_COMMS_DEPTH,
+  delegationWatch,
+});
 const handleComputers = createComputersRoutes({
   routines: () => routines,
   sessions,
@@ -3512,6 +3506,34 @@ const handleComputers = createComputersRoutes({
   localVmModeChangeBusy: () => localVmModeChangeBusy,
   localVmProvisionBusy: { get: () => localVmProvisionBusy, set: (value) => { localVmProvisionBusy = value; } },
 });
+const handleBotCards = createBotCardsRoutes({
+  phoneSecretSubmissions,
+  phoneSecretSubmissionKey,
+  currentSecretState,
+  provideSecretFromPhone,
+  secretMessage,
+  resumeSecretCard,
+  connectorMessage,
+  maybeResumeConnectors,
+});
+const handleBotComputer = createBotComputerRoutes({
+  inheritedTeamComputer,
+  computerPreviewBot,
+  computerPreviewSurface,
+  botComputerControlKey,
+  botComputerControlSnapshot,
+  assertTeamControlCanBeTaken,
+  claimTeamComputerLifecycle,
+  claimBotComputerLifecycle,
+  botHasActiveTurn,
+  providerTransitionMessage,
+  computerProviderConfigTransitions,
+  boxLifecycleBusyBots,
+  vpsPreviewRequests,
+  activeVpsThreads,
+  computerControl,
+  controlLeaseIdSchema,
+});
 const handleSystem = createSystemRoutes({
   STATIC_DIR,
   browserEngineInstall: { get: () => browserEngineInstall, set: (value) => { browserEngineInstall = value; } },
@@ -3530,8 +3552,6 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
   }
   const path = url.pathname;
   const method = req.method ?? "GET";
-  /** scratch for route matches, shared by every `path.match` below */
-  let m: RegExpMatchArray | null = null;
   let releaseWorkspaceRequest: (() => void) | undefined;
   try {
     // Unlike the legacy reachability probe, this attests the running
@@ -3725,117 +3745,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     }
 
     if (await handleAuthSession(req, res, rctx)) return;
-    if (method === "POST" && path === "/api/desktop/shared-computer-control" && sharedComputersEnabled(cfg)) {
-      if (auth.kind !== "loopback") return json(res, 403, { error: "Local desktop only" });
-      const body = await readBody(req, 1024);
-      if (!sharedComputersEnabled(cfg)) return json(res, 404, { error: `no route: ${method} ${path}` });
-      if (!z.string().uuid().safeParse(body?.id).success || !["acquire", "release"].includes(body?.action)) return json(res, 400, { error: "Invalid computer lease" });
-      if (body.action === "release") sharedComputerControl.release(body.id);
-      else sharedComputerControl.acquire(body.id);
-      return json(res, 200, { ok: true });
-    }
-    // A paired desktop registers only its own outbound connector. A second,
-    // main-process-only secret binds poll/results to that exact desktop.
-    // With features.sharedComputers off the whole family falls through to the
-    // generic "no route" 404, so a probe cannot tell a disabled feature from
-    // a build that never had one.
-    if (method === "POST" && path.startsWith("/api/shared-computers/") && sharedComputersEnabled(cfg)) {
-      if (auth.kind !== "session") return json(res, 403, { error: "Pair this desktop first" });
-      if (!/^application\/json\b/i.test(String(req.headers["content-type"] ?? ""))) return json(res, 415, { error: "JSON required" });
-      const body = await readBody(req, 4_000_000);
-      if (!sharedComputersEnabled(cfg)) return json(res, 404, { error: `no route: ${method} ${path}` });
-      if (!sessions.isLive(auth.session.id)) return json(res, 401, { error: "Session ended" });
-      const secret = String(req.headers["x-omb-computer-secret"] ?? "");
-      if (path === "/api/shared-computers/connect") {
-        const parsed = sharedComputerRegistration.safeParse(body);
-        if (!parsed.success) return json(res, 400, { error: "Invalid computer registration" });
-        const registration = parsed.data;
-        if (registration.environmentId !== ENVIRONMENT_ID) return json(res, 409, { error: "Workspace identity changed. Pair again before sharing this computer." });
-        sharedComputers.register(registration, auth.session.id, secret);
-        return json(res, 200, { ok: true });
-      }
-      const route = /^\/api\/shared-computers\/([\w-]+)\/(poll|lease|result|disconnect)$/.exec(path);
-      if (!route) return json(res, 404, { error: "not found" });
-      const [, id, action] = route;
-      if (action === "poll") return json(res, 200, { job: await sharedComputers.poll(id, auth.session.id, secret) });
-      if (action === "lease") return json(res, 200, { active: sharedComputers.liveJob(id, auth.session.id, secret, String(body?.jobId)) });
-      if (action === "result") sharedComputers.complete(id, auth.session.id, secret, String(body?.jobId), body?.result);
-      if (action === "disconnect") sharedComputers.disconnect(id, auth.session.id, secret);
-      return json(res, 200, { ok: true });
-    }
-    // Isolated integration fixtures cannot invoke an MCP tool before their
-    // fake provider exits, so they mint an exact synthetic turn capability
-    // through a per-process high-entropy test key. The route does not exist
-    // unless the launcher explicitly sets that key; production builds never
-    // set it.
-    if (method === "POST" && path === "/api/testing/internal-capability") {
-      const expected = process.env.OMB_TEST_INTERNAL_CAPABILITY_KEY ?? "";
-      const actual = Array.isArray(req.headers["x-openmausbot-test-capability"])
-        ? ""
-        : String(req.headers["x-openmausbot-test-capability"] ?? "");
-      const expectedBytes = Buffer.from(expected);
-      const actualBytes = Buffer.from(actual);
-      if (
-        !expected ||
-        actualBytes.length !== expectedBytes.length ||
-        !timingSafeEqual(actualBytes, expectedBytes)
-      ) return json(res, 404, { error: "not found" });
-      const parsed = z.object({
-        botId: z.string().regex(/^[\w-]{1,128}$/),
-        threadId: z.string().regex(/^[\w-]{1,128}$/),
-        kind: z.enum(["agents", "connectors", "computer"]).default("agents"),
-        depth: z.number().int().min(0).max(MAX_COMMS_DEPTH).default(0),
-        skillAuthoring: z.boolean().default(false),
-      }).strict().safeParse(await readBody(req));
-      if (!parsed.success || !store.bot(parsed.data.botId)) {
-        return json(res, 400, { error: "invalid test capability" });
-      }
-      const generation = beginInternalCapabilityGeneration(parsed.data.threadId);
-      const token = mintInternalCapability({
-        ...parsed.data,
-        generation,
-        createdBots: 0,
-        openedThreads: 0,
-      });
-      return json(res, 201, { token });
-    }
+    if (await handleWorkspaceComms(req, res, rctx)) return;
     // ── internal peer-agent comms (localhost + bot capability only) ───
     // The agents-proxy (spawned inside a bot's agent process) calls these to
     // discover peers and hand a message to one. Not part of the public API.
     if (await internalRoutes(req, res, path, method, url)) return;
-
-    // Live Team Map metadata. Prompts and replies never leave their
-    // transcripts: this projection carries only ids, status relationships,
-    // optional delegation labels, and timestamps.
-    if (method === "GET" && path === "/api/team-map") {
-      const visible = new Set(store.bots.filter((bot) => !bot.hidden).map((bot) => bot.id));
-      const collaborations = store.groups
-        .filter(
-          (group) =>
-            group.dm === true &&
-            group.memberIds.length === 2 &&
-            group.memberIds.every((botId) => visible.has(botId)),
-        )
-        .map((group) => ({
-          groupId: group.id,
-          botIds: [group.memberIds[0], group.memberIds[1]] as [string, string],
-          lastAt: store.messagesFor(group.threadId).at(-1)?.at ?? group.createdAt,
-        }))
-        .sort((a, b) => b.lastAt - a.lastAt);
-      const queued = pendingDelegationSnapshot().flatMap((item) => {
-        if (!visible.has(item.sourceBotId) || !visible.has(item.toBotId)) return [];
-        return [{ sourceBotId: item.sourceBotId, targetBotId: item.toBotId, reason: item.reason }];
-      });
-      const running = [...delegationWatch.entries()].flatMap(([threadId, watch]) => {
-        if (!visible.has(watch.toBotId)) return [];
-        const channel = watch.channelId ? store.group(watch.channelId) : undefined;
-        const sourceBotId = watch.sourceBotId ??
-          channel?.memberIds.find((botId) => botId !== watch.toBotId);
-        if (!sourceBotId || !visible.has(sourceBotId)) return [];
-        return [{ sourceBotId, targetBotId: watch.toBotId, threadId, groupId: channel?.id }];
-      });
-      return json(res, 200, { collaborations, queued, running });
-    }
 
     // ── routines calendar ────────────────────────────────────────────────
     if (await routinesRoutes(req, res, path, method, url)) return;
@@ -3955,336 +3869,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
 
     if (await handleConnectors(req, res, rctx)) return;
 
-    // Phone credential entry arrives as an HPKE envelope bound to the exact
-    // paired device, bot, task, card and allowlisted target. The companion
-    // authenticates the bearer and supplies the device id; only the embedded
-    // Electron server has the private key needed to open the envelope.
-    m = path.match(/^\/api\/bots\/([\w-]+)\/secret-cards\/([\w-]+)\/provide$/);
-    if (m && method === "POST") {
-      if (req.headers["x-openmausbot-companion"] !== "1") {
-        return json(res, 403, { error: "Secure phone entry must come from a paired phone" });
-      }
-      const rawDeviceId = req.headers["x-openmausbot-companion-device"];
-      const authenticatedDeviceId = Array.isArray(rawDeviceId) ? "" : String(rawDeviceId ?? "");
-      if (!/^[\w-]{1,128}$/.test(authenticatedDeviceId)) {
-        return json(res, 401, { error: "This paired phone could not be verified" });
-      }
-      if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
-        return json(res, 415, { error: "content-type must be application/json" });
-      }
-      const parsed = phoneSecretEnvelopeSchema.safeParse(await readBody(req, 16_384));
-      if (!parsed.success || !isCredentialTargetId(parsed.data?.target)) {
-        return json(res, 400, { error: "The encrypted credential request is invalid" });
-      }
-      const state = await provideSecretFromPhone({
-        ...parsed.data,
-        botId: m[1],
-        messageId: m[2],
-        target: parsed.data.target,
-      }, authenticatedDeviceId);
-      return json(res, 200, state);
-    }
+    if (await handleBotCards(req, res, rctx)) return;
 
-    // Desktop credential cards never send the credential through this route.
-    // Electron saves it through the OS-backed store first; these actions only
-    // verify configured state, update card metadata, and resume the turn.
-    m = path.match(/^\/api\/bots\/([\w-]+)\/secret-cards\/([\w-]+)\/(provided|resume|dismiss)$/);
-    if (m && method === "POST") {
-      const body = await readBody(req);
-      const threadId = String(body.threadId ?? "");
-      const message = secretMessage(m[1], threadId, m[2]);
-      if (!message?.secret) return json(res, 404, { error: "no such credential request" });
-      if (phoneSecretSubmissions.has(
-        phoneSecretSubmissionKey(threadId, message.id, message.secret.requestKey),
-      )) {
-        return json(res, 409, { error: "this credential is currently being saved from a phone" });
-      }
-      if (m[3] === "provided") {
-        if (message.secret.dismissed) return json(res, 409, { error: "this credential request was dismissed" });
-        if (!credentialIsConfigured(cfg, message.secret.target)) {
-          return json(res, 409, { error: `${message.secret.label} was not saved yet` });
-        }
-        if (!resumeSecretCard(m[1], threadId, message.id, "provided")) {
-          return json(res, 409, { error: "this credential request is no longer available" });
-        }
-        const state = currentSecretState(m[1], threadId, message.id);
-        if (!state) return json(res, 409, { error: "this credential request is no longer available" });
-        return json(res, 200, state);
-      }
-      if (m[3] === "resume") {
-        const outcome = credentialResumeOutcome(message.secret);
-        if (!outcome) {
-          return json(res, 409, { error: "this credential request is not ready to resume" });
-        }
-        if (outcome === "provided" && !credentialIsConfigured(cfg, message.secret.target)) {
-          return json(res, 409, { error: `${message.secret.label} is no longer configured` });
-        }
-        if (!resumeSecretCard(m[1], threadId, message.id, outcome)) {
-          return json(res, 409, { error: "this credential request is no longer available" });
-        }
-        const state = currentSecretState(m[1], threadId, message.id);
-        if (!state) return json(res, 409, { error: "this credential request is no longer available" });
-        return json(res, 200, { resumed: state.resumed });
-      }
-      if (!message.secret.provided && !resumeSecretCard(m[1], threadId, message.id, "dismissed")) {
-        return json(res, 409, { error: "this credential request is no longer available" });
-      }
-      const state = currentSecretState(m[1], threadId, message.id);
-      if (!state) return json(res, 409, { error: "this credential request is no longer available" });
-      return json(res, 200, { dismissed: true, resumed: state.resumed });
-    }
-
-    // Inline connection cards are bound to both the bot and the exact task
-    // or room thread that created them. The browser auth URL is returned
-    // only to this local UI and is never stored in the transcript.
-    m = path.match(/^\/api\/bots\/([\w-]+)\/connector-cards\/([\w-]+)\/(authorize|status|resume|dismiss)$/);
-    if (m) {
-      const body = method === "POST" ? await readBody(req) : {};
-      const threadId = String(method === "GET" ? url.searchParams.get("threadId") ?? "" : body.threadId ?? "");
-      const message = connectorMessage(m[1], threadId, m[2]);
-      if (!message?.connector) return json(res, 404, { error: "no such connection request" });
-      const connector = message.connector;
-      if (m[3] === "authorize" && method === "POST") {
-        store.patchMessage(threadId, message.id, {
-          connector: { ...connector, status: "authorizing", error: undefined, dismissed: false },
-        });
-        try {
-          return json(res, 200, await composio.authorizeService(cfg, connector.slug, connector.alias));
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error);
-          store.patchMessage(threadId, message.id, {
-            connector: { ...connector, status: "failed", error: detail.slice(0, 180) },
-          });
-          throw error;
-        }
-      }
-      if (m[3] === "status" && method === "GET") {
-        const service = (await composio.connectionStatus(cfg, [connector.slug]))[connector.slug];
-        // A different active account must never complete a second-account card.
-        // Missing alias metadata stays pending rather than guessing from the
-        // toolkit-wide status (including scoped keys without account reads).
-        const account = connector.alias
-          ? service?.accounts?.find((item) => item.alias?.trim().toLowerCase() === connector.alias!.toLowerCase())
-          : undefined;
-        const state = connector.alias ? {
-          connected: /^active$/i.test(account?.status ?? ""),
-          pending: /^(initiated|initializing|pending)$/i.test(account?.status ?? ""),
-          status: account?.status ?? "not_connected",
-        } : service;
-        const failed = /failed|expired|revoked|error/i.test(state?.status ?? "");
-        const next = {
-          ...connector,
-          status: state?.connected ? ("connected" as const) : failed ? ("failed" as const) : ("authorizing" as const),
-          error: failed ? `Connection ${state?.status ?? "failed"}` : undefined,
-        };
-        store.patchMessage(threadId, message.id, { connector: next });
-        if (state?.connected) maybeResumeConnectors(m[1], threadId, connector.resumeKey);
-        return json(res, 200, { connected: Boolean(state?.connected), pending: Boolean(state?.pending), status: state?.status });
-      }
-      if (m[3] === "resume" && method === "POST") {
-        const resumed = maybeResumeConnectors(m[1], threadId, connector.resumeKey);
-        return resumed
-          ? json(res, 200, { resumed: true })
-          : json(res, 409, { error: "finish connecting every requested app first" });
-      }
-      if (m[3] === "dismiss" && method === "POST") {
-        store.patchMessage(threadId, message.id, { connector: { ...connector, dismissed: true } });
-        return json(res, 200, { dismissed: true });
-      }
-      return json(res, 405, { error: "method not allowed" });
-    }
-
-    // ── the bot's cloud computer (Box) ──
-    m = path.match(/^\/api\/bots\/([\w-]+)\/computer$/);
-    if (m && method === "GET") {
-      const bot = computerPreviewBot(m[1], url);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      const surface = url.searchParams.has("threadId") ? await computerPreviewSurface(bot, bot.threadId) : "cloud";
-      const computerBackend = computerBackendFor(bot);
-      if (surface !== "cloud") return json(res, 200, { surface, configured: false, backend: computerBackend.kind });
-      const teamComputer = inheritedTeamComputer(bot);
-      if (teamComputer) return json(res, 200, { surface, backend: "box", teamComputer: { id: teamComputer.id, name: teamComputer.name }, ...(await box.boxStatus(cfg, teamComputerOwner(teamComputer.id))) });
-      return json(res, 200, { surface, backend: computerBackend.kind, ...(await computerBackend.status(cfg, bot.id)) });
-    }
-    // Who is driving this bot's computer. GET is the panel's initial read;
-    // POST take/release/dismiss-help are the person's three moves. The bot
-    // has no verb here at all — its only voice is the internal help plea.
-    m = path.match(/^\/api\/bots\/([\w-]+)\/computer\/control$/);
-    if (m) {
-      const bot = store.bot(m[1]);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      if (method === "GET") return json(res, 200, botComputerControlSnapshot(bot.id));
-      if (method === "POST") {
-        // JSON-only for the same anti-form-POST reason as every other
-        // computer mutation below.
-        if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
-          return json(res, 415, { error: "content-type must be application/json" });
-        }
-        const body = await readBody(req);
-        const action = String(body.action ?? "");
-        const currentBot = store.bot(bot.id);
-        if (!currentBot) return json(res, 404, { error: "no such bot" });
-        const controlKey = botComputerControlKey(currentBot);
-        const teamComputer = inheritedTeamComputer(currentBot);
-        if (action === "take" && teamComputer) assertTeamControlCanBeTaken(teamComputer.id);
-        const leaseResult =
-          body.controlLeaseId === undefined
-            ? null
-            : controlLeaseIdSchema.safeParse(body.controlLeaseId);
-        if (leaseResult && !leaseResult.success) {
-          return json(res, 400, { error: "controlLeaseId is invalid" });
-        }
-        const controlLeaseId = leaseResult?.data;
-        if (action === "take" && (boxLifecycleBusyBots.has(bot.id) || boxLifecycleBusyBots.has(controlKey))) {
-          return json(res, 409, { error: "this bot's cloud computer is being changed — wait before taking control" });
-        }
-        if (action === "take" && controlLeaseId) {
-          const result = computerControl.acquireLease(controlKey, controlLeaseId);
-          return json(res, 200, {
-            ...result.snapshot,
-            owned: result.owned,
-            acquired: result.acquired,
-          });
-        }
-        if (action === "release" && controlLeaseId) {
-          const result = computerControl.releaseLease(controlKey, controlLeaseId);
-          return json(res, 200, { ...result.snapshot, released: result.released });
-        }
-        if (action === "take") return json(res, 200, computerControl.take(controlKey));
-        if (action === "release") return json(res, 200, computerControl.release(controlKey));
-        if (action === "dismiss-help") return json(res, 200, computerControl.dismissHelp(controlKey));
-        return json(res, 400, { error: "action must be take, release, or dismiss-help" });
-      }
-      return json(res, 405, { error: "method not allowed" });
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/computer\/viewer-close$/);
-    if (m && method === "POST") {
-      const bot = computerPreviewBot(m[1], url);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
-        return json(res, 415, { error: "content-type must be application/json" });
-      }
-      return json(res, 200, computerBackendFor(bot).closeViewer(bot.id));
-    }
-    m = path.match(/^\/api\/bots\/([\w-]+)\/computer\/(provision|join|sleep|exec|screenshot|remove)$/);
-    if (m && method === "POST") {
-      const botId = m[1];
-      const previewOnly = m[2] === "screenshot" || m[2] === "join";
-      const bot = previewOnly ? computerPreviewBot(botId, url) : store.bot(botId);
-      if (!bot) return json(res, 404, { error: "no such bot" });
-      const threadPreview = previewOnly && url.searchParams.has("threadId");
-      if (threadPreview && await computerPreviewSurface(bot, bot.threadId) !== "cloud") {
-        return json(res, 409, { error: "This conversation is not using the cloud computer" });
-      }
-      // Requiring JSON makes every computer mutation a non-simple browser
-      // request (same reasoning as the Local VM lifecycle routes above): a
-      // hostile page cannot submit it with a form, and its cross-origin JSON
-      // request dies in the preflight this server never answers. Applied to
-      // both backends — the Box branch runs commands too.
-      if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
-        return json(res, 415, { error: "content-type must be application/json" });
-      }
-      const computerBackend = computerBackendFor(bot);
-      const remoteProvider: RemoteComputerProvider = computerBackend.kind;
-      if (computerProviderConfigTransitions.has(remoteProvider)) {
-        return json(res, 409, { error: providerTransitionMessage(remoteProvider) });
-      }
-      if (boxLifecycleBusyBots.has(botId)) {
-        return json(res, 409, { error: "this bot's cloud computer is being changed — wait for it to finish" });
-      }
-      const teamComputer = inheritedTeamComputer(bot);
-      if (teamComputer) {
-        const key = teamComputerOwner(teamComputer.id);
-        if (boxLifecycleBusyBots.has(key)) return json(res, 409, { error: "This team computer is being changed; wait for it to finish" });
-        if (m[2] === "provision" || m[2] === "remove") return json(res, 409, { error: "Manage this shared computer from the Team map" });
-        if (m[2] === "exec") return json(res, 409, { error: "Use the bot's scoped computer tools for this shared desktop" });
-        if (m[2] === "join" && !computerControl.snapshot(key).held) return json(res, 409, { error: "Take control before opening this shared desktop" });
-        const release = m[2] === "sleep" ? claimTeamComputerLifecycle(teamComputer) : claimBotComputerLifecycle(key);
-        try {
-          if (m[2] === "join") return json(res, 200, await box.joinReadyBox(cfg, key));
-          if (m[2] === "screenshot") return json(res, 200, await box.screenshotBox(cfg, key));
-          return json(res, 200, await box.sleepBox(cfg, key));
-        } finally { release(); }
-      }
-      if (computerBackend.kind === "vps") {
-        if (m[2] === "screenshot") {
-          let preview = vpsPreviewRequests.get(botId);
-          if (!preview) {
-            preview = computerBackend.screenshot(cfg, botId).finally(() => {
-              vpsPreviewRequests.delete(botId);
-            });
-            vpsPreviewRequests.set(botId, preview);
-          }
-          return json(res, 200, await preview);
-        }
-        // Opening the existing SSH viewer can coexist with a capture. Start,
-        // stop, remove and Settings deletion still exclude pending previews.
-        const releaseComputerLifecycle = claimBotComputerLifecycle(botId, m[2] === "join");
-        try {
-          if (m[2] === "exec") {
-            return json(res, 409, { error: "the VPS console is available to the bot through its scoped computer tools" });
-          }
-          if (m[2] === "provision" && bot.computer !== "cloud" && !bot.autoStartVps) {
-            return json(res, 409, { error: "Auto may start this VPS only after Start VPS automatically is enabled" });
-          }
-          if ((m[2] === "sleep" || m[2] === "remove") && (bot.busy || activeVpsThreads.has(botId))) {
-            return json(res, 409, { error: "the VPS computer is being used by this bot — interrupt the turn first" });
-          }
-          if (m[2] === "join") {
-            return json(res, 200, await computerBackend.join(cfg, botId));
-          }
-          const action = m[2] === "provision" ? "provision" : m[2] === "remove" ? "remove" : "stop";
-          return json(res, 200, await computerBackend.action(cfg, botId, action));
-        } finally {
-          releaseComputerLifecycle();
-        }
-      }
-      const activeBoxTurn = botHasActiveTurn(botId);
-      if (["provision", "sleep"].includes(m[2]) && activeBoxTurn) {
-        return json(res, 409, {
-          error: CLOUD_COMPUTER_BUSY_ERROR,
-        });
-      }
-      // Input validity is independent of destination authorization. Preserve
-      // the stable 400 contract for oversized commands without contacting the
-      // provider; a valid Auto request still reaches the 409 gate below.
-      let boxCommand: string | undefined;
-      if (m[2] === "exec") {
-        const body = await readBody(req);
-        boxCommand = String(body?.command ?? "");
-        if (boxCommand.length > box.MAX_REMOTE_COMMAND_LENGTH) {
-          return json(res, 400, {
-            error: `command is too long (maximum ${box.MAX_REMOTE_COMMAND_LENGTH} characters)`,
-          });
-        }
-      }
-      if (bot.computer !== "cloud" && !threadPreview) {
-        return json(res, 409, {
-          error: "Choose Cloud before changing or opening this Box. Auto only checks existing computer state.",
-        });
-      }
-      if (m[2] === "remove") {
-        // Boxes sleep and wake; only the VPS backend has a container to remove.
-        return json(res, 409, { error: "the cloud Box backend has no container to remove — use sleep instead" });
-      }
-      const releaseComputerLifecycle = claimBotComputerLifecycle(botId);
-      try {
-        switch (m[2]) {
-          case "provision":
-            return json(res, 200, await computerBackend.action(cfg, botId, "provision", { botName: bot.name }));
-          case "join":
-            return json(res, 200, await computerBackend.join(cfg, botId, activeBoxTurn || threadPreview ? "ready" : "wake"));
-          case "sleep":
-            return json(res, 200, await computerBackend.action(cfg, botId, "sleep"));
-          case "exec":
-            return json(res, 200, await computerBackend.action(cfg, botId, "exec", { command: boxCommand ?? "" }));
-          case "screenshot":
-            return json(res, 200, await computerBackend.screenshot(cfg, botId));
-        }
-      } finally {
-        releaseComputerLifecycle();
-      }
-    }
+    if (await handleBotComputer(req, res, rctx)) return;
 
     return json(res, 404, { error: `no route: ${method} ${path}` });
   } catch (e) {
