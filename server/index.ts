@@ -25,13 +25,11 @@ import { credentialResumeOutcome, credentialIsConfigured, isCredentialTargetId }
 
 import {
   BrowserCleanupCoordinator,
-  finalizeBrowserCleanupMutation,
   requireBrowserCleanupAcknowledged,
-  type BrowserCleanupRequest,
   type BrowserCleanupWireRequest,
 } from "./browser-lifecycle-cleanup.ts";
 import * as checkpoints from "./checkpoints.ts";
-import { appendDecision, readDecisions, flushDecisionLog } from "./decision-log.ts";
+import { appendDecision, flushDecisionLog } from "./decision-log.ts";
 import { validateBotCwd } from "./bot-cwd.ts";
 import {
   ATTACHMENTS_DIR,
@@ -67,9 +65,9 @@ import * as box from "./box.ts";
 import { computerBackendFor } from "./computer-backend.ts";
 import { TeamComputers, teamComputerAssignment, teamComputerCreate, teamComputerOwner } from "./team-computers.ts";
 import type { WireGroup } from "../shared/wire.ts";
-import { boxCreateRecoverySnapshot, retireDeletedBoxCreate } from "./box-create-idempotency.ts";
+import { boxCreateRecoverySnapshot } from "./box-create-idempotency.ts";
 import { boxDeletionSnapshot } from "./box-delete-journal.ts";
-import { boxAccountResourceChangeError, cloudBackendChangeError, vpsAliasResourceChangeError } from "./cloud-backend.ts";
+import { cloudBackendChangeError } from "./cloud-backend.ts";
 import * as composio from "./composio.ts";
 import {
   canAccessTeam,
@@ -89,17 +87,12 @@ import {
 import {
   instanceConfigs,
   loadConfig,
-  providerReloadKeys,
   localVmMaxInstances,
   localVmMode,
-  parseConfigPatch,
   threadEventLogRetentionDays,
   saveConfig,
   sharedComputersEnabled,
   builtInBrowserEnabled,
-  browserProfileReplacementConflict,
-  browserProfilePartitionTarget,
-  syncCredentialEnv,
   vpsSshAlias,
   DATA_DIR,
   EVENTS_DIR,
@@ -109,18 +102,11 @@ import {
 import { sweepThreadEventLogs, type ThreadLogRetentionCandidate } from "./thread-retention.ts";
 import { resetPathCache } from "./env-path.ts";
 import {
-  parseUsageRange,
-  readUsage,
-  summarizeUsage,
-  usageCsv,
-  USAGE_GROUPINGS,
   flushUsageLedger,
-  type UsageGroupBy,
   type UsageTrigger,
 } from "./usage-ledger.ts";
 import type { RequestAuth } from "./request-auth.ts";
-import { checkProviderKey, PROVIDER_KEY_KINDS, type ProviderKeyKind } from "./provider-key-check.ts";
-import { assertWithinBudget, spendState } from "./spend.ts";
+import { assertWithinBudget } from "./spend.ts";
 import { fleetAvailable, fleetRequest, fleetSocketPath } from "./fleet-client.ts";
 import { entitled } from "./enterprise.ts";
 import { HOSTED_CONTRACT_HEADER, HOSTED_CONTRACT_METADATA, HOSTED_CONTRACT_VERSION } from "./hosted-contract.ts";
@@ -178,7 +164,6 @@ import {
   type GroupRecord,
   type Message,
 } from "./store.ts";
-import * as tts from "./tts/index.ts";
 import { extractTurnImages } from "./turn-images.ts";
 import { recordHanded } from "./delta-context.ts";
 import type { TurnOwner } from "./turn-resources.ts";
@@ -312,6 +297,8 @@ import { createConnectorRoutes } from "./routes/connectors.ts";
 import { createWebhookRoutes } from "./routes/webhooks.ts";
 import { handleSearch } from "./routes/search.ts";
 import { handleTeamLibrary } from "./routes/team-library.ts";
+import { createUsageRoutes } from "./routes/usage.ts";
+import { createConfigRoutes } from "./routes/config.ts";
 import type { RouteContext } from "./routes/http.ts";
 import {
   activeInternalGenerationByThread,
@@ -3451,6 +3438,33 @@ const handleInstances = createInstanceRoutes({
   activeGroupTurnForBot,
 });
 const handleMcp = createMcpRoutes({ sessions, mcpServerResponse, mcpServerBody, persistMcpServers });
+const handleUsage = createUsageRoutes();
+const handleConfig = createConfigRoutes({
+  providerConfigBusy: { get: () => providerConfigBusy, set: (value) => { providerConfigBusy = value; } },
+  localVmModeChangeBusy: { get: () => localVmModeChangeBusy, set: (value) => { localVmModeChangeBusy = value; } },
+  localVmImageBusy: () => localVmImageBusy,
+  computerProviderConfigTransitions,
+  localVmActiveThreads,
+  localVmLifecycleBusy,
+  perBotLocalVmCountForModeChange,
+  managedBoxOwners,
+  providerOperationConflict,
+  configStatus,
+  configForAccess,
+  sessions,
+  broadcast,
+  browserRuntime,
+  browserLive,
+  browserCleanup,
+  sharedComputers,
+  sharedComputerControl,
+  reloadProviders,
+  drainQueuedSends,
+  drainDelegationWakes,
+  drainConnectorResumes,
+  drainSecretResumes,
+  drainTeamSetupResumes,
+});
 const handleTts = createTtsRoutes();
 const handleConnectors = createConnectorRoutes();
 const handleWebhooks = createWebhookRoutes({ webhooks, webhookIngressStatus });
@@ -7255,549 +7269,13 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       return json(res, 200, readThreadEvents({ eventsDir: EVENTS_DIR, nativeDir: NATIVE_DIR, threadId, limit }));
     }
 
-    // ── the fleet-wide authorization decision log ──
-    // Read-only like the inspector above: the rows were written at the
-    // request.opened fold and in answerRequest; this only reads them back,
-    // newest last, same order as thread events.
-    // ── the usage ledger: what this workspace spent over a period ──
-    // Read-only over the month files usage-ledger.ts appends at turn.completed.
-    // Admin scope by default, like every route not opened to clients.
-    if (method === "GET" && (path === "/api/usage" || path === "/api/usage.csv")) {
-      const range = parseUsageRange(url.searchParams.get("from"), url.searchParams.get("to"));
-      if (!range) return json(res, 400, { error: "from and to must be YYYY-MM-DD, from no later than to, at most a year apart" });
-      const rows = readUsage(DATA_DIR, range);
-      // The operator's price list is applied only with the billing entitlement.
-      const prices = entitled("billing") && cfg.billing?.prices && Object.keys(cfg.billing.prices).length ? cfg.billing.prices : null;
-      if (path === "/api/usage.csv") {
-        const stamp = (date: Date) => date.toISOString().slice(0, 10);
-        res.writeHead(200, {
-          "content-type": "text/csv; charset=utf-8",
-          "content-disposition": `attachment; filename="usage-${stamp(range.from)}-${stamp(range.to)}.csv"`,
-          "cache-control": "no-store",
-        });
-        res.end(usageCsv(rows, prices));
-        return;
-      }
-      const requested = url.searchParams.get("groupBy") ?? "bot";
-      if (!USAGE_GROUPINGS.includes(requested as UsageGroupBy)) {
-        return json(res, 400, { error: `groupBy must be one of ${USAGE_GROUPINGS.join(", ")}` });
-      }
-      const groupBy = requested as UsageGroupBy;
-      res.setHeader("cache-control", "no-store");
-      return json(res, 200, {
-        from: range.from.toISOString(),
-        to: range.to.toISOString(),
-        groupBy,
-        ...summarizeUsage(rows, groupBy, prices),
-        budget: spendState(cfg, DATA_DIR),
-        billing: prices ? { currency: cfg.billing?.currency ?? "USD" } : null,
-      });
-    }
-
-    // ── provider key check: does a pasted or saved key open the provider's door ──
-    // One read-only request from this server; the verdict never carries the
-    // key. Admin scope by default, like every route not opened to clients.
-    if (method === "POST" && path === "/api/keys/test") {
-      const body = await readBody(req, 8192);
-      const provider = body?.provider;
-      if (!PROVIDER_KEY_KINDS.includes(provider as ProviderKeyKind)) {
-        return json(res, 400, { error: `provider must be one of ${PROVIDER_KEY_KINDS.join(", ")}` });
-      }
-      const kind = provider as ProviderKeyKind;
-      const saved = kind === "anthropic" ? cfg.anthropic : kind === "openaiCompat" ? cfg.openaiCompat : cfg.xai;
-      if (body?.key !== undefined && typeof body.key !== "string") {
-        return json(res, 400, { error: "key must be a string" });
-      }
-      const key = typeof body?.key === "string" ? body.key.trim() : saved?.key?.trim() || "";
-      if (!key) return json(res, 400, { error: "No key to test. Paste one or save one first." });
-      if (key.length > 512) return json(res, 400, { error: "That does not look like an API key." });
-      const url = typeof body?.url === "string" && body.url.trim() ? body.url.trim() : saved?.url;
-      res.setHeader("cache-control", "no-store");
-      return json(res, 200, await checkProviderKey({ provider: kind, key, url }));
-    }
-
-    if (method === "GET" && path === "/api/decisions") {
-      const rawLimit = url.searchParams.get("limit");
-      const parsedLimit = rawLimit === null ? undefined : Number(rawLimit);
-      if (parsedLimit !== undefined && (!Number.isInteger(parsedLimit) || parsedLimit <= 0)) {
-        return json(res, 400, { error: "limit must be a positive whole number" });
-      }
-      return json(res, 200, { decisions: readDecisions(DATA_DIR, parsedLimit ?? 200) });
-    }
+    if (await handleUsage(req, res, rctx)) return;
 
     if (await handleInstances(req, res, rctx)) return;
 
     if (await handleMcp(req, res, rctx)) return;
 
-    // ── app config (API keys — never echoed back, booleans only) ──
-    if (method === "GET" && path === "/api/config") {
-      return json(res, 200, configForAccess(configStatus(), auth.scopes.includes("admin")));
-    }
-    if ((method === "PUT" || method === "PATCH") && path === "/api/config") {
-      const body = await readBody(req);
-      const patch = parseConfigPatch(body);
-      if (!Object.keys(patch).length) return json(res, 400, { error: "nothing to save" });
-      const changingVoiceProvider = patch.tts?.provider !== undefined
-        && patch.tts.provider !== tts.voiceProvider(cfg);
-      if (changingVoiceProvider && patch.tts?.voice === undefined) {
-        // Voice ids are provider-owned opaque values. Never carry a default
-        // from one catalog into another. A caller may explicitly supply a
-        // voice for the newly selected provider in this same atomic patch.
-        patch.tts = { ...patch.tts, voice: "" };
-      }
-      if (providerConfigBusy) return json(res, 409, { error: "provider settings are already being updated" });
-      if (patch.browserProfiles !== undefined && body.expectedBrowserProfiles !== undefined) {
-        const current = (cfg.browserProfiles ?? []).map(({ id, name }) => ({ id, name }));
-        if (JSON.stringify(body.expectedBrowserProfiles) !== JSON.stringify(current)) {
-          return json(res, 409, { error: "Browser profiles changed in another window. Review the refreshed list and try again." });
-        }
-      }
-      const disablingBuiltInBrowser = patch.features?.browser === false && builtInBrowserEnabled(cfg);
-      const removedBrowserProfileIds = patch.browserProfiles === undefined
-        ? []
-        : (cfg.browserProfiles ?? [])
-            .map((profile) => profile.id)
-            .filter((id) => !patch.browserProfiles!.some((profile) => profile.id === id));
-      const profileControlConflict = () => removedBrowserProfileIds.some((id) => {
-        const target = browserProfilePartitionTarget(cfg, id);
-        return target && browserRuntime.heldBy(browserSessionId("", target.partitionId));
-      });
-      if (profileControlConflict()) return json(res, 409, { error: "Release browser control before deleting its profile." });
-      if (patch.browserProfiles !== undefined) {
-        const currentProfiles = new Map((cfg.browserProfiles ?? []).map((profile) => [profile.id, profile]));
-        const nextProfiles = patch.browserProfiles.map((profile) => {
-          const partitionId = currentProfiles.get(profile.id)?.partitionId;
-          return partitionId ? { ...profile, partitionId } : profile;
-        });
-        const routingConflict = browserProfileReplacementConflict(cfg.browserProfiles ?? [], nextProfiles);
-        if (routingConflict) return json(res, 409, { error: routingConflict });
-        const currentIds = new Set((cfg.browserProfiles ?? []).map((profile) => profile.id));
-        const pendingReuse = patch.browserProfiles.find(
-          (profile) => !currentIds.has(profile.id) && browserCleanup.hasPendingProfile(profile.id),
-        );
-        if (pendingReuse) {
-          return json(res, 409, {
-            error: `the previous “${pendingReuse.name}” browser session is still being erased — wait before reusing it`,
-          });
-        }
-      }
-      if (patch.browserProfiles !== undefined) {
-        const retained = new Set(patch.browserProfiles.map((profile) => profile.id));
-        const activeReference = store.bots.find(
-          (bot) => bot.busy && bot.browserProfile && bot.browserProfile !== "guest" && !retained.has(bot.browserProfile),
-        );
-        if (activeReference) {
-          return json(res, 409, {
-            error: `stop ${activeReference.name}'s turn before removing its browser profile`,
-          });
-        }
-      }
-      if (patch.box?.token !== undefined) patch.box.token = patch.box.token.trim();
-      const currentBoxToken = cfg.box?.token?.trim() ?? "";
-      const nextBoxToken = patch.box?.token === undefined ? currentBoxToken : patch.box.token;
-      const changingBoxToken = patch.box?.token !== undefined && nextBoxToken !== currentBoxToken;
-      const currentVpsAlias = vpsSshAlias(cfg);
-      const nextVpsAlias = patch.vps === undefined
-        ? currentVpsAlias
-        : vpsSshAlias({ ...cfg, vps: patch.vps });
-      const changingVpsAlias = patch.vps !== undefined && nextVpsAlias !== currentVpsAlias;
-      const transitioningProviders: RemoteComputerProvider[] = [
-        ...(changingBoxToken ? ["box" as const] : []),
-        ...(changingVpsAlias ? ["vps" as const] : []),
-      ];
-      providerConfigBusy = true;
-      const changingLocalVmMode = patch.localVm?.mode !== undefined && patch.localVm.mode !== localVmMode(cfg);
-      if (changingLocalVmMode) localVmModeChangeBusy = true;
-      try {
-        for (const provider of transitioningProviders) {
-          const conflict = providerOperationConflict(provider);
-          if (conflict) return json(res, 409, { error: conflict });
-        }
-        for (const provider of transitioningProviders) computerProviderConfigTransitions.add(provider);
-
-        if (changingVpsAlias && currentVpsAlias) {
-          const inventory = await vps.listManagedVpsComputers(
-            { vps: { sshAlias: currentVpsAlias } },
-            managedBoxOwners(),
-          );
-          if (!inventory.available) {
-            return json(res, 503, {
-              error: `${inventory.problem ?? "VPS computer inventory is unavailable"}. Keep the current SSH config alias and retry`,
-            });
-          }
-          const resourceError = vpsAliasResourceChangeError(inventory.instances.length);
-          if (resourceError) return json(res, 409, { error: resourceError });
-        }
-
-        let boxRecovery = changingBoxToken ? boxCreateRecoverySnapshot() : [];
-        let boxDeletions = changingBoxToken ? boxDeletionSnapshot() : [];
-        if (changingBoxToken && boxDeletions.length > 0 && !nextBoxToken) {
-          return json(res, 409, {
-            error: "finish or retry pending cloud computer deletion before removing the Box account",
-          });
-        }
-        let replacementProvedByDeletion = false;
-        if (changingBoxToken && boxDeletions.length > 0 && nextBoxToken) {
-          try {
-            await box.verifyBoxDeletionCredential({ box: { token: nextBoxToken } });
-            replacementProvedByDeletion = true;
-            // Verification can observe a completed operation and retire both
-            // its deletion fence and matching create receipt. Never continue
-            // with the pre-verification snapshots: they would demand access
-            // to a Box whose exact operation just proved it was deleted.
-            boxRecovery = boxCreateRecoverySnapshot();
-            boxDeletions = boxDeletionSnapshot();
-          } catch (error) {
-            return json(res, (error as { status?: number })?.status ?? 503, {
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        }
-        let currentBoxInventory: box.ManagedBoxInventory | null = null;
-        let currentBoxResources: Array<{ boxId: string; name: string }> | null = null;
-        const journalBoxResources: Array<{ boxId: string; name: string }> = [];
-        const deletingBoxIds = new Set(boxDeletions.map((entry) => entry.boxId));
-        if (changingBoxToken && currentBoxToken) {
-          currentBoxInventory = await box.listManagedBoxes(
-            { box: { token: currentBoxToken } },
-            managedBoxOwners(),
-          );
-          if (!currentBoxInventory.available) {
-            if (!replacementProvedByDeletion) {
-              return json(res, 503, {
-                error: `${currentBoxInventory.problem ?? "cloud computer inventory is unavailable"}. Keep the current Box account and retry`,
-              });
-            }
-            // The old token may be the reason this deletion is stuck. A
-            // target-bound operation/identity proved the replacement belongs
-            // to the same account, so do not deadlock credential recovery on
-            // an inventory request made with the expired token.
-            currentBoxInventory = null;
-          }
-          if (currentBoxInventory) {
-            const currentById = new Map(
-              currentBoxInventory.instances.map((instance) => [instance.boxId, { boxId: instance.boxId, name: instance.name }]),
-            );
-            for (const recovery of boxRecovery) {
-              if (!recovery.boxId) continue;
-              // A failed provisioning attempt may never have reached the
-              // deterministic rename. The replacement credential already
-              // proved the exact deletion target, so its in-flight resource
-              // is governed by that stronger target-bound receipt rather
-              // than an OpenMausBot name check.
-              if (replacementProvedByDeletion && deletingBoxIds.has(recovery.boxId)) continue;
-              const inspected = await box.inspectBoxIdentity({ box: { token: currentBoxToken } }, recovery.boxId);
-              if (!inspected.available) {
-                return json(res, 503, {
-                  error: `${inspected.problem ?? "a remembered cloud computer could not be verified"}. Keep the current Box account and retry`,
-                });
-              }
-              if (!inspected.identity) {
-                // Reconcile exact stale receipts while the current credential is
-                // still available. Leaving one behind would make a later token
-                // addition demand access to a Box the provider proved is gone.
-                retireDeletedBoxCreate(recovery.boxId);
-                continue;
-              }
-              const listed = currentById.get(inspected.identity.boxId);
-              if (listed && listed.name !== inspected.identity.name) {
-                return json(res, 503, { error: "ascii.dev returned conflicting cloud computer identities; keep the current Box account and retry" });
-              }
-              currentById.set(inspected.identity.boxId, inspected.identity);
-              journalBoxResources.push(inspected.identity);
-            }
-            currentBoxResources = [...currentById.values()];
-          }
-        }
-
-        if (changingLocalVmMode) {
-          if (localVmActiveThreads.size > 0 || localVmLifecycleBusy.size > 0 || localVmImageBusy) {
-            return json(res, 409, { error: "stop Local VM turns and setup actions before changing the Local VM isolation mode" });
-          }
-          if (localVmMode(cfg) === "per-bot" && patch.localVm?.mode === "shared") {
-            const existing = await perBotLocalVmCountForModeChange();
-            if (existing === null) {
-              return json(res, 409, {
-                error: "start the container runtime and delete every per-bot VM before switching to shared mode",
-              });
-            }
-            if (existing > 0) {
-              return json(res, 409, {
-                error: `delete the ${existing} per-bot Local VM${existing === 1 ? "" : "s"} before switching to shared mode`,
-              });
-            }
-          }
-        }
-      // A project key is useful only if it can create/reuse the Session that
-      // powers both the connections UI and the agent MCP. Validate it before
-      // persisting, and save the non-secret ids needed to reuse that Session.
-      const requestedComposioKey = patch.composio?.apiKey;
-      if (requestedComposioKey !== undefined) {
-        if (requestedComposioKey.trim()) {
-          try {
-            const prepared = await composio.prepareProjectSession(requestedComposioKey, cfg.composio);
-            patch.composio = { ...patch.composio, ...prepared };
-          } catch (error) {
-            return json(res, 400, { error: error instanceof Error ? error.message : String(error) });
-          }
-        } else {
-          patch.composio = { ...patch.composio, apiKey: "", sessionId: "" };
-        }
-      }
-      // check a box token against the provider before storing it: a
-      // rejected token used to save happily and only surface as a 401 in
-      // another panel later, with nothing the user could act on
-      const newBoxToken = patch.box?.token;
-      if (newBoxToken?.trim()) {
-        const check = await box.verifyToken(newBoxToken);
-        if (!check.ok) return json(res, 400, { error: check.message });
-      }
-      if (changingBoxToken && (!currentBoxToken || replacementProvedByDeletion) && boxRecovery.length > 0) {
-        if (!nextBoxToken) {
-          return json(res, 409, { error: "restore the Box account that owns the remembered cloud computers before clearing it" });
-        }
-        for (const recovery of boxRecovery) {
-          if (!recovery.boxId) {
-            return json(res, 409, { error: "finish reconciling pending cloud computer creation before changing the Box account" });
-          }
-          if (replacementProvedByDeletion && deletingBoxIds.has(recovery.boxId)) continue;
-          const inspected = await box.inspectBoxIdentity({ box: { token: nextBoxToken } }, recovery.boxId);
-          if (!inspected.available) {
-            return json(res, 503, {
-              error: `${inspected.problem ?? "a remembered cloud computer could not be verified"}. Retry with the Box account that created it`,
-            });
-          }
-          if (!inspected.identity || !(await box.boxNameMatchesBot(recovery.botId, inspected.identity.name))) {
-            return json(res, 409, { error: "that Box token cannot access the remembered cloud computers from this installation" });
-          }
-        }
-      }
-      if (changingBoxToken && currentBoxInventory && currentBoxResources) {
-        let replacementResources: Array<{ boxId: string; name: string }> | null = null;
-        if (nextBoxToken) {
-          const replacementInventory = await box.listManagedBoxes(
-            { box: { token: nextBoxToken } },
-            managedBoxOwners(),
-            { adoptLegacy: false },
-          );
-          if (!replacementInventory.available) {
-            return json(res, 503, {
-              error: `${replacementInventory.problem ?? "cloud computer inventory is unavailable"}. Keep the current Box account and retry`,
-            });
-          }
-          replacementResources = replacementInventory.instances.map((instance) => ({
-            boxId: instance.boxId,
-            name: instance.name,
-          }));
-          const replacementById = new Map(
-            replacementResources.map((instance) => [instance.boxId, { boxId: instance.boxId, name: instance.name }]),
-          );
-          for (const identity of journalBoxResources) {
-            const inspected = await box.inspectBoxIdentity({ box: { token: nextBoxToken } }, identity.boxId);
-            if (!inspected.available) {
-              return json(res, 503, {
-                error: `${inspected.problem ?? "a remembered cloud computer could not be verified"}. Keep the current Box account and retry`,
-              });
-            }
-            if (!inspected.identity || inspected.identity.name !== identity.name) {
-              return json(res, 409, { error: "the replacement Box token does not access the same cloud computers" });
-            }
-            replacementById.set(inspected.identity.boxId, inspected.identity);
-          }
-          replacementResources = [...replacementById.values()];
-        }
-        const resourceError = boxAccountResourceChangeError(
-          currentBoxResources,
-          replacementResources,
-        );
-        if (resourceError) return json(res, 409, { error: resourceError });
-      }
-      // Each cloud voice provider owns its own credential. Validate the field
-      // against that provider rather than whichever provider happens to be
-      // selected, so switching engines never sends one service another's key.
-      const newTts = patch.tts;
-      if (newTts?.key?.trim()) {
-        const check = await tts.verifyKey("elevenlabs", newTts.key.trim());
-        if (!check.ok) return json(res, 400, { error: check.message });
-      }
-      if (newTts?.fishKey?.trim()) {
-        const check = await tts.verifyKey("fish", newTts.fishKey.trim());
-        if (!check.ok) return json(res, 400, { error: check.message });
-      }
-      if (patch.browserProfiles !== undefined) {
-        // Provider/credential validation above may await the network. A turn
-        // can start during that window and claim a profile which looked idle
-        // at the route's first check, so validate again at the mutation
-        // boundary. Keep this check and the synchronous save/reference cleanup
-        // below free of awaits.
-        const retained = new Set(patch.browserProfiles.map((profile) => profile.id));
-        const activeReference = store.bots.find(
-          (bot) => bot.busy && bot.browserProfile && bot.browserProfile !== "guest" && !retained.has(bot.browserProfile),
-        );
-        if (activeReference) {
-          return json(res, 409, {
-            error: `stop ${activeReference.name}'s turn before removing its browser profile`,
-          });
-        }
-      }
-      // Provider validation above awaits remote services. The transition flag
-      // blocks new work, while this second observation catches any operation
-      // that already held a claim at the initial boundary.
-      for (const provider of transitioningProviders) {
-        const conflict = providerOperationConflict(provider);
-        if (conflict) return json(res, 409, { error: conflict });
-      }
-      const browserCleanupRequests: BrowserCleanupRequest[] = [];
-      if (profileControlConflict()) return json(res, 409, { error: "Release browser control before deleting its profile." });
-      try {
-        for (const profileId of removedBrowserProfileIds) {
-          const target = browserProfilePartitionTarget(cfg, profileId);
-          if (!target) throw new Error(`browser profile cleanup target “${profileId}” is unavailable`);
-          browserCleanupRequests.push(
-            browserCleanup.prepare("profile", target.profileId, target.partitionId),
-          );
-        }
-      } catch (error) {
-        for (const request of browserCleanupRequests) browserCleanup.abort(request);
-        throw error;
-      }
-      let configWriteCommitted = false;
-      const externalSecretStorage = url.searchParams.get("secretStorage") === "external";
-      try {
-        // Provider-owned voice ids must be invalidated before the provider
-        // commit. If bots.json cannot be written, leave the old provider in
-        // place rather than committing a new provider with stale bot voices.
-        // A later config-write failure may leave voices cleared, which is the
-        // safe side of this cross-file mutation: no foreign id can be spoken.
-        if (changingVoiceProvider) store.clearVoiceSelections();
-        if (externalSecretStorage) {
-          // The packaged Electron caller commits supplied credentials to the
-          // OS-encrypted store before entering this route. Persist every
-          // non-secret sibling in the same request, but replace each supplied
-          // credential with an empty tombstone so an older plaintext value can
-          // never survive the merge in config.json.
-          const persisted = structuredClone(patch);
-          if (persisted.xai?.key !== undefined) persisted.xai.key = "";
-          if (persisted.composio?.apiKey !== undefined) persisted.composio.apiKey = "";
-          if (persisted.box?.token !== undefined) persisted.box.token = "";
-          if (persisted.opencodeGo?.apiKey !== undefined) persisted.opencodeGo.apiKey = "";
-          if (persisted.tts?.key !== undefined) persisted.tts.key = "";
-          if (persisted.tts?.fishKey !== undefined) persisted.tts.fishKey = "";
-          if (persisted.imageGen?.key !== undefined) persisted.imageGen.key = "";
-          if (persisted.imageGen?.customApiKey !== undefined) persisted.imageGen.customApiKey = "";
-          saveConfig(persisted);
-          configWriteCommitted = true;
-          syncCredentialEnv(patch);
-          Object.assign(cfg, loadConfig());
-        } else {
-          saveConfig(patch);
-          configWriteCommitted = true;
-          // loadConfig prefers env over the file for credentials, so the env
-          // must follow the save — otherwise the value injected at boot would
-          // shadow the new key until the next launch
-          syncCredentialEnv(patch);
-          Object.assign(cfg, loadConfig());
-        }
-      } catch (error) {
-        if (configWriteCommitted) {
-          for (const request of browserCleanupRequests) {
-            const committed = browserCleanup.commit(request);
-            void browserCleanup.ensure(committed);
-          }
-        } else {
-          for (const request of browserCleanupRequests) browserCleanup.abort(request);
-        }
-        throw error;
-      }
-      let browserReferenceCleanupError: unknown = null;
-      if (patch.signIn !== undefined) sessions.revalidateEmailSessions();
-      if (!sharedComputersEnabled(cfg)) {
-        sharedComputers.close();
-        sharedComputerControl.close();
-      }
-      if (disablingBuiltInBrowser) browserLive.closeAll();
-      for (const request of browserCleanupRequests) {
-        if (request.kind === "profile") browserLive.closeForSession(browserSessionId("", request.partitionId));
-      }
-      if (patch.browserProfiles !== undefined) {
-        const retained = new Set(patch.browserProfiles.map((profile) => profile.id));
-        try {
-          for (const bot of store.bots) {
-            if (bot.browserProfile && bot.browserProfile !== "guest" && !retained.has(bot.browserProfile)) {
-              // The profile list and every bot reference change in the same
-              // config request. Non-renderer clients therefore cannot leave a
-              // bot pointing at a deleted cookie partition.
-              store.patchBot(bot.id, { browserProfile: undefined });
-            }
-          }
-        } catch (error) {
-          // Config is already durable. Keep the cleanup intent prepared (so
-          // it cannot wipe ambiguous state and its id remains locked), but do
-          // not let this secondary write failure skip revocation/reload below.
-          browserReferenceCleanupError = error;
-        }
-      }
-      // Provider keys change the fleet. Profile, language, voice, VPS, room
-      // timeout, and onboarding progress changes do not rebuild it: no driver
-      // reads them, and they should not interrupt in-flight turns.
-      const reloadKeys = providerReloadKeys(patch);
-      // Config is already durable. A provider credential or runtime change
-      // invalidates every old child immediately, including when browser
-      // cleanup below has to await Electron before reloadProviders begins.
-      if (reloadKeys.length > 0) revokeAllInternalCapabilities();
-      // The cleanup marker becomes committed only after both pieces of durable
-      // application state agree. Commit/ACK failures are deferred until every
-      // mandatory consequence of the config write has run: no journal I/O
-      // failure may leave a two-hour bearer or stale provider fleet active.
-      const finalized = await finalizeBrowserCleanupMutation({
-        requests: browserCleanupRequests,
-        referenceError: browserReferenceCleanupError,
-        commit: (request) => browserCleanup.commit(request),
-        ensure: (request) => browserCleanup.ensure(request),
-        mandatory: async () => {
-          let mandatoryError: unknown = null;
-          if (disablingBuiltInBrowser) {
-            try {
-            } catch (error) {
-              mandatoryError = error;
-            }
-          }
-          if (reloadKeys.length > 0) {
-            try {
-              await reloadProviders();
-            } catch (error) {
-              if (!mandatoryError) mandatoryError = error;
-            }
-          }
-          const status = configStatus();
-          broadcast({ kind: "config", ...status });
-          if (patch.threads !== undefined) {
-            drainQueuedSends();
-            drainDelegationWakes();
-            drainConnectorResumes();
-            drainSecretResumes();
-            drainTeamSetupResumes();
-          }
-          if (mandatoryError) throw mandatoryError;
-          return status;
-        },
-      });
-      // Normal desktop deletes wait for Electron's acknowledgement. If
-      // Electron is restarting, the committed journal keeps retrying and the
-      // id-reuse guard above prevents stale logins from resurfacing. Delaying
-      // this assertion until after every mandatory post-commit effect keeps
-      // the runtime aligned with the config even on a truthful 503 response.
-      requireBrowserCleanupAcknowledged(
-        finalized.acknowledgements.every(Boolean),
-        removedBrowserProfileIds.length === 1 ? "The browser profile" : "The browser profiles",
-      );
-      return json(res, 200, finalized.value);
-      } finally {
-        for (const provider of transitioningProviders) computerProviderConfigTransitions.delete(provider);
-        if (changingLocalVmMode) localVmModeChangeBusy = false;
-        providerConfigBusy = false;
-      }
-    }
+    if (await handleConfig(req, res, rctx)) return;
 
     if (await handleTts(req, res, rctx)) return;
 
