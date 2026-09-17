@@ -140,7 +140,6 @@ import {
   syncCredentialEnv,
   withInstanceCli,
   persistableInstanceConfigs,
-  type AppConfig,
   vpsSshAlias,
   browserEngineAttachCdpUrl,
   DATA_DIR,
@@ -419,7 +418,6 @@ import { createTeamBackup, importTeamBackup } from "./team-backup.ts";
 import { MAX_TEAM_BACKUP_BYTES } from "../shared/team-backup.ts";
 import { shouldMountLocalComputer } from "./local-routing.ts";
 import { autoLocalVmAttachable, type ContainerComputerStatus } from "./container-computer.ts";
-import { type AutoVmClaimTable } from "./auto-vm-claims.ts";
 import { modelContextWindow } from "./model-context-window.ts";
 import { parseSurface, resolveSurface, surfaceLabel, surfaceOfComputerKind, surfacePrompt } from "./surface.ts";
 import {
@@ -476,6 +474,9 @@ import {
   turnResources,
   type DirectTurnDispatchClaim,
 } from "./turn-admission.ts";
+import { createProviderFleet } from "./provider-fleet.ts";
+import { roomHandoffHandlers } from "./room-handoff-wiring.ts";
+import { createTurnCleanup } from "./turn-cleanup.ts";
 import { createCustomDomainVerifier, customDomainIpv4, normalizeCustomDomain } from "./custom-domain.ts";
 import { allowedScopes, createEmailSignIn, parseAllowList } from "./account-signin.ts";
 import { ProviderAuthSessions } from "./provider-auth-sessions.ts";
@@ -710,7 +711,7 @@ const companyRuntimeStarted = new Promise<void>(resolve => { companyRuntimeReady
 const managedDesktop = new ManagedDesktopProviders({
   registry,
   dataDirectory: DATA_DIR,
-  beforeReplace: stopCompanyInstances,
+  beforeReplace: ids => stopCompanyInstances(ids),
   afterReplace: ids => {
     for (const id of providerInstancesChanging) if (managedDesktop.owns(id)) providerInstancesChanging.delete(id);
     bus.attach(ids.flatMap(id => { const instance = registry.get(id); return instance ? [instance] : []; }));
@@ -872,23 +873,23 @@ function settleDirectFollowup(generation: string | undefined): void {
   for (const turnId of directFollowupTurns.deleteGeneration(pending.threadId, generation)) retireProviderTurn(turnId);
   pending.settle?.();
 }
-let providerFleetReloading = false;
 const sharedComputerControl = new SharedComputerControl(turnResources, () => store.bots.some(bot => botComputerControlSnapshot(bot.id).held));
-const settlingResourceOwners = new Map<string, string>();
-
-function releaseTurnResources(owner: TurnOwner | undefined): void {
-  if (!owner) return;
-  if (autoVmClaims.get(owner.threadId)?.owner.generation === owner.generation) autoVmClaims.delete(owner.threadId);
-  if (settlingResourceOwners.get(owner.threadId) === owner.generation) settlingResourceOwners.delete(owner.threadId);
-  turnResources.release(owner);
-  if (turnResourceOwners.get(owner.threadId)?.generation === owner.generation) turnResourceOwners.delete(owner.threadId);
-  if (turnComputerResources.get(owner.threadId)?.owner.generation === owner.generation) turnComputerResources.delete(owner.threadId);
-  const teamTurn = teamComputerTurns.get(owner.threadId);
-  if (teamTurn?.owner.generation === owner.generation) {
-    stopScreenPoller(teamTurn.botId, owner.threadId);
-    teamComputerTurns.delete(owner.threadId);
-  }
-}
+const turnCleanup = createTurnCleanup({
+  store,
+  turnResources,
+  turnResourceOwners,
+  turnComputerResources,
+  teamComputerTurns,
+  directTurnGenerationByThread,
+  stopScreenPoller,
+  roomHandoffs: () => roomHandoffs,
+  botForThread,
+  cancelDirectTurnDispatch,
+  revokeInternalCapabilitiesForThread,
+  runningTurnInstance,
+  closeOpenApprovals,
+});
+const { releaseTurnResources, interruptDirectThread, settlingResourceOwners, autoVmClaims } = turnCleanup;
 
 async function bindTurnComputer(owner: TurnOwner, resource: string, exclusive = false): Promise<void> {
   const active = () => activeInternalGenerationByThread.get(owner.threadId) === owner.generation &&
@@ -944,41 +945,6 @@ function parksBehindCoordination(botId: string, threadId: string): boolean {
 function unattendedDispatchState(botId: string): "ready" | "busy" | "missing" {
   const bot = store.bot(botId);
   return !bot ? "missing" : botAtThreadCapacity(botId) || activeGroupTurnForBot(botId) ? "busy" : "ready";
-}
-
-async function interruptDirectThread(botId: string, threadId: string): Promise<void> {
-  // Stop belongs to the conversation it was pressed in. This bot's turn ends
-  // and this conversation stops awaiting its teammates, so nothing resumes
-  // into a stopped chat; assignments that never started are dropped. A
-  // teammate already mid-turn keeps its own provider process, finishes, and
-  // its result is still recorded here.
-  noteTeammatesLeftRunning(botId, threadId, roomHandoffs.stopAwaitingDirect(threadId));
-  const owner = botForThread(botId, threadId);
-  const generation = directTurnGenerationByThread.get(threadId);
-  cancelDirectTurnDispatch(botId, threadId);
-  revokeInternalCapabilitiesForThread(threadId);
-  // Main routes Stop to the engine that started the turn; keep this branch's
-  // generation fence so a replacement turn's approvals are never closed here.
-  await (owner ? runningTurnInstance(owner, threadId) : null)?.adapter.interruptTurn(threadId);
-  if (directTurnGenerationByThread.get(threadId) === generation) closeOpenApprovals(threadId);
-}
-
-/** Stop left teammates mid-turn: say so in the transcript, name them, and
- * give the person the second gesture. One pill each, like the "Sent to"
- * receipt, so it survives Tool calls being hidden and one click away is the
- * teammate's own conversation — where Stop really reaches that turn. */
-function noteTeammatesLeftRunning(botId: string, threadId: string, running: RoomHandoff[]): void {
-  if (!store.taskByThread(botId, threadId)) return;
-  for (const node of running) {
-    const name = store.bot(node.botId)?.name ?? "A teammate";
-    const task = store.taskByThread(node.botId, node.threadId);
-    store.appendMessage(threadId, {
-      role: "bot",
-      kind: "activity",
-      tool: { name: `Stopped here — ${name} is still working; open to stop it too`, ok: true },
-      ...(task ? { threadRef: { botId: node.botId, threadId: node.threadId, title: task.title } } : {}),
-    });
-  }
 }
 
 async function interruptAllDirectThreads(botId: string): Promise<void> {
@@ -2450,137 +2416,35 @@ function outstandingAssignmentsPrompt(threadId: string): string {
   return ` Assignments you already sent are still outstanding, and nothing in this conversation cancelled them: ${JSON.stringify(listed)}. Do not send them again, do not poll or wait for them, and do not tell the user they were lost. Each result returns to this conversation on its own and resumes you then. Answer the message above with that work still in flight.`;
 }
 
-const roomHandoffs = new RoomHandoffs(join(DATA_DIR, "room-handoffs.json"), {
-  validate: (node, parent) => roomHandoffProblem(node, parent) ??
-    (parent && store.bot(parent.botId)?.approvePeerComms && !fullAccessForSource(parent.botId, parent.threadId) && !node.approvalGranted ? "Sender now requires peer approval; submit a new approved request" : undefined),
-  // A direct follow-up is owed to one conversation, so it waits for that
-  // conversation, not for the whole bot. Bot-level busy aggregates every
-  // thread — including cards still waiting on the person — so one busy
-  // sibling thread would otherwise starve the owed resume forever while the
-  // UI keeps showing this thread working. Fresh work still queues behind a
-  // busy teammate's whole bot (#1238); an owed resume only needs its own
-  // thread free and a thread slot to admit it.
-  busy: n => !n.groupId && n.status === "resume"
-    ? threadBusy(n.botId, n.threadId) || botAtThreadCapacity(n.botId)
-    : Boolean(store.bot(n.botId)?.busy || (n.groupId && store.group(n.groupId) && groupIsWorking(store.group(n.groupId)!))),
-  changed: (groupIds, directThreadIds) => {
-    for (const id of groupIds) {
-      const group = store.group(id);
-      if (group) broadcast({ kind: "group", group: publicGroupState(group) });
-    }
-    for (const threadId of directThreadIds) {
-      const bot = store.botByThread(threadId);
-      if (bot) broadcast({ kind: "bot", bot: wireBot(bot) });
-    }
-    // #1194: when a direct coordination's last node settles, no later
-    // turn.completed arrives to release messages parked behind it — the
-    // resume turn's own event lands while the source node is still
-    // non-terminal. Node changes are that release signal.
-    if (directThreadIds.size > 0) drainQueuedSends();
-  },
-  report: (child, parent) => {
-    // Same-room replies already appear in this conversation.
-    if (child.kind === "assignment" && child.status === "completed") return;
-    const group = parent.groupId ? store.group(parent.groupId) : undefined;
-    if (parent.groupId ? !group || !store.groupTaskByThread(group.id, parent.threadId) : !store.taskByThread(parent.botId, parent.threadId)) return;
-    const bot = store.bot(child.botId);
-    if (store.messagesFor(parent.threadId).some(m => m.roomRequest?.id === child.id && m.roomRequest.phase === "result")) return;
-    const problem = roomHandoffProblem(child, parent);
-    store.appendMessage(parent.threadId, {
-      role: "bot", kind: "activity",
-      roomRequest: { id: child.id, phase: "result" },
-      from: bot ? { botId: bot.id, name: bot.name, color: bot.color } : undefined,
-      tool: {
-        name: problem ? `Result withheld: ${problem}`
-          : child.status === "completed" ? `${bot?.name ?? "Teammate"} replied${child.groupId ? ` · ${store.group(child.groupId)?.name ?? "Room"}` : ""}`
-          : `${bot?.name ?? "Teammate"} — ${child.status}: ${child.result.slice(0, 180)}`,
-        ok: child.status === "completed" && !problem,
-      },
-      ...(child.groupId ? { comm: { groupId: child.groupId, threadId: child.threadId, withBotId: child.botId,
-        withName: bot?.name ?? "Teammate", withColor: bot?.color ?? "blue" } }
-        : { threadRef: { botId: child.botId, threadId: child.threadId, title: store.taskByThread(child.botId, child.threadId)?.title ?? "Teammate work" } }),
-    });
-    if (group) store.patchGroup(group.id, { unread: true });
-    else {
-      store.patchTask(parent.botId, parent.threadId, { unread: true });
-      const source = store.bot(parent.botId);
-      if (source) markTaskContextExternallyUpdated(source, parent.threadId);
-    }
-    // A work thread exists only because the pair conversation was busy with
-    // another job. Its result is now in the sender's conversation, so it
-    // closes itself exactly as close_thread would — folded out of the
-    // sidebar, never deleted, and open again the moment anyone speaks
-    // there. A finished job tidies up after itself; a failed or withheld
-    // one stays in the sidebar where the person can see it. The pair
-    // conversation is the standing line between two bots and never
-    // auto-closes.
-    const childTask = store.taskByThread(child.botId, child.threadId);
-    if (!child.groupId && child.status === "completed" && !problem && !childTask?.closedBy
-      && childTask?.openedBy?.kind === "work" && childTask.openedBy.botId === parent.botId) {
-      store.setTaskClosedBy(child.botId, child.threadId,
-        { botId: parent.botId, name: store.bot(parent.botId)?.name ?? childTask.openedBy.name, at: Date.now() });
-    }
-  },
-  run: async (node, resumed, signal) => {
-    const group = node.groupId ? store.group(node.groupId) : undefined;
-    const bot = store.bot(node.botId)!;
-    const parent = node.parentId ? roomHandoffs.nodes.get(node.parentId) : undefined;
-    const sender = parent ? store.bot(parent.botId) : undefined;
-    const result: GroupTurnOrchestration["result"] = {};
-    const turnText = coordinationTurnText(node, resumed);
-    const systemInstructions = coordinationSystemInstructions();
-    if (!resumed && !store.messagesFor(node.threadId).some(m => m.roomRequest?.id === node.id && m.roomRequest.phase === "request")) {
-      store.appendMessage(node.threadId, { role: "bot", kind: "text",
-        roomRequest: { id: node.id, phase: "request" },
-        from: sender ? { botId: sender.id, name: sender.name, color: sender.color } : undefined,
-        text: `@${bot.name} ${node.text}`,
-      });
-    }
-    markInternalTurn(node.threadId);
-    if (sender && parent && isUnattended(sender.id, parent.threadId)) markUnattended(bot.id, node.threadId);
-    if (!group) return new Promise<{ ok: boolean; text: string }>(resolve => {
-      let done = false;
-      const finish = (outcome: { ok: boolean; text: string }) => {
-        if (done) return;
-        done = true; signal.removeEventListener("abort", abort); resolve(outcome);
-      };
-      const abort = () => {
-        void interruptDirectThread(bot.id, node.threadId).catch(() => {});
-        finish({ ok: false, text: "Coordinated work was stopped" });
-      };
-      signal.addEventListener("abort", abort, { once: true });
-      if (signal.aborted) { abort(); return; }
-      void startTurn(bot.id, turnText, {
-        threadId: node.threadId, cardContinuation: true, commsDepth: MAX_COMMS_DEPTH,
-        unattended: isUnattended(bot.id, node.threadId),
-        coordination: { id: node.id, resumed, settle: finish },
-        onDispatchError: error => finish({ ok: false, text: error }),
-      }).catch(error => finish({ ok: false, text: String(error) }));
-    });
-    const operation = beginGroupTurnOperation(group.id, node.threadId, [bot.id]);
-    const abort = () => { operation.cancelled = true; operation.cancellation.abort(); };
-    signal.addEventListener("abort", abort, { once: true });
-    if (signal.aborted) abort();
-    const run = (groupQueues.get(group.id) ?? Promise.resolve()).catch(() => {}).then(async () => {
-      if (operation.cancelled) return;
-      const problem = roomHandoffProblem(node, parent);
-      if (problem) throw new Error(problem);
-      const available = await waitForChatRoomMember(operation, node.threadId, bot);
-      if (available !== "run") { result.outcome = "cancelled"; return; }
-      await runGroupMemberTurn(group.id, node.threadId, bot.id, MAX_COMMS_DEPTH, new Set(),
-        undefined, error => { result.stopReason = error; }, () => operation.cancelled,
-        () => groupProviderHandshakeStarted(operation), () => groupProviderHandshakeSettled(operation),
-        { claimed: true }, { roomHandoffId: node.id, resumed, systemInstructions, turnInstructions: turnText, followMentions: false, result }, operation);
-    });
-    const tracked = run.finally(() => {
-      signal.removeEventListener("abort", abort);
-      finishGroupTurnOperation(group.id, operation);
-    });
-    groupQueues.set(group.id, tracked.catch(() => {}));
-    await tracked;
-    return { ok: result.outcome === "settled", text: result.stopReason || result.replyText || result.outcome || "The addressed agent could not run" };
-  },
-}, Date.now, roomHandoffLimits(cfg));
+const roomHandoffs: RoomHandoffs = new RoomHandoffs(join(DATA_DIR, "room-handoffs.json"), roomHandoffHandlers({
+  store,
+  threadBusy,
+  botAtThreadCapacity,
+  maxCommsDepth: MAX_COMMS_DEPTH,
+  groupQueues,
+  roomHandoffProblem,
+  coordinationSystemInstructions,
+  coordinationTurnText,
+  fullAccessForSource,
+  groupIsWorking,
+  publicGroupState,
+  wireBot,
+  broadcast: () => broadcast,
+  roomHandoffs: () => roomHandoffs,
+  drainQueuedSends,
+  markTaskContextExternallyUpdated,
+  markInternalTurn,
+  isUnattended,
+  markUnattended,
+  startTurn,
+  beginGroupTurnOperation,
+  finishGroupTurnOperation,
+  waitForChatRoomMember,
+  runGroupMemberTurn,
+  groupProviderHandshakeStarted,
+  groupProviderHandshakeSettled,
+  interruptDirectThread,
+}), Date.now, roomHandoffLimits(cfg));
 activeCoordinationForThread = threadId => roomHandoffs.activeDirect(threadId);
 function publicGroupState(group: GroupRecord): WireGroup {
   return { ...group, working: groupIsWorking(group) || [...roomHandoffs.nodes.values()].some(n => n.groupId === group.id && !["completed", "failed", "cancelled"].includes(n.status)) };
@@ -3341,11 +3205,6 @@ const localVmLeases = new LocalVmLeasePool(30 * 60_000);
 const localVmLifecycleBusy = new Set<string>();
 const localVmThreadTargets = new Map<string, LocalVmTarget>();
 const localVmActiveThreads = new Map<string, string>();
-// Lazy Auto-VM claims (issue #1361): a thread whose auto-resolved Local VM
-// attach deferred the exclusive claim registers here so the first screen
-// tools/call gate can fire it. Dispatch claims eagerly today, so entries
-// exist only as a no-op handoff to the gate.
-const autoVmClaims: AutoVmClaimTable = new Map();
 /** How long the computer-control gate lets a lazy claim land before it
  * answers held. A free, ready VM claims in the time of one container
  * inspect; only a claim queued behind another holder outlives this. */
@@ -5327,7 +5186,7 @@ async function startTurn(
   }
   const transitionError = providerTransitionForTurn(bot, opts?.runOn, threadId);
   if (transitionError) throw Object.assign(new Error(transitionError), { status: 409 });
-  if (providerFleetReloading) throw Object.assign(new Error("provider settings are being updated — try again shortly"), { status: 409 });
+  if (providerFleet.providerFleetReloading) throw Object.assign(new Error("provider settings are being updated — try again shortly"), { status: 409 });
   // A workspace at its monthly spend limit starts no turn of any kind: a
   // person's message, a routine, a peer hop or a webhook all stop here.
   assertWithinBudget(cfg, DATA_DIR);
@@ -7479,7 +7338,7 @@ async function runGroupMemberTurn(
     return false;
   }
   if (isCancelled?.()) return false;
-  if (providerFleetReloading) {
+  if (providerFleet.providerFleetReloading) {
     onDispatchError?.("provider settings are being updated — try again shortly");
     return false;
   }
@@ -9961,151 +9820,33 @@ async function describeInstances() {
 /** Set once graceful shutdown begins: quitting disposes Company instances
  * without writing "connection changed" cards or failing routine runs. */
 let companyShutdown = false;
-/** End only Company conversations before replacing their native instances. */
-async function stopCompanyInstances(ids: string[]) {
-  if (!ids.length) return;
-  if (providerFleetReloading || companyShutdown) {
-    for (const id of ids) { providerAuthSessions.clearInstance(id); bus.detach(id); }
-    return;
-  }
-  const selected = new Set(ids);
-  for (const id of ids) providerInstancesChanging.add(id);
-  const direct = store.bots.flatMap(bot => store.tasks(bot.id)
-    .filter(task => threadBusy(bot.id, task.threadId) && selected.has(botForThread(bot.id, task.threadId)!.modelSelection.instanceId))
-    .map(task => ({ botId: bot.id, threadId: task.threadId, owner: turnResourceOwners.get(task.threadId), generation: directTurnGenerationByThread.get(task.threadId) })));
-  await Promise.all(direct.map(task => interruptDirectThread(task.botId, task.threadId)));
-  for (const { botId, threadId, owner, generation } of direct) {
-    releaseTurnResources(owner);
-    settleDirectFollowup(owner?.generation);
-    // Another member of this cancellation batch can settle slowly while a
-    // completed thread starts a personal turn. Never clear that new owner.
-    if (directTurnGenerationByThread.get(threadId) !== generation) continue;
-    stopScreenPoller(botId, threadId); releaseLocalVmThread(threadId);
-    watchdog.settle(threadId); closeOpenApprovals(threadId); directTurnBots.delete(threadId);
-    finalizeDelegationWatch(threadId, false, "", "Company connection changed");
-    routines?.failThread(threadId, "Company connection changed while this thread was running");
-    if (store.taskByThread(botId, threadId)) {
-      store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: "Company connection changed — choose whether to reconnect or use a personal model", ok: false } });
-      store.setTaskActivity(botId, threadId, "idle");
-    }
-  }
-  // Freeze this cancellation batch across interruptTurn's asynchronous yield.
-  // oxlint-disable-next-line unicorn/no-useless-spread
-  for (const [threadId, speaker] of [...groupSpeakers]) {
-    if (groupSpeakers.get(threadId) !== speaker) continue;
-    const bot = store.bot(speaker.botId);
-    if (!bot || !selected.has(bot.modelSelection.instanceId)) continue;
-    const group = store.groupByThread(threadId);
-    const owner = turnResourceOwners.get(threadId);
-    if (group) cancelGroupTurnOperations(group.id, threadId);
-    revokeInternalCapabilitiesForThread(threadId);
-    await runningTurnInstance(bot, threadId)?.adapter.interruptTurn(threadId);
-    const stillOwned = groupSpeakers.get(threadId) === speaker &&
-      turnResourceOwners.get(threadId)?.generation === owner?.generation;
-    releaseTurnResources(owner);
-    if (!stillOwned) continue;
-    releaseLocalVmThread(threadId);
-    watchdog.settle(threadId); closeOpenApprovals(threadId);
-    groupSpeakers.delete(threadId);
-    if (group) store.patchGroup(group.id, { busyBotId: null });
-    store.setActivity(bot.id, "idle");
-  }
-  for (const id of ids) { providerAuthSessions.clearInstance(id); bus.detach(id); }
-}
-
-async function persistProviderInstance(instanceId: string, instances: NonNullable<AppConfig["instances"]>) {
-  saveConfig({ instances }, { replaceInstances: true });
-  cfg.instances = instances;
-  providerAuthSessions.clearInstance(instanceId);
-  bus.detach(instanceId);
-  // No whole-fleet reload: other bots keep their live CLI processes, event
-  // subscriptions and approval capabilities while this one is replaced.
-  if (Object.hasOwn(instances, instanceId)) {
-    await registry.load({ [instanceId]: instanceConfigs(cfg)[instanceId] });
-    const live = registry.get(instanceId);
-    if (live) bus.attach([live]);
-  } else {
-    await registry.dispose(instanceId);
-  }
-  resetPathCache();
-}
-
-/** Rebuild the provider fleet after a config change so new keys take
- * effect without a server restart (kills any in-flight turns). */
-async function reloadProviders() {
-  providerFleetReloading = true;
-  providerAuthSessions.clear();
-  // Every provider process is about to die. Revoke all turn capabilities in
-  // one synchronous step before the first teardown await, including room/task
-  // threads that are not a bot's default DM.
-  revokeAllInternalCapabilities();
-  const direct = store.bots.flatMap((bot) => store.tasks(bot.id)
-    .filter((task) => threadBusy(bot.id, task.threadId))
-    .map((task) => ({ botId: bot.id, threadId: task.threadId, owner: turnResourceOwners.get(task.threadId) })));
-  const rooms = [...groupSpeakers.entries()];
-  for (const task of direct) cancelDirectTurnDispatch(task.botId, task.threadId);
-  for (const [threadId] of rooms) {
-    const group = store.groupByThread(threadId);
-    if (group) cancelGroupTurnOperations(group.id, threadId);
-  }
-  bus.detachAll();
-  try {
-    await registry.disposeAll();
-    await registry.load(instanceConfigs(cfg));
-    // Personal providers are usable independently of the optional Company
-    // overlay. Subscribe them before restoring that overlay so a broken or
-    // expired Company runtime cannot leave the rebuilt personal fleet mute.
-    bus.attach(registry.instances());
-    await managedDesktop.restore();
-  } finally {
-    // Settle every exact conversation, not whichever one is selected now.
-    // Teardown can swallow terminal events; no task may remain busy forever.
-    for (const { botId, threadId, owner } of direct) {
-      stopScreenPoller(botId, threadId);
-      releaseLocalVmThread(threadId);
-      releaseTurnResources(owner);
-      vpsThreadEnded(botId, threadId);
-      watchdog.settle(threadId);
-      closeOpenApprovals(threadId);
-      directTurnBots.delete(threadId);
-      finalizeDelegationWatch(threadId, false, "", "Delegated turn did not finish — provider settings changed");
-      routines?.failThread(threadId, "Provider settings changed while this thread was running");
-      if (store.taskByThread(botId, threadId)) {
-        store.appendMessage(threadId, {
-          role: "bot", kind: "activity",
-          tool: { name: "error: turn interrupted — provider settings changed", ok: false },
-        });
-        store.setTaskActivity(botId, threadId, "idle");
-      }
-      settleDirectFollowup(owner?.generation);
-      retryDelegationsWaitingOn(botId);
-    }
-    for (const [threadId, speaker] of rooms) {
-      releaseLocalVmThread(threadId);
-      releaseTurnResources(turnResourceOwners.get(threadId));
-      watchdog.settle(threadId);
-      closeOpenApprovals(threadId);
-      if (groupSpeakers.get(threadId) !== speaker) continue;
-      groupSpeakers.delete(threadId);
-      const group = store.groupByThread(threadId);
-      if (group) store.patchGroup(group.id, { busyBotId: null });
-      store.setActivity(speaker.botId, "idle");
-    }
-    providerFleetReloading = false;
-  }
-  // killed turns settle here without a turn.completed event, so anything
-  // queued behind them drains now — onto the freshly loaded fleet
-  drainQueuedSends();
-  drainConnectorResumes();
-  drainSecretResumes();
-  drainTeamSetupResumes();
-}
-
 // Config writes rebuild the whole provider registry. Keep the read-modify-write
 // and reload sequence single-flight so two settings requests cannot drop one
 // another's changes or dispose a fleet while another reload is creating it.
 let providerConfigBusy = false;
-const providerInstancesChanging = new Set<string>();
+const providerFleet = createProviderFleet({
+  store,
+  cfg,
+  registry,
+  bus,
+  sessions: providerAuthSessions,
+  watchdog,
+  routines: () => routines,
+  desktop: managedDesktop,
+  turns: turnCleanup,
+  companyShutdown: () => companyShutdown,
+  admission: { threadBusy, botForThread, turnResourceOwners, directTurnGenerationByThread, directTurnBots },
+  cleanup: {
+    stopScreenPoller, releaseLocalVmThread, closeOpenApprovals, revokeInternalCapabilitiesForThread,
+    revokeAllInternalCapabilities, runningTurnInstance, settleDirectFollowup, finalizeDelegationWatch,
+    cancelGroupTurnOperations, cancelDirectTurnDispatch,
+  },
+  speakers: { groupSpeakers },
+  vps: { vpsThreadEnded },
+  persistence: { saveConfig, instanceConfigs, resetPathCache },
+  drains: { drainQueuedSends, drainConnectorResumes, drainSecretResumes, drainTeamSetupResumes, retryDelegationsWaitingOn },
+});
+const { stopCompanyInstances, persistProviderInstance, reloadProviders, providerInstancesChanging } = providerFleet;
 let mcpConfigBusy = false;
 const MAX_CONCURRENT_MCP_PROBES = 2;
 let mcpProbesInFlight = 0;
@@ -10190,7 +9931,7 @@ const workspaceBackupRoutes = createWorkspaceBackupRoutes({
     }
     return work();
   }, {
-    idle: () => !providerFleetReloading && !providerAuthSessions.active && !browserEngineInstall &&
+    idle: () => !providerFleet.providerFleetReloading && !providerAuthSessions.active && !browserEngineInstall &&
       !routines?.isTicking && !calendarCalls?.isTicking &&
       !localVmImageBusy && !localVmProvisionBusy && !localVmModeChangeBusy &&
       !localVmLifecycleBusy.size && !boxLifecycleBusyBots.size && !vpsPreviewRequests.size && !orphanBoxLifecycleBusyIds.size &&
