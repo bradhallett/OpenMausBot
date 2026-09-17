@@ -3,7 +3,7 @@
 // so index.ts and every route module use the same helpers.
 import type { RequestAuth } from "../request-auth.ts";
 
-export { json, readBody } from "../http.ts";
+export { json, readBody, readJsonValue } from "../http.ts";
 
 /** Per-request dispatch values the extracted route handlers read. */
 export type RouteContext = {
