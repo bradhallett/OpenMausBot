@@ -149,7 +149,7 @@ import { probeMcpServer } from "./mcp-probe.ts";
 
 import { BUILT_IN_DRIVERS } from "./drivers/builtIn.ts";
 import type { CommsBus } from "./comms-visibility.ts";
-import { searchMessages, closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups } from "./message-db.ts";
+import { closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups } from "./message-db.ts";
 import { promptWithReply } from "./replies.ts";
 import {
   discardDelegations,
@@ -260,12 +260,11 @@ import { profileRevision, profileSnapshot } from "./profile-revision.ts";
 import { flushAllProfileHistory, flushProfileHistory, readHistory, recordProfileChange } from "./profile-versions.ts";
 import { fetchBotDirectory, matchDirectoryBots, type MatchedDirectoryBot } from "./bot-directory.ts";
 import { scoutProject, suggestTeam } from "./project-scout.ts";
-import { fetchGithubTeam, fetchLibraryTeam, fetchTeamCatalog } from "./team-library.ts";
 import { isBotPackage, packageAgentAsMember, parseBotPackage, renderBotPackageMarkdown } from "./bot-package.ts";
 import { createTeamManifest, importedMemberProfile, parseTeamManifest } from "./team-manifest.ts";
 import { takeImportName } from "../shared/import-name.ts";
 import { readThreadEvents } from "./thread-events.ts";
-import { listenWebhookIngress, webhookCredential, type WebhookIngress } from "./webhook-ingress.ts";
+import { listenWebhookIngress, type WebhookIngress } from "./webhook-ingress.ts";
 import { WebhookManager } from "./webhooks.ts";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 import { loadBundledSkills, loadUserSkills, mergeSkills } from "./skill-library.ts";
@@ -323,6 +322,11 @@ import { json, readBody, readJsonValue } from "./http.ts";
 import { createEventsRoutes } from "./routes/events.ts";
 import { createRoutinesRoutes } from "./routes/routines.ts";
 import { createInternalRoutes, type AskBotOutcome, type InternalCapability } from "./routes/internal.ts";
+import { createCalendarCallRoutes } from "./routes/calendar-calls.ts";
+import { createWebhookRoutes } from "./routes/webhooks.ts";
+import { handleSearch } from "./routes/search.ts";
+import { handleTeamLibrary } from "./routes/team-library.ts";
+import type { RouteContext } from "./routes/http.ts";
 import {
   activeInternalGenerationByThread,
   beginInternalCapabilityGeneration,
@@ -3448,6 +3452,15 @@ const internalRoutes = createInternalRoutes({
   delegatedFullAccess, fullAccessForSource, grantDelegatedFullAccess, isUnattended, peerReviewRequired,
 });
 
+// Route groups extracted from handleRequest's dispatch chain below; wired
+// here, after the index.ts-local collaborators they close over exist.
+const handleCalendarCalls = createCalendarCallRoutes({
+  calendarCalls: () => calendarCalls!,
+  ensureCalendarCallRoom,
+  publicGroupState,
+});
+const handleWebhooks = createWebhookRoutes({ webhooks, webhookIngressStatus });
+
 const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
   let url: URL;
   try {
@@ -3457,6 +3470,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
   }
   const path = url.pathname;
   const method = req.method ?? "GET";
+  /** per-request values shared by the route modules extracted below */
+  const rctx: RouteContext = { method, path, url };
   /** scratch for route matches, shared by every `path.match` below */
   let m: RegExpMatchArray | null = null;
   let releaseWorkspaceRequest: (() => void) | undefined;
@@ -3875,82 +3890,13 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     if (await routinesRoutes(req, res, path, method, url)) return;
 
     // ── scheduled room sessions ────────────────────────────────────────
-    if (path === "/api/calendar-calls" && method === "GET") {
-      return json(res, 200, { calls: calendarCalls!.list() });
-    }
-    if (path === "/api/calendar-calls" && method === "POST") {
-      try {
-        return json(res, 201, { call: calendarCalls!.create(await readBody(req)) });
-      } catch (error) {
-        throw Object.assign(error instanceof Error ? error : new Error(String(error)), { status: 400 });
-      }
-    }
-    const calendarCallRoomMatch = path.match(/^\/api\/calendar-calls\/([\w-]+)\/room$/);
-    if (calendarCallRoomMatch && method === "POST") {
-      const call = calendarCalls!.get(calendarCallRoomMatch[1]);
-      if (!call) return json(res, 404, { error: "no such scheduled call" });
-      if (call.botIds.length < 2) {
-        return json(res, 400, { error: "single-bot events open that bot's chat directly" });
-      }
-      const group = ensureCalendarCallRoom(call);
-      return json(res, 200, { group: { ...publicGroupState(group), messages: store.messagesFor(group.threadId) } });
-    }
-    const calendarCallMatch = path.match(/^\/api\/calendar-calls\/([\w-]+)$/);
-    if (calendarCallMatch && method === "PATCH") {
-      if (!calendarCalls!.get(calendarCallMatch[1])) return json(res, 404, { error: "no such scheduled call" });
-      try {
-        return json(res, 200, { call: calendarCalls!.update(calendarCallMatch[1], await readBody(req)) });
-      } catch (error) {
-        throw Object.assign(error instanceof Error ? error : new Error(String(error)), { status: 400 });
-      }
-    }
-    if (calendarCallMatch && method === "DELETE") {
-      return calendarCalls!.remove(calendarCallMatch[1])
-        ? json(res, 200, { ok: true })
-        : json(res, 404, { error: "no such scheduled call" });
-    }
+    if (await handleCalendarCalls(req, res, rctx)) return;
 
     // ── independent webhook triggers ────────────────────────────────────
     // Management stays on the app-only server. Actual deliveries land on a
     // second, webhook-only loopback listener so Funnel or a future hosted
     // relay never has to expose the rest of OpenMausBot's control surface.
-    if (path === "/api/webhooks" && method === "GET") {
-      return json(res, 200, { webhooks: webhooks.list(), attempts: webhooks.listAttempts(), ingress: webhookIngressStatus() });
-    }
-    if (path === "/api/webhooks" && method === "POST") {
-      const created = webhooks.create(await readBody(req));
-      const ingress = webhookIngressStatus();
-      return json(res, 201, {
-        webhook: created.webhook,
-        ingress,
-        credential: webhookCredential(ingress.baseUrl, created.webhook.endpointId, created.secret),
-      });
-    }
-    let webhookMatch = path.match(/^\/api\/webhooks\/([\w-]+)\/(rotate|test)$/);
-    if (webhookMatch && method === "POST") {
-      if (webhookMatch[2] === "test") {
-        const result = webhooks.test(webhookMatch[1], await readBody(req));
-        return result ? json(res, 202, result) : json(res, 404, { error: "no such webhook" });
-      }
-      const rotated = webhooks.rotateSecret(webhookMatch[1]);
-      if (!rotated) return json(res, 404, { error: "no such webhook" });
-      const ingress = webhookIngressStatus();
-      return json(res, 200, {
-        webhook: rotated.webhook,
-        ingress,
-        credential: webhookCredential(ingress.baseUrl, rotated.webhook.endpointId, rotated.secret),
-      });
-    }
-    webhookMatch = path.match(/^\/api\/webhooks\/([\w-]+)$/);
-    if (webhookMatch && method === "PATCH") {
-      const webhook = webhooks.update(webhookMatch[1], await readBody(req));
-      return webhook ? json(res, 200, { webhook }) : json(res, 404, { error: "no such webhook" });
-    }
-    if (webhookMatch && method === "DELETE") {
-      return webhooks.remove(webhookMatch[1])
-        ? json(res, 200, { ok: true })
-        : json(res, 404, { error: "no such webhook" });
-    }
+    if (await handleWebhooks(req, res, rctx)) return;
 
     // ── events stream ──
     // Owner-only (default-deny in request-auth). Never mix login frames into
@@ -4321,41 +4267,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     // megabytes at most, so a scan answers in milliseconds and needs no
     // index to maintain. Hits resolve to the bot/room that owns the thread;
     // rows belonging to deleted conversations resolve to nothing and drop.
-    if (method === "GET" && path === "/api/search") {
-      const q = url.searchParams.get("q") ?? "";
-      const rawLimit = url.searchParams.get("limit");
-      const limit = rawLimit ? Math.min(Math.max(Number(rawLimit) || 0, 1), 100) : 40;
-      const threadId = url.searchParams.get("threadId")?.trim() || undefined;
-      if (threadId && !store.botByThread(threadId) && !store.groupByThread(threadId)) {
-        return json(res, 404, { error: "no such conversation" });
-      }
-      // whether each hit sits on its thread's visible branch — a click on
-      // one that does not has to switch versions first (and only then)
-      const activePaths = new Map<string, Set<string>>();
-      const onActivePath = (threadId: string, messageId: string) => {
-        let ids = activePaths.get(threadId);
-        if (!ids) activePaths.set(threadId, (ids = new Set(store.activePath(threadId).map((m) => m.id))));
-        return ids.has(messageId);
-      };
-      const hits = searchMessages(q, limit, threadId)
-        .map((hit) => {
-          const bot = store.botByThread(hit.threadId);
-          const group = bot ? undefined : store.groupByThread(hit.threadId);
-          if (!bot && !group) return null;
-          const active = onActivePath(hit.threadId, hit.messageId);
-          if (bot) {
-            const task = store.taskByThread(bot.id, hit.threadId);
-            return { ...hit, botId: bot.id, name: bot.name, task: task?.title, onActivePath: active };
-          }
-          if (group) {
-            const task = store.groupTaskByThread(group.id, hit.threadId);
-            return { ...hit, groupId: group.id, name: group.name, task: task?.title, onActivePath: active };
-          }
-          return null;
-        })
-        .filter((hit): hit is NonNullable<typeof hit> => hit !== null);
-      return json(res, 200, { hits });
-    }
+    if (await handleSearch(req, res, rctx)) return;
 
     // ── transcript export (the visible branch, human-readable) ──────────
     m = path.match(/^\/api\/threads\/([\w-]+)\/export$/);
@@ -4457,34 +4369,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         return json(res, 400, { error: error instanceof Error ? error.message : "Team could not be exported" });
       }
     }
-    if (method === "GET" && path === "/api/team-library/catalog") {
-      try {
-        return json(res, 200, await fetchTeamCatalog());
-      } catch (error) {
-        return json(res, 502, { error: error instanceof Error ? error.message : "The team library is unavailable" });
-      }
-    }
-    m = path.match(/^\/api\/team-library\/teams\/([a-z0-9][a-z0-9-]*)$/);
-    if (m && method === "GET") {
-      try {
-        return json(res, 200, await fetchLibraryTeam(m[1]));
-      } catch (error) {
-        const status = (error as { status?: number }).status === 404 ? 404 : 502;
-        return json(res, status, { error: error instanceof Error ? error.message : "The team could not be loaded" });
-      }
-    }
-    if (method === "POST" && path === "/api/team-library/github") {
-      const body = await readBody(req);
-      if (typeof body.url !== "string" || !body.url.trim()) {
-        return json(res, 400, { error: "A GitHub URL is required" });
-      }
-      try {
-        return json(res, 200, await fetchGithubTeam(body.url));
-      } catch (error) {
-        const status = (error as { status?: number }).status === 404 ? 404 : 400;
-        return json(res, status, { error: error instanceof Error ? error.message : "The GitHub team could not be loaded" });
-      }
-    }
+    if (await handleTeamLibrary(req, res, rctx)) return;
     if (method === "GET" && path === "/api/teams/scout") {
       // The scout reads a folder and answers with a suggestion — it creates
       // nothing. Bots and the room come into being only when the human sends
