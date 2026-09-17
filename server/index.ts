@@ -121,16 +121,7 @@ import {
   restoreSteeredMessages,
   settleHeldSteeredQueue,
 } from "./steer-queue.ts";
-import {
-  cancelChannelMessage,
-  holdChannelQueue,
-  queuedChannelMessage,
-  queueChannelMessage,
-  restoreChannelMessages,
-  restoreHeldChannelQueue,
-  resolveHeldReplyTarget,
-  settleHeldChannelQueueHead,
-} from "./channel-queue.ts";
+import { restoreChannelMessages } from "./channel-queue.ts";
 import { acceptedSendMatch, parseSendId, sendFingerprint, SendSequencer } from "./send-idempotency.ts";
 import { EventBus } from "./harness/bus.ts";
 import { ManagedDesktopProviders } from "./managed-desktop.ts";
@@ -201,19 +192,11 @@ import { TeamSetupError, TeamSetupRequestService } from "./team-setup-requests.t
 import type { TeamSetupRequest } from "../shared/team-setup.ts";
 import { profileRevision, profileSnapshot } from "./profile-revision.ts";
 import { flushAllProfileHistory, flushProfileHistory, readHistory, recordProfileChange } from "./profile-versions.ts";
-import { fetchBotDirectory, matchDirectoryBots, type MatchedDirectoryBot } from "./bot-directory.ts";
-import { scoutProject, suggestTeam } from "./project-scout.ts";
-import { isBotPackage, packageAgentAsMember, parseBotPackage, renderBotPackageMarkdown } from "./bot-package.ts";
-import { createTeamManifest, importedMemberProfile, parseTeamManifest } from "./team-manifest.ts";
-import { takeImportName } from "../shared/import-name.ts";
 import { readThreadEvents } from "./thread-events.ts";
 import { listenWebhookIngress, type WebhookIngress } from "./webhook-ingress.ts";
 import { WebhookManager } from "./webhooks.ts";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 import { loadBundledSkills, loadUserSkills, mergeSkills } from "./skill-library.ts";
-import { createBotPackageExport } from "./package-export.ts";
-import { createTeamBackup, importTeamBackup } from "./team-backup.ts";
-import { MAX_TEAM_BACKUP_BYTES } from "../shared/team-backup.ts";
 import { parseSurface } from "./surface.ts";
 import { createDeferredResumes } from "./deferred-resumes.ts";
 import { createDelegationWatch } from "./delegation-watch.ts";
@@ -225,16 +208,13 @@ import {
   groupGoalCoordinatorTurns,
   groupIsWorking,
   groupQueues,
-  groupTurnOperations,
   hasUnboundDiscardedGroupGoalTurn,
   removeGroupGoalCoordinatorTurn,
 } from "./group-coordination.ts";
 import { createBotViews, setActiveCoordinationForThread } from "./bot-views.ts";
 import {
-  checkedExportSkillNames,
   checkedGroupResponder,
   checkedMemberIds,
-  collectExportSkills,
   createCheckedInputs,
 } from "./checked-inputs.ts";
 import { createDesktopApproval } from "./desktop-approval.ts";
@@ -272,7 +252,8 @@ import { createTtsRoutes } from "./routes/tts.ts";
 import { createConnectorRoutes } from "./routes/connectors.ts";
 import { createWebhookRoutes } from "./routes/webhooks.ts";
 import { createMessageRoutes, createRequirePinnedClientThread } from "./routes/messages.ts";
-import { handleTeamLibrary } from "./routes/team-library.ts";
+import { createTeamRoutes } from "./routes/teams.ts";
+import { createBotRoutes } from "./routes/bots.ts";
 import { createUsageRoutes } from "./routes/usage.ts";
 import { createConfigRoutes } from "./routes/config.ts";
 import type { RouteContext } from "./routes/http.ts";
@@ -321,7 +302,6 @@ import { ProviderAuthSessions } from "./provider-auth-sessions.ts";
 import {
   clearSessionCookie,
   clientBotPatchViolation,
-  clientGroupPatchViolation,
   isLoopbackHost,
   isProxied,
   labelFromUserAgent,
@@ -3377,6 +3357,41 @@ const handleConfig = createConfigRoutes({
 const handleTts = createTtsRoutes();
 const handleConnectors = createConnectorRoutes();
 const handleWebhooks = createWebhookRoutes({ webhooks, webhookIngressStatus });
+const handleTeams = createTeamRoutes({
+  createChannel,
+  publicGroupState,
+  publicBot,
+  messagePage,
+  broadcast,
+  routines: () => routines,
+});
+const handleBots = createBotRoutes({
+  routines: () => routines,
+  broadcast,
+  publicGroupState,
+  wireBot,
+  updateChannel,
+  channelTaskBlocked,
+  phoneSecretSubmissions,
+  createGroupTaskRequestSchema,
+  createSidebarSectionSchema,
+  groupWithThread,
+  groupSpeakers,
+  lastReply,
+  sendSequencer,
+  noteTurnTrigger,
+  resolveReplyTarget,
+  stagedSkillCleanupsForThread,
+  rejectDeletedThreadSkillStages,
+  cancelTeamSetupResumesForThread,
+  DESKTOP_MANAGED,
+  startGroupTurn,
+  drainQueuedChannelSends,
+  runningTurnInstance,
+  cancelGroupTurnOperations,
+  assertTeamComputerChangeIdle,
+  teamComputers,
+});
 
 const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
   let url: URL;
@@ -3869,801 +3884,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     const requirePinnedClientThread = createRequirePinnedClientThread(auth, req);
     if (await handleMessages(req, res, rctx)) return;
 
-    // ── channels (persisted internally as groups) ───────────────────────
-    if (method === "POST" && path === "/api/groups") {
-      const group = createChannel(await readBody(req));
-      return json(res, 201, { group: { ...publicGroupState(group), messages: [] } });
-    }
-    if (method === "POST" && path === "/api/teams/export") {
-      const body = await readBody(req);
-      const profileName = cfg.profile?.name?.trim();
-      const name =
-        typeof body.name === "string" && body.name.trim()
-          ? body.name.trim()
-          : profileName
-            ? `${profileName}'s Team`
-            : "My OpenMaus Team";
-      const memberIds = store.bots.filter((bot) => !bot.hidden).map((bot) => bot.id);
-      if ((body.format === "backup" ? store.bots.length : memberIds.length) === 0) return json(res, 400, { error: "Create a bot before exporting your team" });
-      try {
-        if (body.format === "backup") {
-          return json(res, 200, createTeamBackup(store, routines!.listRoutines(), name));
-        }
-        if (body.format === "package") {
-          const selectedBots = store.bots.filter((bot) => !bot.hidden);
-          const skillNames = checkedExportSkillNames(body.skillIds, selectedBots);
-          if (!skillNames.ok) return json(res, 400, { error: skillNames.error });
-          const document = createBotPackageExport({
-            name,
-            authorName: profileName,
-            bots: selectedBots,
-            groups: store.groups,
-            routines: routines!.listRoutines(),
-            skillsByBot: collectExportSkills(selectedBots, skillNames.names),
-          });
-          return json(res, 200, {
-            name: document.package.name,
-            members: document.package.agents.length,
-            markdown: renderBotPackageMarkdown(document),
-          });
-        }
-        return json(
-          res,
-          200,
-          createTeamManifest(
-            {
-              name,
-              memberIds,
-            },
-            store.bots,
-          ),
-        );
-      } catch (error) {
-        return json(res, 400, { error: error instanceof Error ? error.message : "Team could not be exported" });
-      }
-    }
-    if (await handleTeamLibrary(req, res, rctx)) return;
-    if (method === "GET" && path === "/api/teams/scout") {
-      // The scout reads a folder and answers with a suggestion — it creates
-      // nothing. Bots and the room come into being only when the human sends
-      // the suggested manifest through /api/teams/import, so "the agent
-      // proposes, the person imports" is enforced by the route split itself.
-      // The folder is whatever validateBotCwd accepts: the same local-user
-      // trust boundary as pointing any bot's working folder at a path.
-      // Deliberately offline — the community directory lives on its own
-      // route below, so a slow network can never delay the suggestion.
-      const validated = validateBotCwd(url.searchParams.get("cwd"));
-      if (!validated.ok) return json(res, 400, { error: validated.error });
-      if (!validated.cwd) return json(res, 400, { error: "scout needs a folder to read" });
-      const profile = scoutProject(validated.cwd);
-      return json(res, 200, { profile, suggestion: suggestTeam(profile) });
-    }
-    if (method === "GET" && path === "/api/teams/scout/directory") {
-      // Community bots that fit the scouted folder — a separate, lazy call
-      // so an unreachable directory degrades to "no extra candidates", never
-      // to a broken scout.
-      const validated = validateBotCwd(url.searchParams.get("cwd"));
-      if (!validated.ok) return json(res, 400, { error: validated.error });
-      if (!validated.cwd) return json(res, 400, { error: "scout needs a folder to read" });
-      let directory: MatchedDirectoryBot[] = [];
-      try {
-        directory = matchDirectoryBots(scoutProject(validated.cwd), await fetchBotDirectory());
-      } catch (error) {
-        // an unreachable directory is a fact of life, not an error — but an
-        // empty section should still be diagnosable from the server log
-        console.warn("bot directory lookup failed:", error instanceof Error ? error.message : String(error));
-      }
-      return json(res, 200, { directory });
-    }
-    if (method === "POST" && path === "/api/teams/import") {
-      // Import is additive-only. A manifest is untrusted input (catalog,
-      // GitHub, a shared file), so it must be structurally unable to reach
-      // records the user already has: every member becomes a NEW bot with a
-      // fresh id — a manifest cannot name, update, or merge into an existing
-      // bot or room. Repeated imports create freshly numbered copies.
-      const importMode = url.searchParams.get("mode") ?? "add";
-      if (importMode === "replace") {
-        return json(res, 400, { error: "Replacing your team is no longer supported. Reopen Import in the updated app to add bots alongside your existing conversations." });
-      }
-      if (importMode !== "add" && importMode !== "project") {
-        return json(res, 400, { error: "Team import mode must be add or project" });
-      }
-      // `project` adds the team AND opens a caller-owned room on a folder.
-      // Legacy team manifests remain people-only. Full bot packages may add
-      // their own new rooms, but neither format can point at an existing room
-      // or choose a local folder; workspace access always comes from this
-      // explicit caller parameter.
-      let projectCwd: string | null = null;
-      if (importMode === "project") {
-        const requested = url.searchParams.get("cwd");
-        if (requested !== null) {
-          const validated = validateBotCwd(requested);
-          if (!validated.ok) return json(res, 400, { error: validated.error });
-          projectCwd = validated.cwd;
-        }
-      }
-      const body = await readBody(req, MAX_TEAM_BACKUP_BYTES);
-      if (body?.format === "openmaus.backup") {
-        if (importMode !== "add") return json(res, 400, { error: "Import backups alongside your existing bots; project mode is only for templates" });
-        try {
-          const imported = importTeamBackup(store, routines!, body, await defaultSelection());
-          const bots = imported.bots.map((bot) => publicBot(bot));
-          const groups = imported.groups.map((group) => ({ ...publicGroupState(group), ...messagePage(group.threadId, undefined) }));
-          for (const bot of bots) broadcast({ kind: "bot", bot });
-          for (const group of groups) broadcast({ kind: "group", group });
-          return json(res, 201, { ...imported, bots, groups });
-        } catch (error) {
-          return json(res, 400, { error: error instanceof Error ? error.message : "Backup could not be imported" });
-        }
-      }
-      let packageDocument: ReturnType<typeof parseBotPackage> | null = null;
-      let manifest: ReturnType<typeof parseTeamManifest> | null = null;
-      try {
-        if (isBotPackage(body)) packageDocument = parseBotPackage(body);
-        else manifest = parseTeamManifest(body);
-      } catch (error) {
-        return json(res, 400, { error: error instanceof Error ? error.message : "Invalid bot package" });
-      }
-      const pkg = packageDocument?.package;
-      const importName = pkg?.name ?? manifest!.team.name;
-      const sourceMembers = pkg
-        ? pkg.agents.map((agent) => ({ member: packageAgentAsMember(agent), playbookKeys: agent.playbooks ?? [], skillNames: agent.skills ?? [] }))
-        : manifest!.team.members.map((member) => ({ member, playbookKeys: [] as string[], skillNames: [] as string[] }));
-
-      const importedBots: ReturnType<typeof store.createBot>[] = [];
-      const createdGroups: GroupRecord[] = [];
-      const createdRoutineIds: string[] = [];
-      // Names already in use, hidden bots included: an archived bot can be
-      // un-archived later, and a revived duplicate would be just as
-      // ambiguous then.
-      const takenNames = new Set(store.bots.map((bot) => bot.name.trim().toLowerCase()));
-      const memberIds = new Map<string, string>();
-      let group: GroupRecord | undefined;
-      let importSection: string | undefined;
-      try {
-        const selection = await defaultSelection();
-        const existingSections = new Set(
-          [...store.sections, ...store.bots.map((bot) => bot.section), ...store.groups.map((candidate) => candidate.section)]
-            .filter((section): section is string => Boolean(section?.trim()))
-            .map((section) => section.trim().toLowerCase()),
-        );
-        // Every template gets its own section, including legacy teams and
-        // project imports. Never merge into an existing section (or replace
-        // its Chief). Keep the name editable through the 60-character API.
-        importSection = takeImportName(importName, existingSections, 60);
-        const playbookByKey = new Map((pkg?.playbooks ?? []).map((playbook) => [playbook.key, playbook]));
-        const packageSkillByName = new Map((pkg?.skills?.entries ?? []).map((skill) => [skill.name, skill]));
-        for (const source of sourceMembers) {
-          const member = source.member;
-          // importedMemberProfile is the authority boundary: persona fields
-          // only, colliding names numbered. seedMessages: false — an
-          // imported bot must not open by greeting the user as though it
-          // were new. composio: false — a shared persona never starts with
-          // reach into the user's connected apps (absence would mean
-          // allowed); the user can switch it on per bot after reading who
-          // they got.
-          const created = store.createBot(
-            {
-              ...importedMemberProfile(member, takenNames),
-              modelSelection: selection,
-              section: importSection,
-            },
-            { seedMessages: false },
-          );
-          importedBots.push(created);
-          const installedPlaybooks = source.playbookKeys.flatMap((key) => {
-            const playbook = playbookByKey.get(key);
-            return playbook ? [{ ...playbook }] : [];
-          });
-          store.patchBot(created.id, {
-            composio: false,
-            ...(installedPlaybooks.length ? { playbooks: installedPlaybooks } : {}),
-            ...(pkg
-              ? {
-                  installedPackage: {
-                    id: pkg.id,
-                    name: pkg.name,
-                    release: pkg.release,
-                    requiredApps: pkg.requirements.apps.map((app) => ({ ...app })),
-                  },
-                }
-              : {}),
-          });
-          for (const skillName of source.skillNames) {
-            const skill = packageSkillByName.get(skillName);
-            if (!skill) throw new Error(`Package skill "${skillName}" is unavailable`);
-            const installed = installSkill(created.id, skill.source ?? `package:${pkg!.id}`, [
-              { path: "SKILL.md", content: skill.instructions },
-            ]);
-            if ("error" in installed) {
-              throw new Error(`Package skill "${skillName}" could not be imported: ${installed.error}`);
-            }
-          }
-          memberIds.set(member.key, created.id);
-        }
-
-        // A package is an explicit structure import: its rooms are created
-        // from package-local keys only, then normalized to fresh bot ids.
-        for (const room of pkg?.rooms ?? []) {
-          const ids = room.members.map((key) => memberIds.get(key)!);
-          let created = store.createGroup(room.name, ids, false, importSection);
-          createdGroups.push(created);
-          const defaultResponder = room.defaultResponder.kind === "agent"
-            ? { kind: "member" as const, botId: memberIds.get(room.defaultResponder.agent)! }
-            : { kind: room.defaultResponder.kind } as const;
-          created = store.patchGroup(created.id, {
-            bulletin: room.bulletin ?? "",
-            defaultResponder,
-            setupCompletedAt: Date.now(),
-          }) ?? created;
-        }
-
-        for (const routine of pkg?.routines ?? []) {
-          const created = routines!.create({
-            name: routine.name,
-            prompt: routine.prompt,
-            botId: memberIds.get(routine.agent)!,
-            runOn: routine.runOn,
-            enabled: false,
-            schedule: routine.schedule,
-            durationMinutes: routine.durationMinutes,
-            ...(routine.timeoutMinutes === undefined ? {} : { timeoutMinutes: routine.timeoutMinutes }),
-          });
-          createdRoutineIds.push(created.id);
-        }
-
-        if (pkg?.chiefOfStaff) {
-          store.setChiefOfStaff(memberIds.get(pkg.chiefOfStaff)!);
-        }
-
-        // The room is created last, so a failure anywhere above leaves no
-        // half-built project behind — the catch below deletes the bots and
-        // there is no room pointing at them.
-        if (!pkg && importMode === "project" && importedBots.length > 0) {
-          const roomName = url.searchParams.get("room")?.trim() || manifest!.team.name;
-          group = store.createGroup(roomName, importedBots.map((bot) => bot.id), false, importSection);
-          createdGroups.push(group);
-          if (projectCwd) {
-            // `cwd` is the folder the room WANTS; the store pins it on the
-            // first turn (pinGroupCwd). Setting the pin here would decide it
-            // before anyone has worked, which is the store's call, not ours.
-            group = store.patchGroup(group.id, { cwd: projectCwd }) ?? group;
-          }
-          broadcast({ kind: "group", group: publicGroupState(group) });
-        }
-
-        const publicBots = importedBots.map((bot) => publicBot(store.bot(bot.id)!));
-        for (const bot of publicBots) broadcast({ kind: "bot", bot });
-
-        return json(res, 201, {
-          name: importName,
-          bots: publicBots,
-          group,
-          groups: createdGroups.map((created) => ({ ...created, messages: [] })),
-          routines: createdRoutineIds.flatMap((id) => routines!.listRoutines().filter((routine) => routine.id === id)),
-        });
-      } catch (error) {
-        // A room of deleted members must not survive either — patchGroup can
-        // throw (disk) after createGroup already saved.
-        for (const routineId of createdRoutineIds) routines!.remove(routineId);
-        for (const created of createdGroups) store.deleteGroup(created.id);
-        for (const bot of importedBots) store.deleteBot(bot.id);
-        // Empty teams are now durable too. This import allocated a fresh
-        // identity, so its failed installation must retire that identity.
-        if (importSection && store.sections.includes(importSection)) store.changeEmptySection(importSection, null);
-        throw error;
-      }
-    }
-    m = path.match(/^\/api\/groups\/([\w-]+)\/setup$/);
-    if (m && method === "PATCH") {
-      const group = store.group(m[1]);
-      if (!group) return json(res, 404, { error: "no such room" });
-      if (group.dm) return json(res, 400, { error: "direct-message channels do not have room setup" });
-      const body = await readBody(req);
-      if (body.action !== "complete" && body.action !== "skip") {
-        return json(res, 400, { error: "action must be complete or skip" });
-      }
-      if (group.setupCompletedAt != null || group.setupSkippedAt != null) {
-        return json(res, 200, { group: publicGroupState(group) });
-      }
-      if (store.messagesFor(group.threadId).length > 0) {
-        return json(res, 409, { error: "room setup must be finished before the first message" });
-      }
-
-      const patch: Partial<Pick<GroupRecord, "cwd" | "defaultResponder" | "bulletin" | "setupCompletedAt" | "setupSkippedAt">> = {};
-      if (body.action === "complete") {
-        const checked = validateBotCwd(body.cwd ?? null);
-        if (!checked.ok) return json(res, 400, { error: checked.error });
-        if (typeof body.bulletin !== "string") return json(res, 400, { error: "bulletin must be a string" });
-        if (body.bulletin.length > 12_000) return json(res, 400, { error: "bulletin must be at most 12000 characters" });
-        const value = body.defaultResponder as { kind?: unknown; botId?: unknown } | null;
-        let responder: GroupDefaultResponder | null = null;
-        if (value?.kind === "everyone") responder = { kind: "everyone" };
-        else if (value?.kind === "mentions") responder = { kind: "mentions" };
-        else if (value?.kind === "member" && typeof value.botId === "string" && group.memberIds.includes(value.botId)) {
-          responder = { kind: "member", botId: value.botId };
-        }
-        if (!responder) return json(res, 400, { error: "invalid default responder" });
-        patch.cwd = checked.cwd ?? undefined;
-        patch.defaultResponder = responder;
-        patch.bulletin = body.bulletin;
-        patch.setupCompletedAt = Date.now();
-      } else {
-        patch.setupSkippedAt = Date.now();
-      }
-      const updated = store.patchGroup(m[1], patch);
-      if (!updated) return json(res, 404, { error: "no such room" });
-      return json(res, 200, { group: publicGroupState(updated) });
-    }
-
-    // ── channel tasks: separate conversations for the same team ────────
-
-
-    // A scheduled goal starts in a detached task. Let the user open the
-    // exact task that owns the live operation (or a durable approval card)
-    // so they can observe or unblock it; switching to an unrelated task is
-    // still forbidden until the room settles.
-    const channelTaskSwitchBlocked = (group: GroupRecord, targetThreadId: string) => {
-      const operationOwnsTarget = [...(groupTurnOperations.get(group.id) ?? [])]
-        .some((operation) => !operation.cancelled && operation.threadId === targetThreadId);
-      if (groupIsWorking(group) && !operationOwnsTarget) return true;
-      const openApprovalThreads = store.groupTasks(group.id).flatMap((task) =>
-        store.messagesFor(task.threadId).some(
-          (message) =>
-            message.kind === "options" &&
-            message.card?.requestId &&
-            !message.card.answered &&
-            !message.card.dismissed,
-        ) ? [task.threadId] : [],
-      );
-      return openApprovalThreads.length > 0 && !openApprovalThreads.includes(targetThreadId);
-    };
-
-    m = path.match(/^\/api\/groups\/([\w-]+)\/tasks$/);
-    if (m && method === "POST") {
-      const body = await readBody(req);
-      const group = store.group(m[1]);
-      if (!group) return json(res, 404, { error: "no such channel" });
-      if (group.dm) return json(res, 400, { error: "bot-to-bot channels keep one canonical conversation" });
-      if (channelTaskBlocked(group)) {
-        return json(res, 409, { error: "this channel is working or waiting on you — finish that turn first" });
-      }
-      if (phoneSecretSubmissions.hasGroup(group.id)) {
-        return json(res, 409, { error: "this channel is securely saving a credential — try again when it finishes" });
-      }
-      if (!body || typeof body !== "object" || Array.isArray(body)) {
-        return json(res, 400, { error: "body must be a JSON object" });
-      }
-      const request = createGroupTaskRequestSchema.safeParse(body);
-      if (!request.success) return json(res, 400, { error: "title must be text" });
-      const task = store.createGroupTask(group.id, request.data.title);
-      if (!task) return json(res, 500, { error: "couldn't create that task" });
-      const fresh = groupWithThread(store.group(group.id)!);
-      broadcast({ kind: "group", group: fresh });
-      return json(res, 201, { group: fresh, task });
-    }
-
-    m = path.match(/^\/api\/groups\/([\w-]+)\/tasks\/([\w-]+)$/);
-    if (m && method === "POST") {
-      const group = store.group(m[1]);
-      if (!group) return json(res, 404, { error: "no such channel" });
-      if (group.dm) return json(res, 400, { error: "bot-to-bot channels keep one canonical conversation" });
-      if (phoneSecretSubmissions.hasGroup(group.id)) {
-        return json(res, 409, { error: "this channel is securely saving a credential — try again when it finishes" });
-      }
-      if (channelTaskSwitchBlocked(group, m[2])) {
-        return json(res, 409, { error: "this channel is working or waiting on you in another task" });
-      }
-      const switched = store.switchGroupTask(group.id, m[2]);
-      if (!switched) return json(res, 404, { error: "no such channel task" });
-      const fresh = groupWithThread(switched);
-      broadcast({ kind: "group", group: fresh });
-      const responseGroup = url.searchParams.get("messages") === "0"
-        ? { ...publicGroupState(switched), tasks: store.groupTasks(switched.id) }
-        : fresh;
-      return json(res, 200, { group: responseGroup });
-    }
-    if (m && method === "PATCH") {
-      const body = await readBody(req);
-      const group = store.group(m[1]);
-      if (!group) return json(res, 404, { error: "no such channel" });
-      if (group.dm) return json(res, 400, { error: "bot-to-bot channels keep one canonical conversation" });
-      if (channelTaskBlocked(group)) {
-        return json(res, 409, { error: "this channel is working or waiting on you — finish that turn first" });
-      }
-      if (!body || typeof body !== "object" || Array.isArray(body)) {
-        return json(res, 400, { error: "body must be a JSON object" });
-      }
-      const task = store.renameGroupTask(m[1], m[2], String(body.title ?? ""));
-      if (!task) return json(res, 404, { error: "no such channel task" });
-      return json(res, 200, { task });
-    }
-    if (m && method === "DELETE") {
-      const group = store.group(m[1]);
-      if (!group) return json(res, 404, { error: "no such channel" });
-      if (group.dm) return json(res, 400, { error: "bot-to-bot channels keep one canonical conversation" });
-      if (phoneSecretSubmissions.hasThread(m[2])) {
-        return json(res, 409, { error: "this task is securely saving a credential — try again when it finishes" });
-      }
-      if (channelTaskBlocked(group)) {
-        return json(res, 409, { error: "this channel is working or waiting on you — finish that turn first" });
-      }
-      if (!store.groupTaskByThread(group.id, m[2])) return json(res, 404, { error: "no such channel task" });
-      const stagedSkillCleanups = stagedSkillCleanupsForThread(m[2]);
-      lastReply.delete(m[2]);
-      cancelTeamSetupResumesForThread(m[2]);
-      const updated = store.deleteGroupTask(group.id, m[2]);
-      if (!updated) return json(res, 400, { error: "a channel keeps at least one task" });
-      rejectDeletedThreadSkillStages(stagedSkillCleanups);
-      const fresh = groupWithThread(updated);
-      broadcast({ kind: "group", group: fresh });
-      return json(res, 200, { group: fresh });
-    }
-
-    m = path.match(/^\/api\/groups\/([\w-]+)$/);
-    if (m && method === "PATCH") {
-      const body = await readBody(req);
-      if (auth.kind === "session" && !auth.scopes.includes("admin")) {
-        const field = clientGroupPatchViolation(body);
-        if (field) return json(res, 403, { error: `forbidden: this session may rename or mark a room, not change "${field}" (needs the admin scope)` });
-      }
-      const group = updateChannel(m[1], body);
-      return json(res, 200, { group: publicGroupState(group) });
-    }
-    m = path.match(/^\/api\/groups\/([\w-]+)\/read$/);
-    if (m && method === "POST") {
-      const group = store.patchGroup(m[1], { unread: false });
-      if (!group) return json(res, 404, { error: "no such room" });
-      broadcast({ kind: "group", group: publicGroupState(group) });
-      return json(res, 200, { group: publicGroupState(group) });
-    }
-    m = path.match(/^\/api\/groups\/([\w-]+)$/);
-    if (m && method === "DELETE") {
-      const group = store.group(m[1]);
-      if (!group) return json(res, 404, { error: "no such room" });
-      if (phoneSecretSubmissions.hasGroup(group.id)) {
-        return json(res, 409, { error: "this channel is securely saving a credential — try again when it finishes" });
-      }
-      if (groupIsWorking(group)) {
-        return json(res, 409, { error: "this channel is working — stop that turn first" });
-      }
-      const threadIds = new Set([group.threadId, ...(group.tasks ?? []).map((task) => task.threadId)]);
-      const stagedSkillCleanups = [...threadIds].flatMap(stagedSkillCleanupsForThread);
-      for (const threadId of threadIds) {
-        cancelTeamSetupResumesForThread(threadId);
-        lastReply.delete(threadId);
-      }
-      routines!.disableForGroup(group.id);
-      store.deleteGroup(group.id);
-      rejectDeletedThreadSkillStages(stagedSkillCleanups);
-      return json(res, 200, { ok: true });
-    }
-    m = path.match(/^\/api\/groups\/([\w-]+)\/messages$/);
-    if (m && method === "POST") {
-      const body = await readBody(req);
-      if (!body || typeof body !== "object" || Array.isArray(body)) {
-        return json(res, 400, { error: "body must be a JSON object" });
-      }
-      const text = String(body.text ?? "").trim();
-      if (!text) return json(res, 400, { error: "text required" });
-      const group = store.group(m[1]);
-      if (!group) return json(res, 404, { error: "no such group" });
-      if (body.mode !== undefined && body.mode !== "chat" && body.mode !== "goal") {
-        return json(res, 400, { error: "mode must be chat or goal" });
-      }
-      const channelMode: "chat" | "goal" = body.mode === "goal" ? "goal" : "chat";
-      if (group.dm && channelMode === "goal") {
-        return json(res, 400, { error: "goal mode is available in team channels, not bot-to-bot channels" });
-      }
-      if (body.threadId !== undefined && (typeof body.threadId !== "string" || !/^[\w-]+$/.test(body.threadId))) {
-        return json(res, 400, { error: "threadId must be a task id" });
-      }
-      const threadId = body.threadId ?? group.threadId;
-      noteTurnTrigger(threadId, auth);
-      try {
-        assertWithinBudget(cfg, DATA_DIR);
-      } catch (error) {
-        return json(res, 409, { error: error instanceof Error ? error.message : String(error), code: "spend_cap" });
-      }
-      const ownsThread = group.dm
-        ? group.threadId === threadId
-        : Boolean(store.groupTaskByThread(group.id, threadId));
-      if (!ownsThread) {
-        return json(res, 409, { error: "the channel switched tasks before it could receive the message" });
-      }
-      const sendId = parseSendId(body.sendId);
-      const replyTo = resolveReplyTarget(threadId, body.replyToId);
-      // Who is this "user"? On a headless server loopback is the owner by
-      // design, and a bot's shell is a loopback caller too. A request with
-      // no paired session and no browser origin cannot be told from a
-      // script, so its message is stamped rather than trusted as typed —
-      // the room's readers, its posting budget and its transcript all look
-      // at that stamp — and the send is logged where the operator can see
-      // it. The desktop app never gets here: its owner capability is
-      // checked before this handler runs.
-      const browserOrigin = typeof req.headers.origin === "string" && req.headers.origin.trim() !== "";
-      const via: "api" | undefined =
-        auth.kind === "loopback" && !DESKTOP_MANAGED && !browserOrigin ? "api" : undefined;
-      if (via) {
-        console.warn(`room message from ${requestSource(req)} through the local API (no session, no browser origin) into "${group.name}"`);
-      }
-      const receipt = await sendSequencer.run(
-        sendId ? `group:${group.id}:${threadId}:${sendId}` : undefined,
-        sendFingerprint(text, replyTo?.id, channelMode),
-        async () => {
-          if (sendId) {
-            if (cancelledChatFollowup("channel", group.id, threadId, sendId)) {
-              throw Object.assign(new Error("this queued sendId was cancelled; send a new message to try again"), { status: 409 });
-            }
-            const accepted = acceptedSendMatch(store.messagesFor(threadId), sendId, text, replyTo?.id, channelMode);
-            if (accepted.kind === "conflict") {
-              throw Object.assign(new Error("sendId already belongs to another message"), { status: 409 });
-            }
-            if (accepted.kind === "match") {
-              return { ok: true as const, threadId, message: accepted.message };
-            }
-            const queued = queuedChannelMessage(group.id, threadId, sendId);
-            if (queued) {
-              if (
-                queued.text !== text ||
-                queued.replyToId !== replyTo?.id ||
-                queued.mode !== channelMode
-              ) {
-                throw Object.assign(new Error("sendId already belongs to another message"), { status: 409 });
-              }
-              return { ok: true as const, queued: true as const, queueId: queued.id, threadId };
-            }
-          }
-          const current = store.group(group.id);
-          if (!current) throw Object.assign(new Error("no such group"), { status: 404 });
-          if (current.threadId !== threadId) {
-            throw Object.assign(new Error("the channel switched tasks before it could receive the message"), {
-              status: 409,
-            });
-          }
-          if (groupIsWorking(current)) {
-            const queued = queueChannelMessage(current.id, threadId, text, {
-              replyToId: replyTo?.id,
-              sendId,
-              mode: channelMode,
-              via,
-            });
-            return { ok: true as const, queued: true as const, queueId: queued.id, threadId };
-          }
-          const message = startGroupTurn(current.id, text, replyTo, sendId, channelMode, undefined, { via });
-          return { ok: true as const, threadId, message };
-        },
-      );
-      return json(res, 202, receipt);
-    }
-    m = path.match(/^\/api\/groups\/([\w-]+)\/queue\/([\w-]+)$/);
-    if (m && method === "DELETE") {
-      const group = store.group(m[1]);
-      if (!group) return json(res, 404, { error: "no such group" });
-      if (!cancelChannelMessage(group.id, m[2])) {
-        return json(res, 404, { error: "no such queued message" });
-      }
-      return json(res, 200, { ok: true });
-    }
-
-    // Steer a queued room message into the RUNNING room turn (no interrupt).
-    // Only the head steers — room queues drain one item at a time — and the
-    // engine that receives it is the thread's live speaker. A room whose
-    // running driver cannot steer keeps its queue, exactly like an incapable
-    // 1:1 engine; this never ends the running turn.
-    m = path.match(/^\/api\/groups\/([\w-]+)\/queue\/([\w-]+)\/steer$/);
-    if (m && method === "POST") {
-      const body = await readBody(req);
-      if (body !== null && (typeof body !== "object" || Array.isArray(body))) {
-        return json(res, 400, { error: "body must be a JSON object" });
-      }
-      const threadId = typeof body?.threadId === "string" ? body.threadId : undefined;
-      if (threadId !== undefined && !/^[\w-]+$/.test(threadId)) {
-        return json(res, 400, { error: "threadId must be a task id" });
-      }
-      const group = store.group(m[1]);
-      if (!group) return json(res, 404, { error: "no such room" });
-      const targetThreadId = threadId ?? group.threadId;
-      const ownsThread = group.dm
-        ? group.threadId === targetThreadId
-        : Boolean(store.groupTaskByThread(group.id, targetThreadId));
-      if (!ownsThread) {
-        return json(res, 409, { error: "the channel switched tasks before it could receive the message" });
-      }
-      noteTurnTrigger(targetThreadId, auth);
-      const current = store.group(group.id);
-      if (!current) return json(res, 404, { error: "no such room" });
-      // Which engine owns the running room turn on this thread? The same
-      // resolution the room's own Stop uses: the live speaker, else the busy
-      // bot on the channel's main thread.
-      const speakerBotId =
-        groupSpeakers.get(targetThreadId)?.botId ??
-        (targetThreadId === current.threadId ? current.busyBotId : undefined);
-      const speaker = speakerBotId ? store.bot(speakerBotId) : undefined;
-      const instance = speaker ? runningTurnInstance(speaker, targetThreadId) : undefined;
-      // Lift the queue atomically: the room settling can drain it as the
-      // next follow-up, or this request can steer its head into the live
-      // turn — never both for the same words.
-      const held = holdChannelQueue(current.id, targetThreadId, m[2]);
-      if (!held) return json(res, 404, { error: "no such queued message" });
-      if (!speaker || !instance?.adapter.capabilities.queueing || !instance.adapter.steer) {
-        restoreHeldChannelQueue(held);
-        return json(res, 200, { ok: true, queued: true, threadId: targetThreadId });
-      }
-      const [head] = held.items;
-      if (!head || head.id !== m[2]) {
-        restoreHeldChannelQueue(held);
-        return json(res, 409, { error: "only the first queued message can steer" });
-      }
-      // A reply target that cannot be resolved restores the held queue
-      // before the request fails — the room's normal drain keeps the head.
-      const replyTo = resolveHeldReplyTarget(held, resolveReplyTarget);
-      const steered = await instance.adapter
-        .steer(targetThreadId, promptWithReply(head.text, replyTo, cfg.profile?.name?.trim() || "User"))
-        .catch((): SteerOutcome => "indeterminate");
-      // The steer was awaited adapter work: re-read every ownership
-      // invariant before writing anything, exactly like the 1:1 path. A
-      // speaker change, a channel switch, or a settled room restores the
-      // queue instead of recording words the new turn never saw.
-      const after = store.group(current.id);
-      const afterSpeakerBotId = after
-        ? groupSpeakers.get(targetThreadId)?.botId ??
-          (targetThreadId === after.threadId ? after.busyBotId : undefined)
-        : undefined;
-      // "indeterminate" (timeout after delivery, lost transport, a settle
-      // race) never restores: the words may already be folded into the turn
-      // that was live when they were sent, and replaying them into a new
-      // turn would run them twice. Record them once — even under a new
-      // speaker — and settle the head.
-      const delivered = steered !== "refused";
-      if (after && delivered && (steered === "indeterminate" || afterSpeakerBotId === speakerBotId)) {
-        const message = store.appendMessage(targetThreadId, {
-          role: "user",
-          kind: "text",
-          text: head.text,
-          replyToId: head.replyToId,
-          sendId: head.sendId,
-          channelMode: head.mode,
-          queueId: head.id,
-          via: head.via,
-          steered: true,
-        });
-        settleHeldChannelQueueHead(held);
-        return json(res, 200, {
-          ok: true,
-          steered: true,
-          threadId: targetThreadId,
-          messages: [message],
-          queueIds: [head.id],
-        });
-      }
-      if (steered === "indeterminate" && !after) {
-        // The room vanished while the answer was lost: settle the head so a
-        // restart cannot replay words the dead turn may already have run.
-        settleHeldChannelQueueHead(held);
-        return json(res, 404, { error: "no such room" });
-      }
-      restoreHeldChannelQueue(held);
-      // The room may have settled while the steer was refused; a queue that
-      // is now drainable must not strand behind a missed settle.
-      if (after && !groupIsWorking(after)) drainQueuedChannelSends();
-      return json(res, 200, { ok: true, queued: true, threadId: targetThreadId });
-    }
-    m = path.match(/^\/api\/groups\/([\w-]+)\/interrupt$/);
-    if (m && method === "POST") {
-      const group = store.group(m[1]);
-      if (!group) return json(res, 404, { error: "no such room" });
-      const rawBody = await readBody(req);
-      if (rawBody !== null && (typeof rawBody !== "object" || Array.isArray(rawBody))) {
-        return json(res, 400, { error: "body must be a JSON object" });
-      }
-      const body = rawBody ?? {};
-      if (body.threadId !== undefined && (typeof body.threadId !== "string" || !/^[\w-]+$/.test(body.threadId))) {
-        return json(res, 400, { error: "threadId must be a task id" });
-      }
-      if (body.threadId !== undefined) {
-        const ownsThread = group.dm
-          ? body.threadId === group.threadId
-          : Boolean(store.groupTaskByThread(group.id, body.threadId));
-        if (!ownsThread) {
-          return json(res, 409, { error: "the channel switched tasks before it could be interrupted" });
-        }
-      }
-      const activeOperations = [...(groupTurnOperations.get(group.id) ?? [])]
-        .filter((operation) => !operation.cancelled);
-      if (
-        body.threadId !== undefined &&
-        activeOperations.length > 0 &&
-        !activeOperations.some((operation) => operation.threadId === body.threadId)
-      ) {
-        return json(res, 409, { error: "this channel is working in another task" });
-      }
-      // Without an explicit task, Stop means the room's live operation—not
-      // merely whichever task the UI was showing when a detached routine
-      // began. There is normally one operation; cancel every active thread
-      // defensively so no queued handoff survives a room-level stop.
-      const targetThreadIds = body.threadId !== undefined
-        ? [body.threadId]
-        : activeOperations.length > 0
-          ? [...new Set(activeOperations.map((operation) => operation.threadId))]
-          : [group.threadId];
-      const interruptTargets = targetThreadIds.map((threadId) => {
-        const speaker = groupSpeakers.get(threadId);
-        const busy = speaker
-          ? store.bot(speaker.botId)
-          : threadId === group.threadId && group.busyBotId
-            ? store.bot(group.busyBotId)
-            : undefined;
-        return {
-          threadId,
-          instance: busy ? runningTurnInstance(busy, threadId) : undefined,
-        };
-      });
-      // Abort every queued operation before the first provider round trip;
-      // otherwise one queued task could begin while Stop awaits interruption
-      // of the task ahead of it.
-      for (const { threadId } of interruptTargets) cancelGroupTurnOperations(group.id, threadId);
-      for (const { threadId, instance } of interruptTargets) {
-        revokeInternalCapabilitiesForThread(threadId);
-        await instance?.adapter.interruptTurn(threadId).catch(() => {});
-        closeOpenApprovals(threadId);
-      }
-      return json(res, 200, { ok: true });
-    }
-
-    // emoji reactions — works on any thread (1:1 or room)
-    m = path.match(/^\/api\/threads\/([\w-]+)\/messages\/([\w-]+)\/reactions$/);
-    if (m && method === "POST") {
-      const body = await readBody(req);
-      const emoji = String(body.emoji ?? "").slice(0, 8);
-      if (!emoji) return json(res, 400, { error: "emoji required" });
-      const patched = store.toggleReaction(m[1], m[2], emoji, typeof body.by === "string" ? body.by : "user");
-      if (!patched) return json(res, 404, { error: "no such message" });
-      return json(res, 200, { message: patched });
-    }
-    if (path === "/api/sidebar-sections" && method === "GET") {
-      return json(res, 200, { sections: store.sections });
-    }
-    if (path === "/api/sidebar-sections" && (method === "PATCH" || method === "DELETE")) {
-      const section = url.searchParams.get("section")?.trim();
-      if (!section) return json(res, 400, { error: "Choose a named team" });
-      if (teamComputers.forSection(section)) return json(res, 409, { error: "Unassign this team's computer before renaming or deleting the team" });
-      let nextName: string | null = null;
-      if (method === "PATCH") {
-        const parsed = z.object({ name: z.string().trim().min(1).max(60) }).strict().safeParse(await readBody(req));
-        if (!parsed.success) return json(res, 400, { error: "Team name must be 1 to 60 characters" });
-        nextName = parsed.data.name;
-      }
-      const error = store.changeEmptySection(section, nextName);
-      if (error) return json(res, error === "No such team" ? 404 : 409, { error });
-      return json(res, 200, { sections: store.sections });
-    }
-    if (method === "POST" && path === "/api/sidebar-sections") {
-      const parsed = createSidebarSectionSchema.safeParse(await readBody(req));
-      if (!parsed.success) {
-        return json(res, 400, { error: "Provide a team name and up to 100 valid botIds" });
-      }
-      const name = parsed.data.name.trim();
-      if (name.length > 60) {
-        return json(res, 400, { error: "name must be at most 60 characters" });
-      }
-      const botIds = [...new Set(parsed.data.botIds)];
-      if (!name && !botIds.length) return json(res, 400, { error: "Team name is required" });
-      for (const botId of botIds) {
-        const bot = store.bot(botId);
-        if (bot) assertTeamComputerChangeIdle(bot, { ...bot, section: name || undefined });
-      }
-      const result = store.setBotsSection(botIds, name);
-      if (!result.ok) {
-        if (result.reason === "chief-conflict") {
-          return json(res, 409, {
-            error: "A team can have only one Chief of Staff. Choose one Chief or use a team without one.",
-          });
-        }
-        return json(res, 404, { error: "one or more bots are unavailable" });
-      }
-      return json(res, 200, { section: name, sections: store.sections, bots: result.bots.map(wireBot) });
-    }
+    if (await handleTeams(req, res, rctx)) return;
+    if (await handleBots(req, res, rctx)) return;
     if (method === "POST" && path === "/api/bots") {
       const body = await readBody(req);
       if (!body || typeof body !== "object" || Array.isArray(body)) {
