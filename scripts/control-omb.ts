@@ -134,7 +134,7 @@ function configuredUrl(raw: unknown, env: NodeJS.ProcessEnv, requiredForMutation
     }
     return undefined;
   }
-  return validateBaseUrl(explicit);
+  return validateBaseUrl(explicit, env);
 }
 
 function target(values: Record<string, unknown>): { type: "bot" | "channel"; id: string } {

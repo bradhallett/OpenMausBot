@@ -6,6 +6,7 @@
 export interface ServerEndpointEnv {
   OPENMAUSBOT_URL?: string | undefined;
   OMB_PORT?: string | undefined;
+  ALLOW_INSECURE_HTTP?: string | undefined;
 }
 
 /** Resolve OPENMAUSBOT_URL / OMB_PORT into an explicit base URL. Returns
@@ -16,7 +17,7 @@ export function configuredServerUrl(env: ServerEndpointEnv): string | undefined 
   return explicit || (env.OMB_PORT ? `http://127.0.0.1:${env.OMB_PORT}` : undefined);
 }
 
-export function validateBaseUrl(url: string): string {
+export function validateBaseUrl(url: string, env: ServerEndpointEnv = process.env): string {
   const trimmed = url.replace(/\/+$/, "");
   let parsed: URL;
   try {
@@ -35,7 +36,7 @@ export function validateBaseUrl(url: string): string {
   }
   const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   const isLoopback = hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
-  if (parsed.protocol === "http:" && !isLoopback && process.env.ALLOW_INSECURE_HTTP !== "true") {
+  if (parsed.protocol === "http:" && !isLoopback && env.ALLOW_INSECURE_HTTP !== "true") {
     throw new Error(
       `Insecure cleartext HTTP origin '${parsed.origin}' is rejected. Use https:// or set ALLOW_INSECURE_HTTP=true.`,
     );
