@@ -1,5 +1,10 @@
 import type { Readable } from "node:stream";
 
+// Method-level payload views (what core.ts reads off each method's params or
+// result) live next door in wire-types.ts and are re-exported here so the
+// protocol module stays the one import surface for the wire.
+export * from "./wire-types.ts";
+
 /** A JSON-RPC 2.0 message as ACP agents actually send them. */
 export interface AcpWireMessage {
   jsonrpc?: "2.0";
@@ -10,6 +15,31 @@ export interface AcpWireMessage {
   params?: unknown;
   result?: unknown;
   error?: { code?: number; message?: string; data?: unknown };
+}
+
+/** A client→agent request frame: id + method + params, result pending. */
+export interface AcpClientRequest extends AcpWireMessage {
+  jsonrpc: "2.0";
+  id: number;
+  method: string;
+}
+
+/** An agent→client response: the frame that settles a pending client
+ *  request with a result or an error. */
+export interface AcpServerResponse extends AcpWireMessage {
+  id: number;
+}
+
+/** An agent→client request (id + method, no result yet). */
+export interface AcpServerRequest extends AcpWireMessage {
+  // mirrors the wire id: agents may key requests by string or null
+  id: number | string | null;
+  method: string;
+}
+
+/** An agent→client notification (method, no id). */
+export interface AcpNotification extends AcpWireMessage {
+  method: string;
 }
 
 /** Complete lines in a stream buffer, plus the unterminated tail to keep. */
@@ -36,9 +66,9 @@ export interface AcpConnectionOptions {
   /** Observe every parsed incoming message before dispatch (native log). */
   onMessage?(message: AcpWireMessage): void;
   /** A server→client request (id + method, no result yet). */
-  onServerRequest?(message: AcpWireMessage): void;
+  onServerRequest?(message: AcpServerRequest): void;
   /** A server→client notification (method, no id). */
-  onNotification?(message: AcpWireMessage): void;
+  onNotification?(message: AcpNotification): void;
   /** Called once when close() marks the connection closed — the kill policy
    *  stays with the driver that owns the process. */
   onClose?(): void;
@@ -63,7 +93,7 @@ export interface AcpConnectionOptions {
 
 /** One client→agent request awaiting its response. */
 interface PendingRpc {
-  resolve(value: any): void;
+  resolve(value: unknown): void;
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout> | null;
 }
@@ -71,6 +101,15 @@ interface PendingRpc {
 /** Provider error text is unbounded on the wire; cap what lands in an Error
  *  message so one giant provider string cannot balloon logs and memory. */
 const PROVIDER_ERROR_MESSAGE_LIMIT = 512;
+/** Dispatch classifiers for one parsed frame — the same truthiness rules
+ *  the read loop has always used, expressed as narrowing so each callback
+ *  receives its role's shape with no runtime change. */
+const isServerResponse = (message: AcpWireMessage): message is AcpServerResponse =>
+  message.id !== undefined && (message.result !== undefined || message.error !== undefined);
+const isServerRequest = (message: AcpWireMessage): message is AcpServerRequest =>
+  message.id !== undefined && Boolean(message.method);
+const isNotification = (message: AcpWireMessage): message is AcpNotification =>
+  Boolean(message.method);
 
 /** One JSON-RPC-2.0-over-stdio connection to an ACP agent. The connection
  *  owns framing, request/response correlation, timeouts, and dispatch of
@@ -134,10 +173,10 @@ export class AcpConnection {
    *  the request waits until the connection ends. `onResult` fires from the
    *  read loop before the awaiting continuation resumes, so an update that
    *  follows the response is still consumed in wire order. */
-  request(method: string, params: unknown, timeoutMs?: number, onResult?: (result: any) => void): Promise<any> {
+  request<T = unknown>(method: string, params: unknown, timeoutMs?: number, onResult?: (result: T) => void): Promise<T> {
     if (this.closed) return Promise.reject(new Error(this.options.closedErrorMessage ?? "The ACP connection is closed."));
     const id = this.nextId++;
-    return new Promise((resolve, reject) => {
+    return new Promise<T>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout> | null = null;
       if (timeoutMs) {
         timer = setTimeout(() => {
@@ -148,21 +187,25 @@ export class AcpConnection {
       }
       this.pending.set(id, {
         resolve: (result) => {
+          // the pending map is untyped across methods; the caller owns the
+          // shape of the result it asked for
+          const typed = result as T;
           try {
-            onResult?.(result);
+            onResult?.(typed);
           } catch (error) {
             // a throwing callback used to strand the promise and escape the
             // stdout listener; settle the request with the callback's error
             reject(error instanceof Error ? error : new Error(String(error)));
             return;
           }
-          resolve(result);
+          resolve(typed);
         },
         reject,
         timer,
       });
+      const frame: AcpClientRequest = { jsonrpc: "2.0", id, method, params };
       try {
-        this.send({ jsonrpc: "2.0", id, method, params });
+        this.send(frame);
       } catch (error) {
         this.pending.delete(id);
         if (timer) clearTimeout(timer);
@@ -247,8 +290,7 @@ export class AcpConnection {
         console.error("ACP onMessage observer failed", error);
       }
       if (this.closed) return;
-      const hasId = "id" in record;
-      if (hasId && ("result" in record || "error" in record)) {
+      if (isServerResponse(message)) {
         // pending ids are the numbers this connection issued; a response
         // keyed by anything else — null included — matches no pending entry
         if (typeof message.id !== "number") continue;
@@ -276,17 +318,16 @@ export class AcpConnection {
         } else {
           pending.resolve(message.result);
         }
-      } else if (hasId && typeof message.method === "string") {
-        // an id member makes it a request even when the id is null; JSON-RPC
-        // 2.0 ids are string | number | null — anything else cannot be
-        // correlated with a reply, so answer Invalid Request and skip it
+      } else if (isServerRequest(message)) {
+        // JSON-RPC 2.0 ids are string | number | null; anything else cannot
+        // be correlated with a reply, so answer Invalid Request and skip it
         const id: unknown = message.id;
         if (id !== null && typeof id !== "string" && typeof id !== "number") {
           this.send({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } });
           continue;
         }
         this.options.onServerRequest?.(message);
-      } else if (typeof message.method === "string") {
+      } else if (isNotification(message)) {
         this.options.onNotification?.(message);
       }
       // every dispatch callback above — onResult inside resolve included —
