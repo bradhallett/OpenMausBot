@@ -304,6 +304,7 @@
   "sidebar.section.newContextAria": "New team name",
   "sidebar.section.removeFromContext": "Move to General",
   "sidebar.room.renameAria": "Rename {name}",
+  "sidebar.room.actions": "Actions for {name}",
   "sidebar.room.saveChatName": "Save thread name",
   "sidebar.room.saveChannelName": "Save group chat name",
   "sidebar.room.cancelChatRename": "Cancel thread rename",

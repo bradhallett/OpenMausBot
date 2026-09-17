@@ -25,18 +25,19 @@ export function readBody(req: IncomingMessage, limit = 1_000_000): Promise<any> 
     };
     req.on("data", (c) => {
       if (done) return;
-      bytes += typeof c === "string" ? Buffer.byteLength(c) : c.length;
+      const chunk = Buffer.isBuffer(c) ? c : Buffer.from(String(c));
+      bytes += chunk.length;
       if (bytes > limit) {
         // Keep draining the socket, but stop retaining attacker-controlled
         // bytes. Destroying the request here prevents the caller from
         // receiving the useful 413 response.
         return fail(413, "body too large");
       }
-      chunks.push(typeof c === "string" ? Buffer.from(c) : c);
+      chunks.push(chunk);
     });
     req.on("end", () => {
       if (done) return;
-      const data = Buffer.concat(chunks).toString("utf8");
+      const data = Buffer.concat(chunks, bytes).toString("utf8");
       let body: any;
       try {
         body = data ? JSON.parse(data) : {};

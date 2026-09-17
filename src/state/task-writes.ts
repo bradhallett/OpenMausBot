@@ -63,8 +63,9 @@ export function createTaskWriteQueue(options: TaskWriteQueueOptions): TaskWriteQ
     const previous = taskWrites.get(threadId);
     // A quick tab switch may queue two default changes on different threads.
     // Keep their order, and don't let a group send race either pending save.
+    const sameBotWrites = [...taskWrites.values()].filter((write) => write.botId === botId);
     const defaults = patch.updateBotDefault || patch.approvalMode !== undefined
-      ? [...taskWrites.values()].filter((write) => write.botId === botId) : [];
+      ? sameBotWrites : sameBotWrites.filter((write) => write.updatesDefault);
     const promise = Promise.all([previous?.promise, ...defaults.map((write) => write.promise)].map((save) => save?.catch(() => {})))
       .then(() => options.send(botId, threadId, patch));
     // Later edits still get saved after an earlier failure, but a send

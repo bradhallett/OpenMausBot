@@ -25,7 +25,7 @@ export const handlers = {
     const taskId = idArg(args, "task_id");
     const route = taskRoute(args.target_type, targetId);
     const result = await ctx.fetch(`${route}/${encodeURIComponent(taskId)}?messages=0`, { method: "POST", body: "{}" });
-    const target = args.target_type === "bot" ? result.bot : result.group;
+    const target = args.target_type === "bot" ? result?.bot : result?.group;
     return {
       success: true,
       targetType: args.target_type,

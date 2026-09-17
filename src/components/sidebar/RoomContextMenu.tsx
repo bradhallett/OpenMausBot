@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ClipboardCopy, FolderPlus, Pencil, Trash2, X } from "lucide-react";
 import { useStore } from "@/state/store";
 import { t } from "@/lib/i18n";
 import { nextRename } from "@/lib/rename";
+import { navigateThreadMenu } from "../BotProjects";
 
 export function RoomContextMenu({
   menu,
@@ -19,6 +20,29 @@ export function RoomContextMenu({
   const group = state.groups.find((g) => g.id === menu.groupId);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(group?.name ?? "");
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Menu length changes with permissions, rename mode, and locale; measure
+  // after every render and clamp both axes so no control hides off-screen.
+  useLayoutEffect(() => {
+    const element = menuRef.current;
+    if (!element) return;
+    const place = () => {
+      const { width, height } = element.getBoundingClientRect();
+      element.style.top = `${Math.max(8, Math.min(menu.y, window.innerHeight - height - 8))}px`;
+      element.style.left = `${Math.max(8, Math.min(menu.x, window.innerWidth - width - 8))}px`;
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  });
+
+  // A menu opened with the keyboard must receive focus, and give it back.
+  useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    menuRef.current?.querySelector<HTMLButtonElement>("button:not([disabled])")?.focus();
+    return () => { if (opener?.isConnected) opener.focus(); };
+  }, []);
 
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
@@ -42,14 +66,16 @@ export function RoomContextMenu({
     if (name) dispatch({ type: "patchGroup", groupId: group.id, patch: { name } });
     onClose();
   };
-  const top = Math.min(menu.y, window.innerHeight - 204);
-  const left = Math.min(menu.x, window.innerWidth - 240);
   return createPortal(
     <div
+      ref={menuRef}
       data-room-menu
       data-sidebar
-      style={{ top, left }}
-      className="fixed z-40 w-[228px] overflow-hidden rounded-xl border border-hairline/50 bg-menu py-1.5 shadow-2xl shadow-black/60"
+      role="menu"
+      aria-label={t("sidebar.room.actions", { name: group.name })}
+      onKeyDown={navigateThreadMenu}
+      style={{ top: menu.y, left: menu.x }}
+      className="fixed z-40 max-h-[calc(100dvh-16px)] w-[228px] max-w-[calc(100vw-16px)] overflow-y-auto overscroll-contain rounded-xl border border-hairline/50 bg-menu py-1.5 shadow-2xl shadow-black/60"
     >
       {!remoteClient && (renaming ? (
         <div className="flex items-center gap-1 px-2 py-1">
@@ -74,6 +100,7 @@ export function RoomContextMenu({
           />
           <button
             type="button"
+            role="menuitem"
             onClick={saveRename}
             aria-label={isBotChat ? t("sidebar.room.saveChatName") : t("sidebar.room.saveChannelName")}
             title={t("common.save")}
@@ -83,6 +110,7 @@ export function RoomContextMenu({
           </button>
           <button
             type="button"
+            role="menuitem"
             onClick={onClose}
             aria-label={isBotChat ? t("sidebar.room.cancelChatRename") : t("sidebar.room.cancelChannelRename")}
             title={t("common.cancel")}
@@ -93,6 +121,8 @@ export function RoomContextMenu({
         </div>
       ) : (
         <button
+          type="button"
+          role="menuitem"
           onClick={() => {
             setDraft(group.name);
             setRenaming(true);
@@ -105,6 +135,8 @@ export function RoomContextMenu({
       ))}
       {!remoteClient && !isBotChat && (
         <button
+          type="button"
+          role="menuitem"
           onClick={() => {
             onClose();
             onMoveToSection(group.id);
@@ -116,6 +148,8 @@ export function RoomContextMenu({
         </button>
       )}
       <button
+        type="button"
+        role="menuitem"
         onClick={() => {
           void navigator.clipboard?.writeText(group.threadId);
           onClose();
@@ -126,6 +160,8 @@ export function RoomContextMenu({
         {t("sidebar.copyConversationId")}
       </button>
       {!remoteClient && <button
+        type="button"
+        role="menuitem"
         onClick={() => {
           dispatch({ type: "deleteGroup", groupId: group.id });
           onClose();
@@ -139,4 +175,3 @@ export function RoomContextMenu({
     document.body,
   );
 }
-

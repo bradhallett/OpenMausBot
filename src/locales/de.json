@@ -182,6 +182,7 @@
   "sidebar.section.bots": "Bots",
   "sidebar.section.moved": "{name} auf Position {position} von {count} verschoben",
   "sidebar.room.renameAria": "{name} umbenennen",
+  "sidebar.room.actions": "Aktionen für {name}",
   "sidebar.room.saveChatName": "Threadnamen speichern",
   "sidebar.room.cancelChatRename": "Umbenennen des Threads abbrechen",
   "sidebar.room.renameChat": "Thread umbenennen",

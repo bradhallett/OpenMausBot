@@ -271,17 +271,17 @@ export class AcpConnection {
       const intercepted = this.options.onLine?.(line);
       if (this.closed) return;
       if (intercepted) continue;
-      let record: Record<string, unknown>;
+      let parsed: unknown;
       try {
-        const parsed: unknown = JSON.parse(line);
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
-        record = parsed as Record<string, unknown>;
-        // the envelope gates dispatch: a frame that is not JSON-RPC 2.0
-        // must not resolve a pending request or reach a request handler
-        if (record.jsonrpc !== "2.0") continue;
+        parsed = JSON.parse(line);
       } catch {
         continue;
       }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) continue;
+      const record = parsed as Record<string, unknown>;
+      // the envelope gates dispatch: a frame that is not JSON-RPC 2.0 must
+      // not resolve a pending request or reach a request handler
+      if (record.jsonrpc !== "2.0") continue;
       const message = record as AcpWireMessage;
       try {
         this.options.onMessage?.(message);

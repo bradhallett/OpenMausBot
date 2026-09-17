@@ -205,6 +205,7 @@
   "sidebar.section.newContextAria": "Назва нової команди",
   "sidebar.section.removeFromContext": "Перемістити в General",
   "sidebar.room.renameAria": "Перейменувати {name}",
+  "sidebar.room.actions": "Дії для {name}",
   "sidebar.room.saveChatName": "Зберегти назву гілки",
   "sidebar.room.saveChannelName": "Зберегти назву групового чату",
   "sidebar.room.cancelChatRename": "Скасувати перейменування гілки",

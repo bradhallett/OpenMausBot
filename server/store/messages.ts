@@ -29,9 +29,12 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
   if (message.role !== "bot") return message;
   const out = { ...message };
   if (typeof out.text === "string") out.text = redactSecretsInText(out.text);
-  if (out.tool?.name) {
-    out.tool = { ...out.tool, name: redactSecretsInText(out.tool.name) };
-    if (out.tool.summary) out.tool.summary = redactSecretsInText(out.tool.summary);
+  if (out.tool) {
+    out.tool = {
+      ...out.tool,
+      ...(out.tool.name ? { name: redactSecretsInText(out.tool.name) } : {}),
+      ...(out.tool.summary ? { summary: redactSecretsInText(out.tool.summary) } : {}),
+    };
   }
   if (out.routineRun) {
     const routineRun = { ...out.routineRun };
