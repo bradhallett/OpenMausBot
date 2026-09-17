@@ -20,13 +20,7 @@ import type { UsageTrigger } from "./usage-ledger.ts";
 import type { RequestAuth } from "./request-auth.ts";
 
 
-import { createBotLifecycle } from "./bot-lifecycle.ts";
-import { createCalendarRooms } from "./calendar-rooms.ts";
 import { runBootSequence } from "./boot-sequence.ts";
-import { createRoutineLifecycle } from "./routine-lifecycle.ts";
-import { createSkillLifecycle } from "./skill-lifecycle.ts";
-import { createTeamSetupLifecycle } from "./team-setup-lifecycle.ts";
-import { createRunDelegatedTurn, createTurnDispatch } from "./turn-dispatch.ts";
 import { RoutineManager } from "./routines.ts";
 import { CalendarCallManager } from "./calendar-calls.ts";
 import {
@@ -41,8 +35,6 @@ import type { WebhookIngress } from "./webhook-ingress.ts";
 import { WebhookManager } from "./webhooks.ts";
 import { loadBundledSkills, loadUserSkills, mergeSkills } from "./skill-library.ts";
 import { groupIsWorking } from "./group-coordination.ts";
-import { createConfigViews } from "./config-views.ts";
-import { createTurnSecrets } from "./turn-secrets.ts";
 import {
   hostedWorkspaceConfiguration,
   hostedWorkspaceConfigured,
@@ -52,6 +44,7 @@ import { isWorkspaceBackupSessionControl } from "./workspace-backup-http.ts";
 import { createRouteHandlers } from "./route-wiring.ts";
 import { createEngineWiring } from "./engine-wiring.ts";
 import { titleFromLlm } from "./store.ts";
+import { createWorkflowWiring } from "./workflow-wiring.ts";
 import { createRequestHandler } from "./request-handler.ts";
 import { createServeStatic, json } from "./http.ts";
 import {
@@ -71,8 +64,6 @@ import {
   botForThread,
   directTurnBots,
   threadBusy,
-  turnComputerResources,
-  turnResources,
   turnResourceOwners,
 } from "./turn-admission.ts";
 import { createProviderFleet } from "./provider-fleet.ts";
@@ -430,32 +421,6 @@ const {
 });
 export { browserEngineSummary };
 
-// When the person last wrote into each thread with a turn in flight — but
-// only for turns THEY started. post_to_room's ceiling counts the bot posts
-// nobody has answered, and "answered" used to mean a person writing in the
-// room alone. A person driving one bot from its own conversation ("tell
-// #planning we shipped", then two more) was refused the third post and
-// told to go and ask the user — who had just asked. The person who wrote
-// into the bot's thread is attending that post as surely as one writing
-// in the room, so the ceiling reads this too. A scheduled or webhook turn,
-// a peer hop, or a resumed card records nothing here: the user message
-// such a turn finds in its thread may be hours old and its author gone.
-const personAskAt = new Map<string, number>();
-let routines: RoutineManager | null = null;
-let calendarCalls: CalendarCallManager | null = null;
-let localVmImageBusy = false;
-let localVmProvisionBusy = false;
-let localVmModeChangeBusy = false;
-/** How long the computer-control gate lets a lazy claim land before it
- * answers held. A free, ready VM claims in the time of one container
- * inspect; only a claim queued behind another holder outlives this. */
-const LAZY_VM_CLAIM_GRACE_MS = 5_000;
-
-const runDelegatedTurn = createRunDelegatedTurn({
-  helpers: { store, isUnattended, delegationWatch, activeRoutineRunForThread, finalizeDelegationWatch },
-  lateBound: { startTurn: (botId, text, opts) => startTurn(botId, text, opts) },
-});
-
 async function generateThreadTitle(
   provider: { generateText?: (prompt: string, options?: { signal?: AbortSignal }) => Promise<string> },
   text: string,
@@ -488,213 +453,26 @@ async function generateThreadTitle(
   }
 }
 
-// ── turn dispatch (delegations, queued sends, direct turns) ───────────────────────────────────
-// drainThreadDelegations, the delegation sweep and retry hooks, the queued
-// send drain, the startOrQueue* entry points, and the createStartTurn
-// wiring live in ./turn-dispatch.ts; index.ts wires the factory at the
-// region's original site and rebinds its names below. commsBus,
-// approvalBus, and followupsReady cross as thunks because index.ts binds
-// them after this factory runs.
-const {
-  startTurn, drainThreadDelegations, expireDelegationsNow, DELEGATION_SWEEP_MS,
-  retryDelegationsWaitingOn, drainQueuedSends, startOrQueueDirectMessage,
-  startOrQueueOpenedThread, MAX_THREADS_OPENED_PER_TURN,
-} = createTurnDispatch({
-  startTurn: {
-    events: { broadcast, notify, watchdog },
-    admission: {
-      activeGroupTurnForBot,
-      providerTransitionForTurn,
-      turnSurfacePlan,
-      turnProvider,
-      turnInstance,
-      providerFleet: () => providerFleet,
-      providerInstancesChanging: () => providerInstancesChanging,
-      checkpointRestoreLeases,
-      boxLifecycleBusyBots,
-      maxCommsDepth: MAX_COMMS_DEPTH,
-      isExternalContextMarker,
-    },
-    dispatch: {
-      directTurnGenerationByThread,
-      directFollowupTurns,
-      directFollowupSettlers,
-      directCoordinationSettlers,
-      settleDirectCoordination,
-      settleDirectFollowup,
-      directTurnClaimExists,
-      directTurnClaimIsCurrent,
-      markDirectTurnDispatching,
-      clearDirectTurnDispatch,
-      pendingCancelledProviderHandshakes,
-      clearCancelledProviderHandshake,
-      retireProviderTurn,
-      runningTurnEngines,
-      DirectTurnSetupCancelled,
-    },
-    fold: {
-      turnUsage,
-      turnContext,
-      personAskAt,
-      drains: {
-        drainConnectorResumes,
-        drainSecretResumes,
-        drainTeamSetupResumes,
-        drainDelegationWakes,
-      },
-    },
-    cleanup: {
-      releaseTurnResources,
-      settlingResourceOwners,
-      autoVmClaims,
-      releaseLocalVmThread,
-      startScreenPoller,
-      stopScreenPoller,
-      screenPollers,
-      turnResources,
-      turnComputerResources,
-    },
-    turnMarks: {
-      markUnattended,
-      clearUnattended,
-      markInternalTurn,
-      clearInternalTurn,
-      delegationWakeBudget,
-    },
-    routines: {
-      routines: () => routines,
-      activeRoutineRunForThread,
-    },
-    localVm: {
-      localVmTargetForBot,
-      localVmLeaseFor,
-      localVmIdleFor,
-      localVmThreadTargets,
-      localVmActiveThreads,
-      localVmLifecycleBusy,
-      localVmSeen,
-      localVmOwnerBusy,
-      localVmImageBusy: () => localVmImageBusy,
-      localVmModeChangeBusy: () => localVmModeChangeBusy,
-      readyLocalVmForTurn,
-    },
-    computers: {
-      bindTurnComputer,
-      attachTeamBox,
-      controlIntegration,
-      browserRuntime,
-      browserIntegration,
-      phoneIntegration,
-      connectedAppsIntegration,
-      agentsIntegration,
-      vpsThreadStarted,
-      vpsThreadEnded,
-    },
-    prompts: {
-      approvalModeForTurn,
-      roomHandoffProblem,
-      coordinationSystemInstructions,
-      outstandingAssignmentsPrompt,
-      teamComputerPrompt,
-      inheritedTeamComputer,
-      teammateReportContext,
-      availableSkills,
-    },
-    handoffs: {
-      roomHandoffs,
-      turnHandoffs: handoffs,
-    },
-    titles: {
-      generateThreadTitle,
-    },
-    incidents: {
-      reportIncident,
-    },
-  },
-  helpers: {
-    runDelegatedTurn,
-    wakeUndispatchedDelegation,
-    parksBehindCoordination,
-  },
-  lateBound: {
-    commsBus: () => commsBus,
-    approvalBus: () => approvalBus,
-    followupsReady: () => followupsReady.get(),
-  },
-});
-
-
-// ── routines: persisted definitions → detached bot tasks ───────────────
-// The scheduler's host wiring, its crash-recovery reconciliation, and the
-// routine request lifecycle (source resolvers, emergency downgrade stop,
-// request service, card projection/resolution) live in
-// ./routine-lifecycle.ts; index.ts wires it here at the cluster's original
-// site. The factories wired earlier above (group-turn-operations,
-// events-pipeline, desktop-approval) take wrapper thunks over the source
-// resolvers and the downgrade stop this factory returns.
-const {
-  routineSourceOwner, routineSourceThread, stopBotForEmergencyApprovalDowngrade,
-  routineWiring, commsBus, routineRequests, routineTimeZone, agentRoutine,
-  resolveAndSendRoutine,
-} = createRoutineLifecycle({
-  wiring: {
-    events: { broadcast, notify },
-    helpers: {
-      unattendedDispatchState, roomSetupPending: (group) => roomSetupPending(group), groupIsWorking, startGroupTurn,
-      cancelGroupTurnOperations, cancelDirectTurnDispatch, runningTurnInstance,
-      reportIncident,
-      handoffs,
-    },
-    state: { groupSpeakers, delegationWatch, pendingDelegationWakes, publicBot, startTurn },
-  },
-  helpers: {
-    interruptAllDirectThreads, activeGroupTurnForBot, fullAccessForSource,
-    proposalPersistence: (botId, threadId) => proposalPersistence(botId, threadId),
-    deliverCalendarCall: (call, scheduledFor) => deliverCalendarCall(call, scheduledFor),
-  },
-  host: {
-    routines: () => routines,
-    setRoutines: (next) => { routines = next; },
-    setCalendarCalls: (next) => { calendarCalls = next; },
-  },
-});
-const { deleteBotWithLifecycle } = createBotLifecycle({
-  computer: {
-    computerProviderConfigTransitions, boxLifecycleBusyBots, claimBotComputerLifecycle, managedBoxOwners,
-    localVmOwnerBusy, localVmLeases, localVmLeaseFor, localVmActiveThreads, localVmLifecycleBusy,
-    localVmSeen, localVmIdles, activeVpsThreads, computerControl, computerControlRevision,
-  },
-  helpers: {
-    activeGroupTurnForBot, interruptAllDirectThreads, purgeGeneratedImagesForThread,
-    settleDirectFollowup, directTurnGenerationByThread, stopScreenPoller, lastReply,
-    browserCleanup, browserLive, forgetTemporaryBrowser, commsBus,
-    pendingTeamSetupResumes, cancelTeamSetupResumesForThread,
-  },
-  lateBound: {
-    routines: () => routines,
-    calendarCalls: () => calendarCalls,
-    localVmModeChangeBusy: () => localVmModeChangeBusy,
-    webhooks: () => webhooks,
-    claimPhoneSecretBotDeletion: (botId) => claimPhoneSecretBotDeletion(botId),
-  },
-});
-
-// ── team setup / profile request cards ──────────────────────────────────
-// The ProfileRequestService and TeamSetupRequestService wiring with their
-// card resolution/send helpers (including resolveAndSendProfile, which
-// physically sat just before the WebhookManager wiring) live in
-// ./team-setup-lifecycle.ts; index.ts wires it at profileRequests'
-// original site. deleteBotWithLifecycle lives in ./bot-lifecycle.ts, wired
-// above this cluster, and crosses by value.
-const { profileRequests, teamSetupTeams, teamSetupRequests, resolveAndSendTeamSetup, resolveAndSendProfile } = createTeamSetupLifecycle({
-  helpers: {
-    fullAccessForSource, proposalPersistence: (botId, threadId) => proposalPersistence(botId, threadId), assertTeamComputerChangeIdle, connectorThread,
-    activeGroupTurnForBot, checkedModelSelection, wireBot, teamSetupResumeGenerations,
-    dispatchTeamSetupResume, broadcast, deleteBotWithLifecycle,
-  },
-  lateBound: { routines: () => routines },
-  limits: { maxWorkspaceBots: MAX_WORKSPACE_BOTS },
-});
+// When the person last wrote into each thread with a turn in flight — but
+// only for turns THEY started. post_to_room's ceiling counts the bot posts
+// nobody has answered, and "answered" used to mean a person writing in the
+// room alone. A person driving one bot from its own conversation ("tell
+// #planning we shipped", then two more) was refused the third post and
+// told to go and ask the user — who had just asked. The person who wrote
+// into the bot's thread is attending that post as surely as one writing
+// in the room, so the ceiling reads this too. A scheduled or webhook turn,
+// a peer hop, or a resumed card records nothing here: the user message
+// such a turn finds in its thread may be hours old and its author gone.
+const personAskAt = new Map<string, number>();
+let routines: RoutineManager | null = null;
+let calendarCalls: CalendarCallManager | null = null;
+let localVmImageBusy = false;
+let localVmProvisionBusy = false;
+let localVmModeChangeBusy = false;
+/** How long the computer-control gate lets a lazy claim land before it
+ * answers held. A free, ready VM claims in the time of one container
+ * inspect; only a claim queued behind another holder outlives this. */
+const LAZY_VM_CLAIM_GRACE_MS = 5_000;
 
 const webhooks = new WebhookManager({
   emit: broadcast,
@@ -714,53 +492,187 @@ const webhookIngressStatus = () => ({
   ...(webhookIngressError ? { error: webhookIngressError } : {}),
 });
 
-// ── config hot-reload ─────────────────────────────────────────────────
-// The calendar-rooms cluster -- the room-handoff tick, the approval bus,
-// calendar-call room provisioning and delivery, room setup/reply/post
-// policy -- lives in ./calendar-rooms.ts; index.ts wires the factory at the
-// region's original site so the interval starts at the same point in module
-// evaluation order. roomSetupPending, resolveReplyTarget and
-// deliverCalendarCall are consumed by factories wired earlier in this file,
-// which pass wrapper thunks over the names returned here.
 const {
-  ROOM_POST_MAX_CHARS, approvalBus, ensureCalendarCallRoom, deliverCalendarCall,
-  roomSetupPending, resolveReplyTarget, lastHumanRoomMessageAt, roomPostEligibility,
-} = createCalendarRooms({
-  helpers: { roomHandoffs, broadcast, notify, fullAccessForSource, startGroupTurn },
-  lateBound: { calendarCalls: () => calendarCalls },
+  DELEGATION_SWEEP_MS,
+  MAX_THREADS_OPENED_PER_TURN,
+  ROOM_POST_MAX_CHARS,
+  agentRoutine,
+  appendSkillRequestCard,
+  approvalBus,
+  commsBus,
+  configForAccess,
+  configStatus,
+  credentialDesktopHandoff,
+  currentSecretState,
+  deleteBotWithLifecycle,
+  describeInstances,
+  drainQueuedSends,
+  drainThreadDelegations,
+  ensureCalendarCallRoom,
+  expireDelegationsNow,
+  lastHumanRoomMessageAt,
+  mcpServerBody,
+  mcpServerResponse,
+  persistMcpServers,
+  phoneSecretSubmissionKey,
+  phoneSecretSubmissions,
+  profileRequests,
+  proposalPersistence,
+  provideSecretFromPhone,
+  rejectDeletedThreadSkillStages,
+  resolveAndSendProfile,
+  resolveAndSendRoutine,
+  resolveAndSendTeamSetup,
+  resolveReplyTarget,
+  resolveSkillRequest,
+  retryDelegationsWaitingOn,
+  roomPostEligibility,
+  roomSetupPending,
+  routineRequests,
+  routineSourceOwner,
+  routineSourceThread,
+  routineTimeZone,
+  routineWiring,
+  sendSkillResolution,
+  skillProposalPersistence,
+  stagedSkillCleanupsForThread,
+  stagedSkillListing,
+  startOrQueueDirectMessage,
+  startOrQueueOpenedThread,
+  startTurn,
+  stopBotForEmergencyApprovalDowngrade,
+  teamSetupRequests,
+  teamSetupTeams,
+} = createWorkflowWiring({
+  isUnattended,
+  delegationWatch,
+  activeRoutineRunForThread,
+  finalizeDelegationWatch,
+  broadcast,
+  notify,
+  watchdog,
+  activeGroupTurnForBot,
+  providerTransitionForTurn,
+  turnSurfacePlan,
+  turnProvider,
+  turnInstance,
+  checkpointRestoreLeases,
+  boxLifecycleBusyBots,
+  MAX_COMMS_DEPTH,
+  isExternalContextMarker,
+  directTurnGenerationByThread,
+  directFollowupTurns,
+  directFollowupSettlers,
+  directCoordinationSettlers,
+  settleDirectCoordination,
+  settleDirectFollowup,
+  directTurnClaimExists,
+  directTurnClaimIsCurrent,
+  markDirectTurnDispatching,
+  clearDirectTurnDispatch,
+  pendingCancelledProviderHandshakes,
+  clearCancelledProviderHandshake,
+  retireProviderTurn,
+  runningTurnEngines,
+  DirectTurnSetupCancelled,
+  turnUsage,
+  turnContext,
+  personAskAt,
+  drainConnectorResumes,
+  drainSecretResumes,
+  drainTeamSetupResumes,
+  drainDelegationWakes,
+  releaseTurnResources,
+  settlingResourceOwners,
+  autoVmClaims,
+  releaseLocalVmThread,
+  startScreenPoller,
+  stopScreenPoller,
+  screenPollers,
+  vpsThreadStarted,
+  vpsThreadEnded,
+  turnHandoffs: handoffs,
+  reportIncident,
+  generateThreadTitle: () => generateThreadTitle,
+  markUnattended,
+  clearUnattended,
+  markInternalTurn,
+  clearInternalTurn,
+  delegationWakeBudget,
+  localVmTargetForBot,
+  localVmLeaseFor,
+  localVmIdleFor,
+  localVmThreadTargets,
+  localVmActiveThreads,
+  localVmLifecycleBusy,
+  localVmSeen,
+  localVmOwnerBusy,
+  readyLocalVmForTurn,
+  bindTurnComputer,
+  attachTeamBox,
+  controlIntegration,
+  browserRuntime,
+  browserIntegration,
+  phoneIntegration,
+  connectedAppsIntegration,
+  agentsIntegration,
+  activeVpsThreads,
+  approvalModeForTurn,
+  roomHandoffProblem,
+  coordinationSystemInstructions,
+  outstandingAssignmentsPrompt,
+  teamComputerPrompt,
+  inheritedTeamComputer,
+  teammateReportContext,
+  availableSkills,
+  roomHandoffs,
+  wakeUndispatchedDelegation,
+  parksBehindCoordination,
+  followupsReady,
+  unattendedDispatchState,
+  startGroupTurn,
+  cancelGroupTurnOperations,
+  cancelDirectTurnDispatch,
+  runningTurnInstance,
+  groupSpeakers,
+  pendingDelegationWakes,
+  publicBot,
+  interruptAllDirectThreads,
+  fullAccessForSource,
+  computerProviderConfigTransitions,
+  claimBotComputerLifecycle,
+  managedBoxOwners,
+  localVmLeases,
+  localVmIdles,
+  computerControl,
+  computerControlRevision,
+  purgeGeneratedImagesForThread,
+  lastReply,
+  browserCleanup,
+  browserLive,
+  forgetTemporaryBrowser,
+  pendingTeamSetupResumes,
+  cancelTeamSetupResumesForThread,
+  assertTeamComputerChangeIdle,
+  connectorThread,
+  checkedModelSelection,
+  wireBot,
+  teamSetupResumeGenerations,
+  dispatchTeamSetupResume,
+  MAX_WORKSPACE_BOTS,
+  secretMessage,
+  resumeSecretCard,
+  phoneSecrets,
+  managedDesktop,
+  browserEngineSummary,
+  localVmImageBusy: () => localVmImageBusy,
+  localVmModeChangeBusy: () => localVmModeChangeBusy,
+  webhooks: () => webhooks,
+  providerFleet: () => providerFleet,
+  providerInstancesChanging: () => providerInstancesChanging,
+  routines: { get: () => routines, set: (value) => { routines = value; } },
+  calendarCalls: { get: () => calendarCalls, set: (value) => { calendarCalls = value; } },
 });
-
-
-const {
-  proposalPersistence, skillProposalPersistence, stagedSkillListing,
-  stagedSkillCleanupsForThread, rejectDeletedThreadSkillStages, appendSkillRequestCard,
-  resolveSkillRequest, sendSkillResolution,
-} = createSkillLifecycle({
-  helpers: { connectorThread, fullAccessForSource },
-});
-
-// The phone-secret provisioning helpers live in ./turn-secrets.ts: the
-// submission registry, the bot-deletion mutation claim, the desktop handoff
-// prompt, the submission key, the card state read, and provideSecretFromPhone.
-// Wired at their original site, after phoneSecrets and the deferred-resumes
-// card helpers exist; every caller is a route below.
-const {
-  phoneSecretSubmissionKey, currentSecretState, provideSecretFromPhone,
-  phoneSecretSubmissions, claimPhoneSecretBotDeletion, credentialDesktopHandoff,
-} = createTurnSecrets({
-  connectorThread, secretMessage, resumeSecretCard, phoneSecrets,
-});
-
-// The config/instance settings views live in ./config-views.ts:
-// configStatus and its admin/member projection, the MCP server view and
-// persist, and describeInstances; the CLI pre-save probe arrives via the
-// config-views import above. Wired at the helpers' original site, after
-// managedDesktop and browserEngineSummary exist; the events
-// configForAccess thunk above and the routes below read these consts
-// only at request time.
-const {
-  configStatus, configForAccess, mcpServerResponse, mcpServerBody, persistMcpServers, describeInstances,
-} = createConfigViews({ managedDesktop, browserEngineSummary });
 
 /** Set once graceful shutdown begins: quitting disposes Company instances
  * without writing "connection changed" cards or failing routine runs. */
