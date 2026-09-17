@@ -27,7 +27,6 @@ import { updateClaudeCli } from "./claude-update.ts";
 import {
   configuredAccountDirectory,
   assertSeparateClaudeAccount,
-  claudeAccountInfo,
   createClaudeAccountSchema,
   instanceSettingsSchema,
   newClaudeAccount,
@@ -69,7 +68,6 @@ import {
   avatarGenerationRequestSchema,
   avatarGenerationStateMatches,
   generateAvatarImage,
-  avatarImageStatus,
   snapshotAvatarGenerationState,
 } from "./avatar-image.ts";
 import { parseBotProfilePatch } from "./bot-profile.ts";
@@ -91,12 +89,10 @@ import {
   containerComputerScreenshot,
   containerComputerStatus,
   containerRuntimeStatus,
-  localVmRecreatableOnDemand,
   perBotLocalVmTarget,
   SHARED_LOCAL_VM_TARGET,
   setupCommands,
   type LocalVmTarget,
-  type Runtime,
 } from "./container-computer.ts";
 import {
   instanceConfigs,
@@ -105,13 +101,8 @@ import {
   localVmMaxInstances,
   localVmMode,
   parseConfigPatch,
-  roomTurnTimeoutMinutes,
-  maxConcurrentBotThreads,
   threadEventLogRetentionDays,
   saveConfig,
-  showToolCallsEnabled,
-  claudeUserMcpEnabled,
-  skillAuthoringEnabled,
   sharedComputersEnabled,
   builtInBrowserEnabled,
   browserProfileReplacementConflict,
@@ -125,7 +116,7 @@ import {
   NATIVE_DIR,
 } from "./config.ts";
 import { sweepThreadEventLogs, type ThreadLogRetentionCandidate } from "./thread-retention.ts";
-import { augmentedPath, findCliCandidates, resetPathCache } from "./env-path.ts";
+import { findCliCandidates, resetPathCache } from "./env-path.ts";
 import {
   parseUsageRange,
   readUsage,
@@ -142,12 +133,10 @@ import { assertWithinBudget, spendState } from "./spend.ts";
 import { fleetAvailable, fleetRequest, fleetSocketPath } from "./fleet-client.ts";
 import { entitled } from "./enterprise.ts";
 import { HOSTED_CONTRACT_HEADER, HOSTED_CONTRACT_METADATA, HOSTED_CONTRACT_VERSION } from "./hosted-contract.ts";
-import { describeSpawnFailure, execCli } from "./procs.ts";
 import type { Notification } from "./notify.ts";
 import type { ModelSelection, RuntimeEvent, SteerOutcome } from "./contracts.ts";
 import {
   MAX_MCP_SERVERS,
-  listMcpServers,
   mcpServerNameError,
   parseMcpServerMutation,
   parseMcpServersImport,
@@ -310,6 +299,9 @@ import {
   groupProviderHandshakeStarted,
   updateGroupGoalRunProgress,
 } from "./group-turn-operations.ts";
+import { cliProbeEnvironment, createConfigViews, testCliBinary } from "./config-views.ts";
+import { createLocalVmTurnPrep } from "./local-vm-turn-prep.ts";
+import { createTurnSecrets } from "./turn-secrets.ts";
 import { createGracefulShutdown } from "./graceful-shutdown.ts";
 import {
   createWorkspaceAccess,
@@ -322,7 +314,7 @@ import {
 } from "./enterprise.ts";
 import { environmentDescriptor, serverVersion } from "./environment.ts";
 import { createWorkspaceBackupRoutes, isWorkspaceBackupSessionControl } from "./workspace-backup-http.ts";
-import { json, readBody, stderrOf } from "./http.ts";
+import { json, readBody } from "./http.ts";
 import { createEventsRoutes } from "./routes/events.ts";
 import { createRoutinesRoutes } from "./routes/routines.ts";
 import { createInternalRoutes, type AskBotOutcome, type InternalCapability } from "./routes/internal.ts";
@@ -387,11 +379,7 @@ import { describeBrand, loadBrand } from "./brand.ts";
 import {
   PHONE_SECRET_PROTOCOL_VERSION,
   PhoneSecretBridge,
-  PhoneSecretError,
   PhoneSecretSubmissionRegistry,
-  assertPhoneSecretRequestMatches,
-  phoneSecretOperationId,
-  type PhoneSecretContext,
 } from "./phone-secret.ts";
 
 const PORT = Number(process.env.OMB_PORT || process.env.OGB_PORT || 8799);
@@ -1307,6 +1295,24 @@ const {
   state: { groupQueues },
 });
 
+// ── local VM turn prep ───────────────────────────────────────────────────────────────────────
+// The Local VM turn-prep helpers live in ./local-vm-turn-prep.ts: the
+// payload view, the recreate-if-idle-removed readiness walk, and the
+// per-bot instance counts. Wired here because createGroupTurn just below
+// is the earliest module-level by-value consumer of readyLocalVmForTurn;
+// broadcast and the mutable localVmProvisionBusy flag arrive as thunks
+// over consts this file declares after this site.
+const {
+  localVmPayload, readyLocalVmForTurn, existingPerBotLocalVmCount, perBotLocalVmCountForModeChange,
+} = createLocalVmTurnPrep({
+  lateBound: {
+    broadcast: (payload) => broadcast(payload),
+    setLocalVmProvisionBusy: (value) => { localVmProvisionBusy = value; },
+  },
+  lifecycle: {
+    localVmLifecycleBusy, LOCAL_VM_IDLE_MS, LOCAL_VM_DESKTOP_WAIT_MS, localVmIdleFor, noteLocalVmSeen,
+  },
+});
 // ── group turn engine ───────────────────────────────────────────────────────────────
 // The room/goal turn engine lives in ./group-turn.ts. It is wired here
 // because roomHandoffs (just below) is the earliest module-level consumer
@@ -3187,404 +3193,28 @@ function claimPhoneSecretBotDeletion(botId: string): (() => void) | null {
   };
 }
 
-function phoneSecretSubmissionKey(threadId: string, messageId: string, requestKey: string): string {
-  return `${threadId}:${messageId}:${requestKey}`;
-}
-
 function credentialDesktopHandoff(label: string): string {
   return `Securely provide the ${label} from OpenMausBot on your phone or computer. It is never added to chat.`;
 }
 
-function currentSecretState(botId: string, threadId: string, messageId: string) {
-  const message = secretMessage(botId, threadId, messageId);
-  if (!message?.secret) return null;
-  return {
-    provided: message.secret.provided === true,
-    resumed: message.secret.resumed === true,
-  };
-}
+// The phone-secret provisioning helpers live in ./turn-secrets.ts: the
+// submission key, the card state read, and provideSecretFromPhone. Wired
+// at their original site, after phoneSecrets, phoneSecretSubmissions and
+// the deferred-resumes card helpers exist; every caller is a route below.
+const { phoneSecretSubmissionKey, currentSecretState, provideSecretFromPhone } = createTurnSecrets({
+  connectorThread, secretMessage, resumeSecretCard, phoneSecrets, phoneSecretSubmissions,
+});
 
-async function provideSecretFromPhone(
-  context: PhoneSecretContext,
-  authenticatedDeviceId: string,
-): Promise<{ provided: boolean; resumed: boolean }> {
-  const owner = connectorThread(context.botId, context.threadId);
-  const message = secretMessage(context.botId, context.threadId, context.messageId);
-  if (!owner || !message?.secret) throw new PhoneSecretError("No such credential request", 404);
-  if (message.secret.dismissed) throw new PhoneSecretError("This credential request was dismissed", 409);
-  assertPhoneSecretRequestMatches(context, authenticatedDeviceId, {
-    target: message.secret.target,
-    requestKey: message.secret.requestKey,
-  });
-  const operationId = phoneSecretOperationId(context);
-  if (message.secret.phoneOperationId && message.secret.phoneOperationId !== operationId) {
-    throw new PhoneSecretError(
-      "This credential request was already completed by another submission",
-      409,
-    );
-  }
-  // The encrypted store may have committed immediately before a process
-  // interruption. Recording the winning operation precedes completing the
-  // card, so the exact retry can repair that tiny window without writing the
-  // credential again. A different randomized envelope was rejected above.
-  if (message.secret.phoneOperationId === operationId && !message.secret.provided) {
-    if (!credentialIsConfigured(cfg, message.secret.target)) {
-      throw new PhoneSecretError(`${message.secret.label} is no longer configured`, 409);
-    }
-    if (!resumeSecretCard(context.botId, context.threadId, context.messageId, "provided")) {
-      throw new PhoneSecretError("This credential request is no longer available", 409);
-    }
-    const recovered = currentSecretState(context.botId, context.threadId, context.messageId);
-    if (!recovered) throw new PhoneSecretError("This credential request is no longer available", 409);
-    return recovered;
-  }
-  if (message.secret.provided) {
-    if (message.secret.phoneOperationId !== operationId) {
-      throw new PhoneSecretError(
-        "This credential request was already completed by another submission",
-        409,
-      );
-    }
-    if (!credentialIsConfigured(cfg, message.secret.target)) {
-      throw new PhoneSecretError(`${message.secret.label} is no longer configured`, 409);
-    }
-    // A crash or older build may have committed the credential and marked
-    // the card provided without dispatching its continuation. An exact phone
-    // retry repairs that state instead of silently claiming it resumed.
-    if (!message.secret.resumed && !resumeSecretCard(
-      context.botId,
-      context.threadId,
-      context.messageId,
-      "provided",
-    )) {
-      throw new PhoneSecretError("This credential request is no longer available", 409);
-    }
-    const recovered = currentSecretState(context.botId, context.threadId, context.messageId);
-    if (!recovered) throw new PhoneSecretError("This credential request is no longer available", 409);
-    return recovered;
-  }
-
-  const submissionKey = phoneSecretSubmissionKey(context.threadId, context.messageId, context.requestKey);
-  await phoneSecretSubmissions.run({
-    cardKey: submissionKey,
-    botId: context.botId,
-    threadId: context.threadId,
-    ...(owner.group ? { groupId: owner.group.id } : {}),
-  }, operationId, async () => {
-    await phoneSecrets.provide(context);
-    const current = secretMessage(context.botId, context.threadId, context.messageId);
-    if (!current?.secret || current.secret.requestKey !== context.requestKey) {
-      throw new PhoneSecretError("This credential request is no longer available", 409);
-    }
-    if (current.secret.dismissed) {
-      throw new PhoneSecretError("This credential request was dismissed", 409);
-    }
-    // Electron acknowledges only after credentials.bin and the server's
-    // external-secret config update both commit. Keep this assertion at the
-    // boundary so a future parent handler cannot accidentally resume first.
-    if (!credentialIsConfigured(cfg, current.secret.target)) {
-      throw new PhoneSecretError(`${current.secret.label} was not saved yet`, 409);
-    }
-    // Persist the winning randomized envelope id before completing the card.
-    // A later exact retry can recover a lost response, while a newly sealed
-    // value can never be reported as though it were the value already saved.
-    store.patchMessage(context.threadId, current.id, {
-      secret: { ...current.secret, phoneOperationId: operationId },
-    });
-    if (!resumeSecretCard(context.botId, context.threadId, context.messageId, "provided")) {
-      throw new PhoneSecretError("This credential request is no longer available", 409);
-    }
-  });
-  const settled = currentSecretState(context.botId, context.threadId, context.messageId);
-  if (!settled) throw new PhoneSecretError("This credential request is no longer available", 409);
-  return settled;
-}
-
-/** Pre-save probe for a CLI path override: run `<cli> --version` with the
- * same environment a real turn gets (augmented PATH). Returns ok + the
- * version line, or a fail the UI can act on — ENOENT on a GUI-launched app
- * usually means "not on the app's PATH", the exact mistake this catches
- * before the override is saved. */
-async function testCliBinary(
-  cli: string,
-  driver: (typeof BUILT_IN_DRIVERS)[number] | undefined,
-): Promise<{ ok: boolean; version?: string; message?: string; install?: (typeof BUILT_IN_DRIVERS)[number]["install"] }> {
-  return new Promise((resolve) => {
-    execCli(
-      cli,
-      ["--version"],
-      {
-        timeout: 10_000,
-        // SIGKILL, not SIGTERM: a child that traps TERM (sh -c "trap '' TERM;
-        // sleep 99999") would otherwise never fire the callback and pin the
-        // HTTP socket forever. maxBuffer bounds a chatty --version too.
-        killSignal: "SIGKILL",
-        maxBuffer: 1024 * 64,
-        env: cliProbeEnvironment(),
-      },
-      (err, stdout) => {
-        if (err) {
-          const e = err as NodeJS.ErrnoException & { killed?: boolean };
-          // err.code is an errno CONSTANT ("ENOENT", "EACCES") only for spawn
-          // failures; for a non-zero exit it's the exit STATUS (a number) and
-          // for a timeout it's null + killed:true — describeSpawnFailure words
-          // only the first kind
-          const exceededBuffer = e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
-          const isSpawnError = typeof e.code === "string" && !exceededBuffer;
-          const message = exceededBuffer
-            ? "CLI test produced more than 64 KiB of output"
-            : isSpawnError
-              ? describeSpawnFailure(e, cli).message
-              : e.killed
-              ? "CLI test timed out after 10s"
-              : `CLI exited with error ${String(e.code)}: ${(stderrOf(err) || "").slice(0, 200) || err.message.split("\n")[0]}`;
-          resolve({ ok: false, message, ...(driver?.install && isSpawnError ? { install: driver.install } : {}) });
-          return;
-        }
-        resolve({ ok: true, version: stdout.trim().split("\n")[0] });
-      },
-    );
-  });
-}
-
-/** A pre-save probe only needs PATH. Never hand credentials inherited by the
- * desktop/server process to an arbitrary wrapper selected through Settings. */
-function cliProbeEnvironment(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, PATH: augmentedPath() };
-  for (const key of [
-    "XAI_API_KEY",
-    "BOX_TOKEN",
-    "OPENCODE_API_KEY",
-    "COMPOSIO_API_KEY",
-    "OMB_COMPOSIO_BROKER_TOKEN",
-    "OMB_TTS_KEY",
-    "OMB_FISH_AUDIO_API_KEY",
-    "OMB_OPENAI_IMAGE_KEY",
-    "OMB_CUSTOM_IMAGE_KEY",
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-  ]) {
-    delete env[key];
-  }
-  return env;
-}
-
-async function localVmPayload(target: LocalVmTarget) {
-  const status = await containerComputerStatus(undefined, undefined, target);
-  return {
-    ...status,
-    commands: setupCommands(status.runtime, process.platform, target),
-    idle_timeout_ms: LOCAL_VM_IDLE_MS,
-    mode: localVmMode(cfg),
-    max_instances: localVmMaxInstances(cfg),
-  };
-}
-
-/** The Local VM a turn is about to use, recreated if the idle timer took it.
- *
- * `LocalVmIdleTimer` REMOVES an unused Local VM rather than pausing it. The
- * turn then failed with "Create the Local VM (App Settings → Local VM)" —
- * which reads like a fault the person must repair by hand, for a container the
- * app itself deleted eight hours earlier. Someone who steps away overnight
- * comes back to an error on their first message.
- *
- * The cloud branch below already does the opposite: an absent box is
- * provisioned on first use behind a `provisioning` broadcast. This gives the
- * Local VM the same lifecycle for the same reason.
- *
- * Only `missing` is recovered, and only when a fresh `run` is all it takes.
- * Every other problem still surfaces: no runtime installed, no image pulled,
- * `create_supported` false, or an existing container that is stale, unmanaged
- * or unsafe. Those need a decision — install podman, download 1.4 GB, replace
- * a container someone else made — and a stopped container is deliberately not
- * resumed here, because `localVmProblem` says this desktop image cannot safely
- * resume and asks for a recreate rather than a start. Per-bot mode keeps its
- * instance cap; creating past it would quietly do what the lifecycle route
- * refuses.
- */
-async function readyLocalVmForTurn(botId: string, target: LocalVmTarget, isCurrent = () => true) {
-  let status = await containerComputerStatus(undefined, undefined, target);
-  noteLocalVmSeen(target, status);
-  if (!isCurrent()) return status;
-  if (status.ready || !localVmRecreatableOnDemand(status)) return status;
-
-  if (target.key !== SHARED_LOCAL_VM_TARGET.key) {
-    const count = await existingPerBotLocalVmCount(status.runtime);
-    if (!isCurrent() || count >= localVmMaxInstances(cfg)) return status;
-  }
-
-  broadcast({ kind: "computer", botId, state: "provisioning" });
-  localVmLifecycleBusy.add(target.key);
-  localVmProvisionBusy = true;
-  try {
-    status = await containerComputerAction("run", undefined, undefined, target);
-  } catch {
-    // Keep the inspected status: its `problem` names the real obstacle, which
-    // is more use to the person than "podman run exited non-zero".
-    return status;
-  } finally {
-    localVmProvisionBusy = false;
-    localVmLifecycleBusy.delete(target.key);
-  }
-  localVmIdleFor(target).touch();
-
-  // The container is up before Cua Driver is. Waiting here rather than failing
-  // the turn is the whole point: a person who has been away eight hours should
-  // not have to send their message twice.
-  const deadline = Date.now() + LOCAL_VM_DESKTOP_WAIT_MS;
-  while (isCurrent() && !status.ready && status.container === "running" && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 2_000));
-    if (!isCurrent()) break;
-    status = await containerComputerStatus(undefined, undefined, target);
-  }
-  return status;
-}
-
-async function existingPerBotLocalVmCount(runtime: Runtime) {
-  return (await discoverExistingPerBotLocalVms(store.bots, runtime)).length;
-}
-
-async function perBotLocalVmCountForModeChange(): Promise<number | null> {
-  const targets = [...new Map(store.bots.map((bot) => {
-    const target = perBotLocalVmTarget(bot.id);
-    return [target.key, target] as const;
-  })).values()];
-  if (targets.length === 0) return 0;
-  const runtime = await containerRuntimeStatus();
-  if (!runtime.runtime || !runtime.daemonUp) {
-    return targets.some((target) => existsSync(target.workspaceDir)) ? null : 0;
-  }
-  return existingPerBotLocalVmCount(runtime.runtime);
-}
-
-function configStatus() {
-  return {
-    xai: { configured: Boolean(cfg.xai?.key) },
-    anthropic: { configured: Boolean(cfg.anthropic?.key) },
-    // a fleet agent on this server means Settings → Workspaces has something to drive
-    fleet: { available: fleetAvailable(fleetSocketPath()) },
-    // what this build is entitled to, so Settings shows only what works here
-    edition: (({ edition, features }) => ({ edition, features }))(editionStatus()),
-    // settings, not secrets: the cap and the operator's own price list
-    budgets: {
-      ...(cfg.budgets?.monthlyUsd !== undefined ? { monthlyUsd: cfg.budgets.monthlyUsd } : {}),
-      ...(cfg.budgets?.warnAtPercent !== undefined ? { warnAtPercent: cfg.budgets.warnAtPercent } : {}),
-    },
-    billing: { currency: cfg.billing?.currency ?? "USD", prices: cfg.billing?.prices ?? {} },
-    // the base URL is a setting, not a secret; the key stays write-only
-    openaiCompat: { configured: Boolean(cfg.openaiCompat?.key), url: cfg.openaiCompat?.url ?? "" },
-    composio: {
-      configured: composio.configured(cfg),
-      mode: composio.connectionMode(cfg),
-    },
-    box: { configured: Boolean(cfg.box?.token) },
-    vps: { configured: Boolean(vpsSshAlias(cfg)), sshAlias: vpsSshAlias(cfg) ?? "" },
-    opencodeGo: { configured: Boolean(cfg.opencodeGo?.apiKey) },
-    // the chosen voice is a setting, not a secret; the key is reported the
-    // same configured-or-not way as every other credential
-    tts: tts.describeVoice(cfg),
-    imageGen: avatarImageStatus(cfg),
-    // not a secret — the sidebar shows it
-    profile: { name: cfg.profile?.name ?? "", email: cfg.profile?.email ?? "" },
-    // not a secret — the settings picker shows it; "" = follow the system
-    language: cfg.language ?? "",
-    rooms: { turnTimeoutMinutes: roomTurnTimeoutMinutes(cfg) },
-    threads: { maxConcurrentPerBot: maxConcurrentBotThreads(cfg) },
-    localVm: {
-      mode: localVmMode(cfg),
-      maxInstances: localVmMaxInstances(cfg),
-    },
-    features: {
-      skillAuthoring: skillAuthoringEnabled(cfg),
-      showToolCalls: showToolCallsEnabled(cfg),
-      browser: builtInBrowserEnabled(cfg),
-      // Maintainer-only escape hatch, not a Settings toggle: the desktop
-      // shell and the Settings UI read it so they offer nothing this server
-      // would refuse.
-      sharedComputers: sharedComputersEnabled(cfg),
-      // Plugins → MCP servers switch: Claude bots also see this machine's
-      // own Claude Code MCP servers
-      claudeUserMcp: claudeUserMcpEnabled(cfg),
-    },
-    // first-run progress — not a secret; the app decides whether to show
-    // the welcome tour from this, never from browser storage
-    onboarding: {
-      completedAt: cfg.onboarding?.completedAt ?? "",
-      version: cfg.onboarding?.version ?? 0,
-      reelSeen: cfg.onboarding?.reelSeen === true,
-      hintsSeen: cfg.onboarding?.hintsSeen ?? [],
-    },
-    // Which browser this server can give bots: the desktop app's surface,
-    // the agent-browser engine, or nothing yet (with the reason).
-    browserEngine: browserEngineSummary(),
-    // partitionId is non-secret routing metadata. The renderer needs it to
-    // show the same durable session as an agent, but config PATCH validation
-    // keeps it read-only and rejects callers that try to choose it.
-    browserProfiles: cfg.browserProfiles ?? [],
-    // who may sign in with an emailed code (server/account-signin.ts)
-    signIn: { admins: cfg.signIn?.admins ?? [], members: cfg.signIn?.members ?? [] },
-  };
-}
-
-function configForAccess(status: ReturnType<typeof configStatus>, admin: boolean) {
-  if (admin) return status;
-  // Configured-or-not is fine; an SSH alias, an email, a browser partition
-  // id, and the sign-in list are not a client's business. Preserve the
-  // source objects.
-  return {
-    ...status,
-    signIn: { admins: [], members: [] },
-    vps: { configured: status.vps.configured, sshAlias: "" },
-    profile: { name: status.profile.name, email: "" },
-    browserProfiles: status.browserProfiles.map((profile) => Object.fromEntries(Object.entries(profile).filter(([key]) => key !== "partitionId"))),
-  };
-}
-
-function mcpServerResponse() {
-  return { servers: listMcpServers(cfg.mcpServers) };
-}
-
-/** The fields a new server may set, in whichever shape the form sent — a
- * command to run or a URL to reach. Absent keys stay absent, so the strict
- * schema of one shape never sees the other shape's `undefined`s. */
-function mcpServerBody(body: unknown): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  if (!body || typeof body !== "object") return out;
-  const record = body as Record<string, unknown>;
-  for (const key of ["command", "args", "env", "type", "url", "headers", "enabled"]) {
-    if (record[key] !== undefined) out[key] = record[key];
-  }
-  return out;
-}
-
-function persistMcpServers(next: Record<string, unknown>): void {
-  saveConfig({ mcpServers: next });
-  // Do not reload the provider fleet: integrations are assembled from cfg at
-  // the next turn boundary. Updating this property directly also correctly
-  // clears the final entry; Object.assign(loadConfig()) would leave it stale
-  // when an empty section is omitted by an older config file.
-  cfg.mcpServers = next;
-}
-
-async function describeInstances() {
-  const configs = instanceConfigs(cfg);
-  return (await registry.describe()).map((instance) => {
-    if (managedDesktop.owns(instance.instanceId)) return {
-      ...instance, readOnly: true, managed: managedDesktop.info(instance.instanceId),
-      install: undefined, authentication: undefined, cli: undefined, cliCandidates: [],
-    };
-    const entry = configs[instance.instanceId];
-    if (entry?.driver !== "claudeAgent") return instance;
-    try {
-      const claudeAccount = claudeAccountInfo(instance.instanceId, entry, instance.cli ?? instance.cliDefault ?? "claude");
-      return { ...instance, claudeAccount, install: { ...instance.install, signInCommand: claudeAccount.signInCommand } };
-    } catch {
-      // A malformed saved config remains a repairable shadow, never takes
-      // the model picker down or offers a login for the wrong directory.
-      return { ...instance, install: { ...instance.install, signInCommand: undefined } };
-    }
-  });
-}
+// The config/instance settings views live in ./config-views.ts:
+// configStatus and its admin/member projection, the MCP server view and
+// persist, and describeInstances; the CLI pre-save probe arrives via the
+// config-views import above. Wired at the helpers' original site, after
+// managedDesktop and browserEngineSummary exist; the events
+// configForAccess thunk above and the routes below read these consts
+// only at request time.
+const {
+  configStatus, configForAccess, mcpServerResponse, mcpServerBody, persistMcpServers, describeInstances,
+} = createConfigViews({ managedDesktop, browserEngineSummary });
 
 /** Set once graceful shutdown begins: quitting disposes Company instances
  * without writing "connection changed" cards or failing routine runs. */
