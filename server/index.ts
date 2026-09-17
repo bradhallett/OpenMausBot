@@ -67,24 +67,16 @@ import type { RequestAuth } from "./request-auth.ts";
 import { fleetAvailable, fleetRequest, fleetSocketPath } from "./fleet-client.ts";
 import { entitled } from "./enterprise.ts";
 import { HOSTED_CONTRACT_HEADER, HOSTED_CONTRACT_METADATA, HOSTED_CONTRACT_VERSION } from "./hosted-contract.ts";
-import type { Notification } from "./notify.ts";
 import type { RuntimeEvent } from "./contracts.ts";
 
 import type { CommsBus } from "./comms-visibility.ts";
 import { closeMessageDb, chatFollowups, settleChatFollowups } from "./message-db.ts";
-import { promptWithReply } from "./replies.ts";
 import {
   discardDelegations,
   drainDelegations,
-  expireStaleDelegations,
   pendingThreads,
-  releaseDelegationsWaitingOn,
 } from "./delegations.ts";
 import {
-  drainSteeredMessages,
-  onSteeredQueueChange,
-  queuedThreadPosition,
-  queueSteeredMessage,
   restoreSteeredMessages,
 } from "./steer-queue.ts";
 import { restoreChannelMessages } from "./channel-queue.ts";
@@ -115,7 +107,9 @@ import type { SkillRequestCardData } from "../shared/skill-request.ts";
 import { discoverExistingPerBotLocalVms, shouldArmLocalVmIdle } from "./local-vm-inventory.ts";
 import { redactSecretsInText } from "./redact.ts";
 import * as vps from "./vps-computer.ts";
+import { createEventsPipeline } from "./events-pipeline.ts";
 import { createRoutineWiring } from "./routine-wiring.ts";
+import { createTurnDispatch } from "./turn-dispatch.ts";
 import { RoutineManager, type RoutineRun } from "./routines.ts";
 import { CalendarCallManager, type CalendarCall } from "./calendar-calls.ts";
 import {
@@ -176,7 +170,6 @@ import {
 import { environmentDescriptor, serverVersion } from "./environment.ts";
 import { createWorkspaceBackupRoutes, isWorkspaceBackupSessionControl } from "./workspace-backup-http.ts";
 import { json, readBody } from "./http.ts";
-import { createEventsRoutes } from "./routes/events.ts";
 import { createRoutinesRoutes } from "./routes/routines.ts";
 import { createInternalRoutes, type AskBotOutcome, type InternalCapability } from "./routes/internal.ts";
 import { createCalendarCallRoutes } from "./routes/calendar-calls.ts";
@@ -236,8 +229,6 @@ import {
 import { createProviderFleet } from "./provider-fleet.ts";
 import { roomHandoffHandlers } from "./room-handoff-wiring.ts";
 import { createTurnCleanup } from "./turn-cleanup.ts";
-import { createEventFold } from "./event-fold.ts";
-import { createStartTurn } from "./start-turn.ts";
 import { createCustomDomainVerifier, customDomainIpv4, normalizeCustomDomain } from "./custom-domain.ts";
 import { allowedScopes, createEmailSignIn, parseAllowList } from "./account-signin.ts";
 import { ProviderAuthSessions } from "./provider-auth-sessions.ts";
@@ -469,7 +460,7 @@ const {
   },
   helpers: {
     publicGroupState,
-    notify,
+    notify: (notification) => notify(notification),
     routineSourceOwner,
     routineSourceThread,
   },
@@ -697,6 +688,35 @@ export { browserEngineSummary };
 
 class DirectTurnSetupCancelled extends Error {}
 const directTurnGenerationByThread = new Map<string, string>();
+// Stop revokes credentials before completion, but the receipt must retain its
+// exact provider-turn owner until that completion or explicit failure
+// cleanup. The direct-followup registries, the delegation watch map and the
+// peer-wake machinery live in ./delegation-watch.ts, wired here at the old
+// declaration site; thunks cover the consts declared further below.
+const {
+  directFollowupTurns, directFollowupSettlers, directCoordinationSettlers,
+  settleDirectCoordination, settleDirectFollowup,
+  delegationWatch, delegationWakeBudget, pendingDelegationWakes,
+  activeRoutineRunForThread, wakeUndispatchedDelegation, drainDelegationWakes,
+  finalizeDelegationWatch, isExternalContextMarker, markTaskContextExternallyUpdated,
+  reportIncident, handoffs, isContextMessage,
+} = createDelegationWatch({
+  lateBound: {
+    roomHandoffs: () => roomHandoffs,
+    routines: () => routines,
+    startTurn: (botId, text, opts) => startTurn(botId, text, opts),
+    commsBus: () => commsBus,
+  },
+  helpers: {
+    retireProviderTurn,
+    isUnattended: (botId, threadId) => isUnattended(botId, threadId),
+    activeGroupTurnForBot,
+    turnInstance: (bot, runOn, threadId) => turnInstance(bot, runOn, threadId),
+    notify: (notification) => notify(notification),
+  },
+});
+
+
 // ── computer / VM lifecycle ──────────────────────────────────────────────────────────
 // The computer/VM lifecycle cluster lives in ./computer-lifecycle.ts: the
 // local-VM lease/idle/thread registries, the Box/VPS provider busy-sets and
@@ -732,33 +752,6 @@ const {
   },
   state: {
     directTurnGenerationByThread,
-  },
-});
-// Stop revokes credentials before completion, but the receipt must retain its
-// exact provider-turn owner until that completion or explicit failure
-// cleanup. The direct-followup registries, the delegation watch map and the
-// peer-wake machinery live in ./delegation-watch.ts, wired here at the old
-// declaration site; thunks cover the consts declared further below.
-const {
-  directFollowupTurns, directFollowupSettlers, directCoordinationSettlers,
-  settleDirectCoordination, settleDirectFollowup,
-  delegationWatch, delegationWakeBudget, pendingDelegationWakes,
-  activeRoutineRunForThread, wakeUndispatchedDelegation, drainDelegationWakes,
-  finalizeDelegationWatch, isExternalContextMarker, markTaskContextExternallyUpdated,
-  reportIncident, handoffs, isContextMessage,
-} = createDelegationWatch({
-  lateBound: {
-    roomHandoffs: () => roomHandoffs,
-    routines: () => routines,
-    startTurn: (botId, text, opts) => startTurn(botId, text, opts),
-    commsBus: () => commsBus,
-  },
-  helpers: {
-    retireProviderTurn,
-    isUnattended,
-    activeGroupTurnForBot,
-    turnInstance,
-    notify,
   },
 });
 
@@ -1229,8 +1222,9 @@ const {
     GROUP_GOAL_MAX_WAIT_EXHAUSTIONS: () => GROUP_GOAL_MAX_WAIT_EXHAUSTIONS,
   },
   cleanup: {
-    releaseTurnResources, releaseLocalVmThread, startScreenPoller, retryDelegationsWaitingOn,
-    drains: { drainQueuedSends, drainConnectorResumes, drainSecretResumes, drainTeamSetupResumes },
+    releaseTurnResources, releaseLocalVmThread, startScreenPoller,
+    retryDelegationsWaitingOn: (botId) => retryDelegationsWaitingOn(botId),
+    drains: { drainQueuedSends: () => drainQueuedSends(), drainConnectorResumes, drainSecretResumes, drainTeamSetupResumes },
   },
   localVm: {
     localVmLeaseFor, localVmIdleFor, localVmThreadTargets: () => localVmThreadTargets,
@@ -1262,11 +1256,11 @@ const roomHandoffs: RoomHandoffs = new RoomHandoffs(join(DATA_DIR, "room-handoff
   wireBot,
   broadcast: () => broadcast,
   roomHandoffs: () => roomHandoffs,
-  drainQueuedSends,
+  drainQueuedSends: () => drainQueuedSends(),
   markTaskContextExternallyUpdated,
-  markInternalTurn,
-  isUnattended,
-  markUnattended,
+  markInternalTurn: (threadId) => markInternalTurn(threadId),
+  isUnattended: (botId, threadId) => isUnattended(botId, threadId),
+  markUnattended: (botId, threadId) => markUnattended(botId, threadId),
   startTurn: (botId, text, opts) => startTurn(botId, text, opts),
   beginGroupTurnOperation,
   finishGroupTurnOperation,
@@ -1403,62 +1397,31 @@ function messageWindow(threadId: string, messageId: string, limit: number) {
   return { messages: all.slice(start, stop).map(slimMessage), hasMore: start > 0 };
 }
 
-// ── SSE fan-out to clients ─────────────────────────────────────────────
-// The fan-out machinery — client set, replay buffer, heartbeat, cursor
-// math, and the /api/events endpoint — lives in ./routes/events.ts. index
-// keeps the wiring to its own singletons, registered in the same order the
-// inline code registered it.
-const eventsRoutes = createEventsRoutes({
-  closeForOwner: (sessionId) => browserLive.closeForOwner(sessionId),
-  revalidateEmailSessions: () => sessions.revalidateEmailSessions(),
-  isLive: (sessionId) => sessions.isLive(sessionId),
-  configForAccess: (status, admin) => configForAccess(status as ReturnType<typeof configStatus>, admin),
-});
-const broadcast = eventsRoutes.broadcast;
-const closeSessionStreams = eventsRoutes.closeSessionStreams;
-sessions.onSessionRevoked((sessionId) => {
-  providerAuthSessions.revokeOwner(sessionId);
-  closeSessionStreams(sessionId);
-});
-onSteeredQueueChange(() => broadcast({ kind: "bot.queued", queues: publicBotQueuedMessages() }));
-
-// ── server-side event folding (upstream's ingestion worker, miniature) ──
-// The canonical stream is the source of truth; the persisted transcript
-// and every client view are projections of it.
-// The fold state, stall watchdog, and ingestion subscribers live in
-// ./event-fold.ts, wired here in the original registration order; the
-// in-flight item/request message-id maps live in ./turn-fold.ts.
-
-/** Put a notification on the wire. Clients decide what to do with it — a
- * desktop notification now, a push to a paired phone later. */
-function notify(notification: Notification | null) {
-  // nested rather than spread — the frame's own `kind` names the frame,
-  // exactly like {kind:"message", message} and {kind:"bot", bot}
-  if (notification) broadcast({ kind: "notify", notification });
-}
-
-// Group threads: the fold needs to know WHO is talking — the turn engine
-// records the active member here before dispatching its turn.
-const groupSpeakers = new Map<string, { botId: string; name: string; color: string }>();
-
-const eventFold = createEventFold({
+// ── SSE fan-out to clients ────────────────────────────────────────────────────────────────────
+// The fan-out wiring, the event fold wiring, and the unattended/internal
+// turn marks live in ./events-pipeline.ts; index.ts wires the factory at
+// the region's original site and rebinds its names below. The turn-dispatch
+// drains arrive as thunks because turn dispatch is wired further down.
+const {
+  eventsRoutes, broadcast, closeSessionStreams, notify, groupSpeakers,
+  lastReply, turnUsage, turnContext, roomStallCompletions, watchdog,
+  ASK_BOT_TIMEOUT_MS, GROUP_GOAL_WAIT_MAX_MS, GROUP_GOAL_MAX_WAIT_EXHAUSTIONS,
+  markUnattended, clearUnattended, isUnattended, markInternalTurn, clearInternalTurn,
+} = createEventsPipeline({
+  routes: {
+    browserLive,
+    sessions,
+    providerAuthSessions,
+    configForAccess: (status, admin) => configForAccess(status as ReturnType<typeof configStatus>, admin),
+  },
+  fanout: { publicBotQueuedMessages },
   bus,
-  events: { broadcast, notify },
   fold: {
-    groupSpeakers,
-    generatedImagesByTurn,
-    turnTriggers,
-    retiredProviderTurns,
-    groupGoalCoordinatorTurns,
-    directTurnGenerationByThread,
-    directFollowupTurns,
-    settlingResourceOwners,
+    generatedImagesByTurn, turnTriggers, retiredProviderTurns, groupGoalCoordinatorTurns,
+    directTurnGenerationByThread, directFollowupTurns, settlingResourceOwners,
   },
   helpers: {
     shouldIgnoreProviderEvent,
-    isUnattended,
-    isInternalTurn,
-    clearInternalTurn,
     approvalModeForTurn,
     routineSourceOwner,
     routineSourceThread,
@@ -1482,9 +1445,6 @@ const eventFold = createEventFold({
     pokeScreenPoller,
     stopScreenPoller,
     finalScreenFrame,
-    drainThreadDelegations,
-    retryDelegationsWaitingOn,
-    drainQueuedSends,
     drainConnectorResumes,
     drainSecretResumes,
     drainTeamSetupResumes,
@@ -1500,75 +1460,13 @@ const eventFold = createEventFold({
     screenPollers: () => screenPollers,
     SCREEN_SETTLE_TIMEOUT_MS: () => SCREEN_SETTLE_TIMEOUT_MS,
   },
+  turnDispatch: {
+    drainThreadDelegations: () => drainThreadDelegations,
+    retryDelegationsWaitingOn: () => retryDelegationsWaitingOn,
+    drainQueuedSends: () => drainQueuedSends,
+  },
 });
-const {
-  lastReply, turnUsage, turnContext, roomStallCompletions, watchdog,
-  ASK_BOT_TIMEOUT_MS, GROUP_GOAL_WAIT_MAX_MS, GROUP_GOAL_MAX_WAIT_EXHAUSTIONS,
-} = eventFold;
-watchdog.start();
-eventFold.wireEventFold();
 
-// Bots currently working with nobody at the keyboard — a webhook turn, or a
-// turn a webhook-driven bot handed to a teammate. Auto mode is a decision
-// someone made for turns they were present for, so these don't inherit it:
-// the guard behind auto mode is a pattern list, not a security boundary, and
-// it must not stand in for a human at 3am.
-//
-// Keyed by conversation: typing in one thread never makes a sibling webhook
-// run attended. Idle marks expire rather than clearing on
-// turn.completed: bus subscribers fire in registration order, and the
-// delegation drain runs AFTER the main fold — clearing there would blank the
-// flag before the hop that needs to read it. A busy bot never ages out, and a
-// stale mark only ever means "ask a human", so this fails closed.
-const unattendedThreads = new Map<string, { botId: string; at: number }>();
-const UNATTENDED_TTL_MS = 30 * 60_000;
-
-function markUnattended(botId: string, threadId: string) {
-  unattendedThreads.set(threadId, { botId, at: Date.now() });
-}
-function clearUnattended(threadId: string) {
-  unattendedThreads.delete(threadId);
-}
-function isUnattended(botId?: string | null, threadId?: string): boolean {
-  if (!botId) return false;
-  // Legacy peer callers without a thread fail closed if any of the bot's
-  // work is unattended. Capability/event callers always pass the exact id.
-  if (!threadId) return [...unattendedThreads].some(([id, mark]) => mark.botId === botId && isUnattended(botId, id));
-  const mark = unattendedThreads.get(threadId);
-  if (!mark || mark.botId !== botId) return false;
-  // A long-running turn is still unattended even if its next approval comes
-  // more than 30 minutes after the previous one. Only an idle bot may age
-  // out; every positive read refreshes the inactivity window.
-  if (Date.now() - mark.at > UNATTENDED_TTL_MS && !threadBusy(botId, threadId) && !groupSpeakers.has(threadId)) {
-    unattendedThreads.delete(threadId);
-    return false;
-  }
-  mark.at = Date.now();
-  return true;
-}
-
-// Threads whose turn in flight was started by another BOT — an ask_bot hop,
-// a drained delegation. The person asked ONE bot; the fan-out behind that
-// answer is that bot's work, not mail addressed to them, so its completion
-// raises no badge and no banner. Anything that genuinely needs a human still
-// breaks through from its own path: a card that reached a person, a takeover,
-// a peer-approval — none of which run through the completion fold.
-//
-// Keyed by THREAD because turn.completed carries nothing else, and derived
-// from commsDepth, which every peer path already threads through. Every
-// dispatch rewrites the flag, so a peer turn that dies before it starts can
-// never silence the person's own next turn on that thread.
-const internalTurnThreads = new Set<string>();
-
-function markInternalTurn(threadId: string) {
-  internalTurnThreads.add(threadId);
-}
-function clearInternalTurn(threadId: string) {
-  internalTurnThreads.delete(threadId);
-}
-function isInternalTurn(threadId: string): boolean {
-  return internalTurnThreads.has(threadId);
-}
 // When the person last wrote into each thread with a turn in flight — but
 // only for turns THEY started. post_to_room's ceiling counts the bot posts
 // nobody has answered, and "answered" used to mean a person writing in the
@@ -1696,142 +1594,6 @@ const runDelegatedTurn: Parameters<typeof drainDelegations>[3] = (toBotId, rawTe
     });
 };
 
-function drainThreadDelegations(threadId: string): void {
-  const routineRunId = activeRoutineRunForThread(threadId)?.id;
-  drainDelegations(commsBus, approvalBus, threadId, runDelegatedTurn,
-    (receipt) => wakeUndispatchedDelegation(receipt, routineRunId));
-}
-
-// Queued handoffs expire DELEGATION_TTL_MS after they were queued. A drain
-// expires what it touches; this sweep covers a handoff nothing drains — a
-// target that never settles while its source sits idle — and wakes each
-// delegator the same way a drain-time failure does.
-const DELEGATION_SWEEP_MS = 60 * 60 * 1000;
-function expireDelegationsNow(): void {
-  expireStaleDelegations(commsBus, Date.now(), (receipt) =>
-    wakeUndispatchedDelegation(receipt, activeRoutineRunForThread(receipt.sourceThreadId)?.id));
-}
-
-// Most waiting handoffs retry from a target's turn.completed event. Some
-// setup, cancellation, room, watchdog, and provider-reload paths release a
-// bot without that event, so every explicit idle release calls this same
-// coalesced retry hook. The microtask lets the releasing state machine finish
-// before another turn claims the bot.
-const delegationRetryBots = new Set<string>();
-function retryDelegationsWaitingOn(botId: string): void {
-  if (delegationRetryBots.has(botId)) return;
-  delegationRetryBots.add(botId);
-  queueMicrotask(() => {
-    delegationRetryBots.delete(botId);
-    // Explicit idle releases (room/setup/reload/watchdog fallbacks) may not
-    // publish turn.completed. They free a waiting source continuation too.
-    drainDelegationWakes();
-    // A bot still busy in one thread has nevertheless freed a slot: the
-    // fresh-thread handoffs waiting on it can move, while the active-thread
-    // ones keep waiting for it to go idle, as they always have.
-    const stillBusy = store.bot(botId)?.busy === true;
-    if (stillBusy && botAtThreadCapacity(botId)) return;
-    const released = stillBusy
-      ? releaseDelegationsWaitingOn(botId, (item) => item.targetThreadId !== undefined)
-      : releaseDelegationsWaitingOn(botId);
-    for (const waitingThread of released) {
-      drainThreadDelegations(waitingThread);
-    }
-  });
-}
-
-function drainQueuedSends() {
-  if (!followupsReady) return;
-  drainSteeredMessages(store, (botId, threadId, prompt, userMessage, excludeIds, unattended) =>
-    // A plain attended turn — no automationSource, no comms depth: exactly
-    // what typing the same words into an idle bot would run. Self-opened
-    // work retains `unattended` and the message's bot-origin provenance
-    // through the wait for a slot.
-    // Drain just appended the held lines; userMessage keeps startTurn
-    // from duplicating the last one, and excludeIds drops every drained
-    // line from the transcript-replay so they are not also in `prompt`.
-    new Promise<void>((resolve, reject) => {
-      void startTurn(botId, prompt, {
-        threadId, userMessage, excludeMessageIds: excludeIds, unattended, onTurnSettled: resolve,
-      }).catch((err) => {
-        store.appendMessage(threadId, {
-          role: "bot", kind: "activity",
-          tool: {
-            name: `error: queued message could not start — ${(err instanceof Error ? err.message : String(err)).slice(0, 120)}`,
-            ok: false,
-          },
-        });
-        resolve();
-      }).catch(reject);
-    }),
-    // Provider completion can precede its dispatch promise: keep the queue
-    // intact until that exact handshake releases its runtime-only claim.
-    (botId, threadId) => threadBusy(botId, threadId) || botAtThreadCapacity(botId) || Boolean(activeGroupTurnForBot(botId))
-      || parksBehindCoordination(botId, threadId),
-  );
-}
-
-/** Keep a person's words off the transcript until a direct-thread slot is
- * available. Reuse the existing cancellable, idempotent composer queue. */
-async function startOrQueueDirectMessage(botId: string, threadId: string, text: string, replyTo?: Message, sendId?: string, sender?: { name: string }) {
-  const capacity = botAtThreadCapacity(botId);
-  if (capacity || threadBusy(botId, threadId) || parksBehindCoordination(botId, threadId)) {
-    const reason = capacity ? "capacity" as const : undefined;
-    const queued = queueSteeredMessage(botId, threadId, text, {
-      replyToId: replyTo?.id,
-      sendId,
-      reason,
-      prompt: promptWithReply(text, replyTo, cfg.profile?.name?.trim() || "User"),
-    });
-    return { ok: true as const, queued: true as const, queueId: queued.id, threadId, reason };
-  }
-  const message = await startTurn(botId, text, { threadId, replyTo, sendId, sender });
-  return { ok: true as const, threadId, message };
-}
-
-/** How many start_thread calls one turn may make. Same spirit as the
- * create-bot ceiling above: a handful is a plan, more is a fan-out. */
-const MAX_THREADS_OPENED_PER_TURN = 5;
-
-/** A thread a bot opened on itself gets its first turn exactly the way a
- * person's message would: it runs now if the bot has a free slot, and
- * otherwise waits in the same composer queue, in line behind whatever the
- * bot already has waiting. Its provenance survives the queue: this is the
- * bot's own request, not a new human request authorizing recursive fan-out. */
-async function startOrQueueOpenedThread(
-  botId: string,
-  threadId: string,
-  text: string,
-  unattended: boolean,
-): Promise<{ state: "running" } | { state: "queued"; position: number } | { state: "failed"; error: string }> {
-  const peerAsk = { botId, name: store.bot(botId)!.name, unattended: unattended || undefined };
-  // A room turn holds the bot too (startTurn refuses a direct turn during
-  // one); the drain's own block check already waits for it, so the words
-  // queue here rather than bounce.
-  if (botAtThreadCapacity(botId) || activeGroupTurnForBot(botId)) {
-    queueSteeredMessage(botId, threadId, text, { reason: "capacity", unattended, peerAsk });
-    return { state: "queued", position: queuedThreadPosition(botId, threadId) ?? 1 };
-  }
-  try {
-    await startTurn(botId, text, { threadId, unattended, peerAsk });
-    return { state: "running" };
-  } catch (error) {
-    const why = error instanceof Error ? error.message : String(error);
-    store.appendMessage(threadId, {
-      role: "bot",
-      kind: "activity",
-      tool: { name: `error: this thread could not start — ${why.slice(0, 120)}`, ok: false },
-    });
-    return { state: "failed", error: why };
-  }
-}
-
-
-/** A short title for a fresh thread, from the provider's cheap one-shot
- * (generateText — Haiku on Claude, the chat completion endpoint's text
- * path on OpenAI-compatible engines). Null whenever that call cannot run,
- * runs long, or answers with something that is not a plain short title;
- * the caller keeps the snippet it already applied. */
 async function generateThreadTitle(
   provider: { generateText?: (prompt: string, options?: { signal?: AbortSignal }) => Promise<string> },
   text: string,
@@ -1864,129 +1626,141 @@ async function generateThreadTitle(
   }
 }
 
-// ── turn dispatch (upstream ProviderCommandReactor, miniature) ──────────
-const { startTurn } = createStartTurn({
-  runtime: {
-    store,
-    cfg,
-    workspaceMaintenance,
-  },
-  events: {
-    broadcast,
-    notify,
-    watchdog,
-  },
-  admission: {
-    activeGroupTurnForBot,
-    providerTransitionForTurn,
-    turnSurfacePlan,
-    turnProvider,
-    turnInstance,
-    providerFleet: () => providerFleet,
-    providerInstancesChanging: () => providerInstancesChanging,
-    checkpointRestoreLeases,
-    boxLifecycleBusyBots,
-    maxCommsDepth: MAX_COMMS_DEPTH,
-    isExternalContextMarker,
-  },
-  dispatch: {
-    directTurnGenerationByThread,
-    directFollowupTurns,
-    directFollowupSettlers,
-    directCoordinationSettlers,
-    settleDirectCoordination,
-    settleDirectFollowup,
-    directTurnClaimExists,
-    directTurnClaimIsCurrent,
-    markDirectTurnDispatching,
-    clearDirectTurnDispatch,
-    pendingCancelledProviderHandshakes,
-    clearCancelledProviderHandshake,
-    retireProviderTurn,
-    runningTurnEngines,
-    DirectTurnSetupCancelled,
-  },
-  fold: {
-    turnUsage,
-    turnContext,
-    personAskAt,
-    retryDelegationsWaitingOn,
-    drains: {
-      drainQueuedSends,
-      drainConnectorResumes,
-      drainSecretResumes,
-      drainTeamSetupResumes,
-      drainDelegationWakes,
+// ── turn dispatch (delegations, queued sends, direct turns) ───────────────────────────────────
+// drainThreadDelegations, the delegation sweep and retry hooks, the queued
+// send drain, the startOrQueue* entry points, and the createStartTurn
+// wiring live in ./turn-dispatch.ts; index.ts wires the factory at the
+// region's original site and rebinds its names below. commsBus,
+// approvalBus, and followupsReady cross as thunks because index.ts binds
+// them after this factory runs.
+const {
+  startTurn, drainThreadDelegations, expireDelegationsNow, DELEGATION_SWEEP_MS,
+  retryDelegationsWaitingOn, drainQueuedSends, startOrQueueDirectMessage,
+  startOrQueueOpenedThread, MAX_THREADS_OPENED_PER_TURN,
+} = createTurnDispatch({
+  startTurn: {
+    events: { broadcast, notify, watchdog },
+    admission: {
+      activeGroupTurnForBot,
+      providerTransitionForTurn,
+      turnSurfacePlan,
+      turnProvider,
+      turnInstance,
+      providerFleet: () => providerFleet,
+      providerInstancesChanging: () => providerInstancesChanging,
+      checkpointRestoreLeases,
+      boxLifecycleBusyBots,
+      maxCommsDepth: MAX_COMMS_DEPTH,
+      isExternalContextMarker,
+    },
+    dispatch: {
+      directTurnGenerationByThread,
+      directFollowupTurns,
+      directFollowupSettlers,
+      directCoordinationSettlers,
+      settleDirectCoordination,
+      settleDirectFollowup,
+      directTurnClaimExists,
+      directTurnClaimIsCurrent,
+      markDirectTurnDispatching,
+      clearDirectTurnDispatch,
+      pendingCancelledProviderHandshakes,
+      clearCancelledProviderHandshake,
+      retireProviderTurn,
+      runningTurnEngines,
+      DirectTurnSetupCancelled,
+    },
+    fold: {
+      turnUsage,
+      turnContext,
+      personAskAt,
+      drains: {
+        drainConnectorResumes,
+        drainSecretResumes,
+        drainTeamSetupResumes,
+        drainDelegationWakes,
+      },
+    },
+    cleanup: {
+      releaseTurnResources,
+      settlingResourceOwners,
+      autoVmClaims,
+      releaseLocalVmThread,
+      startScreenPoller,
+      stopScreenPoller,
+      screenPollers,
+      turnResources,
+      turnComputerResources,
+    },
+    turnMarks: {
+      markUnattended,
+      clearUnattended,
+      markInternalTurn,
+      clearInternalTurn,
+      delegationWakeBudget,
+    },
+    routines: {
+      routines: () => routines,
+      activeRoutineRunForThread,
+    },
+    localVm: {
+      localVmTargetForBot,
+      localVmLeaseFor,
+      localVmIdleFor,
+      localVmThreadTargets,
+      localVmActiveThreads,
+      localVmLifecycleBusy,
+      localVmSeen,
+      localVmOwnerBusy,
+      localVmImageBusy: () => localVmImageBusy,
+      localVmModeChangeBusy: () => localVmModeChangeBusy,
+      readyLocalVmForTurn,
+    },
+    computers: {
+      bindTurnComputer,
+      attachTeamBox,
+      controlIntegration,
+      browserRuntime,
+      browserIntegration,
+      phoneIntegration,
+      connectedAppsIntegration,
+      agentsIntegration,
+      vpsThreadStarted,
+      vpsThreadEnded,
+    },
+    prompts: {
+      approvalModeForTurn,
+      roomHandoffProblem,
+      coordinationSystemInstructions,
+      outstandingAssignmentsPrompt,
+      teamComputerPrompt,
+      inheritedTeamComputer,
+      teammateReportContext,
+      availableSkills,
+    },
+    handoffs: {
+      roomHandoffs,
+      turnHandoffs: handoffs,
+    },
+    titles: {
+      generateThreadTitle,
+    },
+    incidents: {
+      reportIncident,
     },
   },
-  cleanup: {
-    releaseTurnResources,
-    settlingResourceOwners,
-    autoVmClaims,
-    releaseLocalVmThread,
-    startScreenPoller,
-    stopScreenPoller,
-    screenPollers,
-    turnResources,
-    turnComputerResources,
+  helpers: {
+    runDelegatedTurn,
+    wakeUndispatchedDelegation,
+    parksBehindCoordination,
   },
-  turnMarks: {
-    markUnattended,
-    clearUnattended,
-    markInternalTurn,
-    clearInternalTurn,
-    delegationWakeBudget,
-  },
-  routines: {
-    routines: () => routines,
-    activeRoutineRunForThread,
-  },
-  localVm: {
-    localVmTargetForBot,
-    localVmLeaseFor,
-    localVmIdleFor,
-    localVmThreadTargets,
-    localVmActiveThreads,
-    localVmLifecycleBusy,
-    localVmSeen,
-    localVmOwnerBusy,
-    localVmImageBusy: () => localVmImageBusy,
-    localVmModeChangeBusy: () => localVmModeChangeBusy,
-    readyLocalVmForTurn,
-  },
-  computers: {
-    bindTurnComputer,
-    attachTeamBox,
-    controlIntegration,
-    browserRuntime,
-    browserIntegration,
-    phoneIntegration,
-    connectedAppsIntegration,
-    agentsIntegration,
-    vpsThreadStarted,
-    vpsThreadEnded,
-  },
-  prompts: {
-    approvalModeForTurn,
-    roomHandoffProblem,
-    coordinationSystemInstructions,
-    outstandingAssignmentsPrompt,
-    teamComputerPrompt,
-    inheritedTeamComputer,
-    teammateReportContext,
-    availableSkills,
-  },
-  handoffs: {
-    roomHandoffs,
-    turnHandoffs: handoffs,
-  },
-  titles: {
-    generateThreadTitle,
-  },
-  incidents: {
-    reportIncident,
+  lateBound: {
+    commsBus: () => commsBus,
+    approvalBus: () => approvalBus,
+    followupsReady: () => followupsReady,
   },
 });
+
 
 // ── routines: persisted definitions → detached bot tasks ───────────────
 // The scheduler owns timing and receipts; the existing harness remains the
