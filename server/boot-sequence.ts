@@ -8,14 +8,21 @@
 // initialization order and every downstream consumer are unchanged.
 // TUNNEL_SOCKET and tunnelListener move with the module (tunnelListener had
 // no reader outside the region); the late-bound lets (routines,
-// calendarCalls, webhookIngress) cross as thunks, and the two lets the
-// region reassigns (workspaceAccess, companyShutdown) cross as { get, set }
-// accessors over index.ts's bindings.
+// calendarCalls) cross as thunks; the local-VM startup backstop and the
+// webhook receiver listener open the sequence at their original relative
+// order; and the lets the region reads or reassigns (webhookIngress,
+// webhookIngressError, workspaceAccess, companyShutdown) cross as
+// { get, set } accessors over index.ts's bindings.
 import { rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import { cleanupStaleAttachmentPartials } from "./attachments.ts";
-import { DATA_DIR, threadEventLogRetentionDays } from "./config.ts";
+import {
+  containerComputerStatus,
+  containerRuntimeStatus,
+  SHARED_LOCAL_VM_TARGET,
+} from "./container-computer.ts";
+import { DATA_DIR, localVmMode, threadEventLogRetentionDays } from "./config.ts";
 import { sweepThreadEventLogs, type ThreadLogRetentionCandidate } from "./thread-retention.ts";
 import { flushUsageLedger } from "./usage-ledger.ts";
 import { chatFollowups, closeMessageDb, settleChatFollowups } from "./message-db.ts";
@@ -31,9 +38,11 @@ import { createGracefulShutdown } from "./graceful-shutdown.ts";
 import { createWorkspaceAccess, describeEdition, loadEnterpriseLayer, type WorkspaceAccess } from "./enterprise.ts";
 import { describeBrand, loadBrand } from "./brand.ts";
 import { revokeAllInternalCapabilities } from "./internal-capabilities.ts";
-import { cfg, registry, releaseDataDirLeaseAtExit, store } from "./runtime.ts";
+import { discoverExistingPerBotLocalVms, shouldArmLocalVmIdle } from "./local-vm-inventory.ts";
+import { cfg, registry, releaseDataDirLeaseAtExit, store, workspaceMaintenance } from "./runtime.ts";
 import { threadBusy } from "./turn-admission.ts";
-import type { WebhookIngress } from "./webhook-ingress.ts";
+import { listenWebhookIngress, type WebhookIngress } from "./webhook-ingress.ts";
+import type { WebhookManager } from "./webhooks.ts";
 import type { SessionRegistry } from "./sessions.ts";
 import type { RoutineManager } from "./routines.ts";
 import type { CalendarCallManager } from "./calendar-calls.ts";
@@ -47,6 +56,9 @@ import type { createTurnDispatch } from "./turn-dispatch.ts";
 import type { createGroupState } from "./group-state.ts";
 import type { createEventsPipeline } from "./events-pipeline.ts";
 
+// Behind a proxy or tunnel, the base URL senders should use (docs/self-hosting.md).
+const WEBHOOK_PUBLIC_URL = process.env.OMB_WEBHOOK_PUBLIC_URL || undefined;
+
 type TurnIntegrations = ReturnType<typeof createTurnIntegrations>;
 type ComputerLifecycleWiring = ReturnType<typeof createComputerLifecycleWiring>;
 type RoutineLifecycle = ReturnType<typeof createRoutineLifecycle>;
@@ -55,15 +67,20 @@ type GroupState = ReturnType<typeof createGroupState>;
 type EventsPipeline = ReturnType<typeof createEventsPipeline>;
 
 /** Everything the boot tail reads from its host. The server and request
- * handler are index.ts's listeners-in-waiting; the managers and the webhook
- * ingress are bound later or reloaded, so they cross as thunks; the two lets
- * the region reassigns cross as { get, set } accessors. */
+ * handler are index.ts's listeners-in-waiting; the managers are bound later
+ * or reloaded, so they cross as thunks; the webhook ingress bindings and
+ * the lets the region reassigns cross as { get, set } accessors; the
+ * local-VM inventory helpers and the webhook receiver's manager and port
+ * cross by value. */
 export interface BootSequenceDeps {
   server: Server<typeof IncomingMessage, typeof ServerResponse>;
   handleRequest: (req: IncomingMessage, res: ServerResponse) => unknown;
   calendarCalls(): CalendarCallManager | null;
   routines(): RoutineManager | null;
-  webhookIngress(): WebhookIngress | null;
+  webhookIngress: { get(): WebhookIngress | null; set(value: WebhookIngress | null): void };
+  webhookIngressError: { get(): string | null; set(value: string | null): void };
+  webhooks: WebhookManager;
+  WEBHOOK_PORT: number;
   workspaceAccess: { get(): WorkspaceAccess | null; set(value: WorkspaceAccess | null): void };
   companyShutdown: { get(): boolean; set(value: boolean): void };
   sessions: SessionRegistry;
@@ -82,6 +99,8 @@ export interface BootSequenceDeps {
   sharedComputerControl: ComputerLifecycleWiring["sharedComputerControl"];
   browserLive: TurnIntegrations["browserLive"];
   localVmIdles: ComputerLifecycleWiring["localVmIdles"];
+  noteLocalVmSeen: ComputerLifecycleWiring["noteLocalVmSeen"];
+  localVmIdleFor: ComputerLifecycleWiring["localVmIdleFor"];
   watchdog: EventsPipeline["watchdog"];
   managedDesktop: ManagedDesktopProviders;
   temporaryBrowserSessions: TurnIntegrations["temporaryBrowserSessions"];
@@ -98,6 +117,9 @@ export async function runBootSequence(deps: BootSequenceDeps): Promise<void> {
     calendarCalls,
     routines,
     webhookIngress,
+    webhookIngressError,
+    webhooks,
+    WEBHOOK_PORT,
     workspaceAccess,
     companyShutdown,
     sessions,
@@ -116,6 +138,8 @@ export async function runBootSequence(deps: BootSequenceDeps): Promise<void> {
     sharedComputerControl,
     browserLive,
     localVmIdles,
+    noteLocalVmSeen,
+    localVmIdleFor,
     watchdog,
     managedDesktop,
     temporaryBrowserSessions,
@@ -124,6 +148,47 @@ export async function runBootSequence(deps: BootSequenceDeps): Promise<void> {
     roomHandoffs,
     isContextMessage,
   } = deps;
+
+  // A running VM may have survived an app/server restart. Start its idle
+  // backstop even if nobody opens Settings or begins a turn this session. The
+  // bot's current destination is intentionally ignored: moving a bot to Cloud,
+  // Browser, This computer, Auto, or Off does not delete its old Local VM.
+  void (async () => {
+    if (localVmMode(cfg) !== "per-bot") {
+      const status = await containerComputerStatus(undefined, undefined, SHARED_LOCAL_VM_TARGET).catch(() => null);
+      noteLocalVmSeen(SHARED_LOCAL_VM_TARGET, status);
+      if (shouldArmLocalVmIdle(status)) localVmIdleFor(SHARED_LOCAL_VM_TARGET).touch();
+      return;
+    }
+    const runtime = await containerRuntimeStatus().catch(() => null);
+    if (!runtime?.runtime || !runtime.daemonUp) return;
+    const existing = await discoverExistingPerBotLocalVms(store.bots, runtime.runtime).catch(() => []);
+    const statuses = await Promise.all(existing.map(({ target }) =>
+      containerComputerStatus(undefined, undefined, target).catch(() => null),
+    ));
+    existing.forEach(({ target }, index) => {
+      noteLocalVmSeen(target, statuses[index]);
+      if (shouldArmLocalVmIdle(statuses[index])) localVmIdleFor(target).touch();
+    });
+  })().catch(() => {
+    // Startup inspection is a backstop, not a reason to keep the app offline.
+    // The Settings inventory remains available for a later explicit retry.
+  });
+
+  // Webhook definitions are independent from calendar schedules, but every
+  // delivery joins the same RoutineManager queue. That keeps unattended work
+  // ordered behind a busy MAUS and gives webhook runs the same durable receipts.
+  try {
+    webhookIngress.set(await listenWebhookIngress(webhooks, {
+      port: WEBHOOK_PORT, publicBaseUrl: WEBHOOK_PUBLIC_URL,
+      claimRequest: () => workspaceMaintenance.request(),
+    }));
+    const advertised = WEBHOOK_PUBLIC_URL ? ` (advertised as ${webhookIngress.get()!.baseUrl})` : "";
+    console.log(`openmausbot webhook receiver on http://${webhookIngress.get()!.host}:${webhookIngress.get()!.port}${advertised}`);
+  } catch (error) {
+    webhookIngressError.set(error instanceof Error ? error.message : String(error));
+    console.error(`openmausbot webhook receiver unavailable: ${webhookIngressError.get()}`);
+  }
 
   calendarCalls()!.start();
 
@@ -279,7 +344,7 @@ export async function runBootSequence(deps: BootSequenceDeps): Promise<void> {
         watchdog.stop();
         routines()?.stop();
         calendarCalls()?.stop();
-        webhookIngress()?.server.close();
+        webhookIngress.get()?.server.close();
         tunnelListener?.close();
       },
       async () => { await managedDesktop.close(); await registry.disposeAll(); },
