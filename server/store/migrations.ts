@@ -308,8 +308,20 @@ export function migrateBotTaskBackfill(bots: BotRecord[], deps: MigrationDeps): 
       task.activity = "idle";
       delete task.turnStartedAt;
     }
+    const beforeThreadId = b.threadId;
+    const beforeResumeCursors = JSON.stringify(b.resumeCursors);
+    const beforeRewound = b.rewound;
+    const beforePinnedMessageId = b.pinnedMessageId;
     mirrorActiveTask(b, active);
-    b.unread = b.tasks.some((task) => task.unread);
+    if (
+      b.threadId !== beforeThreadId ||
+      JSON.stringify(b.resumeCursors) !== beforeResumeCursors ||
+      b.rewound !== beforeRewound ||
+      b.pinnedMessageId !== beforePinnedMessageId
+    ) changed = true;
+    const unread = b.tasks.some((task) => task.unread);
+    if (b.unread !== unread) changed = true;
+    b.unread = unread;
   }
   return changed;
 }
@@ -322,6 +334,7 @@ export function migrateBotTaskBackfill(bots: BotRecord[], deps: MigrationDeps): 
 export function migrateGroupSessionState(groups: GroupRecord[]): boolean {
   let changed = false;
   for (const g of groups) {
+    if (g.busyBotId) changed = true;
     g.busyBotId = null;
     delete g.turnStartedAt;
     const normalized = normalizeGroupDefaultResponder(g.defaultResponder, g.memberIds, Boolean(g.dm));
@@ -360,6 +373,8 @@ export function migrateGroupTasks(groups: GroupRecord[], deps: MigrationDeps): b
       g.threadId = active.threadId;
       changed = true;
     }
+    if (g.pinnedCwd !== active.pinnedCwd) changed = true;
+    if (g.pinnedMessageId !== active.pinnedMessageId) changed = true;
     g.pinnedCwd = active.pinnedCwd;
     g.pinnedMessageId = active.pinnedMessageId;
   }

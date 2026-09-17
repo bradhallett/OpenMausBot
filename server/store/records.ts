@@ -194,7 +194,7 @@ export function mentionedBots<T extends { name: string; hidden?: boolean }>(text
       const name = p.name.toLowerCase();
       if (!rest.startsWith(name)) return false;
       const after = rest[name.length]; // must not run into a longer word
-      return after === undefined || !/[a-z0-9]/i.test(after);
+      return after === undefined || !/[\p{L}\p{M}\p{N}_]/u.test(after);
     });
     if (hit && !found.includes(hit)) found.push(hit);
   }
