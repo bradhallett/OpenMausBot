@@ -7230,6 +7230,11 @@ describe("harness HTTP API", () => {
           OMB_PORT: String(isolatedPort),
           OMB_WEBHOOK_PORT: String(isolatedPort + 1),
           OMB_STATIC_DIR: isolatedStatic,
+          // Never resolve a real agent-browser from the ambient PATH: under
+          // this long per-user temp home its cleanup socket path would blow
+          // the 103-byte unix limit, so the committed wipe could never be
+          // acknowledged. Resolve to no engine instead, exactly as on CI.
+          OMB_AGENT_BROWSER_PATH: join(isolatedHome, "no-agent-browser"),
           FAKE_CLAUDE_MODE: "hang",
           FAKE_CLAUDE_DUMP: join(isolatedHome, "fake-claude-dump.json"),
         },
