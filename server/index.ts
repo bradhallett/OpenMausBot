@@ -1,9 +1,8 @@
 // OpenMausBot server — the harness host. Clients hold no transports
 // (upstream rule): the React app dispatches typed commands over HTTP and
 // folds one SSE event stream; every provider process runs here.
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, rmSync } from "node:fs";
-import { rm as removeDirectory } from "node:fs/promises";
+import { timingSafeEqual } from "node:crypto";
+import { readFileSync, rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { extname, join } from "node:path";
 
@@ -15,28 +14,21 @@ import { escapeAttribute } from "../shared/attachments.ts";
 
 import {
   BrowserCleanupCoordinator,
-  requireBrowserCleanupAcknowledged,
   type BrowserCleanupWireRequest,
 } from "./browser-lifecycle-cleanup.ts";
-import { appendDecision, flushDecisionLog } from "./decision-log.ts";
+import { flushDecisionLog } from "./decision-log.ts";
 import { validateBotCwd } from "./bot-cwd.ts";
 import {
   cleanupStaleAttachmentPartials,
 } from "./attachments.ts";
-import * as box from "./box.ts";
 import { TeamComputers } from "./team-computers.ts";
 import type { WireGroup } from "../shared/wire.ts";
-import { boxCreateRecoverySnapshot } from "./box-create-idempotency.ts";
-import { boxDeletionSnapshot } from "./box-delete-journal.ts";
 import * as composio from "./composio.ts";
 import { canAccessTeam } from "./peer-roster.ts";
 import {
-  containerComputerAction,
   containerComputerStatus,
   containerRuntimeStatus,
-  perBotLocalVmTarget,
   SHARED_LOCAL_VM_TARGET,
-  type LocalVmTarget,
 } from "./container-computer.ts";
 import {
   instanceConfigs,
@@ -46,7 +38,6 @@ import {
   saveConfig,
   sharedComputersEnabled,
   builtInBrowserEnabled,
-  vpsSshAlias,
   roomHandoffLimits,
   DATA_DIR,
 } from "./config.ts";
@@ -76,7 +67,7 @@ import { restoreChannelMessages } from "./channel-queue.ts";
 import { SendSequencer } from "./send-idempotency.ts";
 import { EventBus } from "./harness/bus.ts";
 import { ManagedDesktopProviders } from "./managed-desktop.ts";
-import { cancelPeerApprovalsFor, dismissStalePeerCards, type ApprovalBus } from "./peer-approval.ts";
+import { dismissStalePeerCards, type ApprovalBus } from "./peer-approval.ts";
 import { withPeerProvenance } from "./peer-provenance.ts";
 import {
   titleFromLlm,
@@ -88,18 +79,13 @@ import {
 import { recordHanded } from "./delta-context.ts";
 import type { TurnOwner } from "./turn-resources.ts";
 import { flushAllMemoryJournals } from "./memory-journal.ts";
-import {
-  applyStagedSkillWrite,
-  getStagedSkillWrite,
-  listStagedSkillWrites,
-  rejectStagedSkillWrite,
-} from "./skills.ts";
-import type { SkillRequestCardData } from "../shared/skill-request.ts";
 import { discoverExistingPerBotLocalVms, shouldArmLocalVmIdle } from "./local-vm-inventory.ts";
 
 import * as vps from "./vps-computer.ts";
+import { createBotLifecycle } from "./bot-lifecycle.ts";
 import { createEventsPipeline } from "./events-pipeline.ts";
 import { createRoutineLifecycle } from "./routine-lifecycle.ts";
+import { createSkillLifecycle } from "./skill-lifecycle.ts";
 import { createTeamSetupLifecycle } from "./team-setup-lifecycle.ts";
 import { createTurnDispatch } from "./turn-dispatch.ts";
 import { RoutineManager } from "./routines.ts";
@@ -113,7 +99,6 @@ import {
 
 
 
-import type { TeamSetupRequest } from "../shared/team-setup.ts";
 import { flushAllProfileHistory } from "./profile-versions.ts";
 import { listenWebhookIngress, type WebhookIngress } from "./webhook-ingress.ts";
 import { WebhookManager } from "./webhooks.ts";
@@ -212,7 +197,6 @@ import {
   claimTurnResource,
   directTurnBots,
   directTurnDispatchClaims,
-  hasDirectDispatch,
   threadBusy,
   turnComputerResources,
   turnResourceOwners,
@@ -1779,7 +1763,8 @@ const {
   },
   helpers: {
     interruptAllDirectThreads, activeGroupTurnForBot, fullAccessForSource,
-    proposalPersistence, deliverCalendarCall,
+    proposalPersistence: (botId, threadId) => proposalPersistence(botId, threadId),
+    deliverCalendarCall,
   },
   host: {
     routines: () => routines,
@@ -1787,228 +1772,37 @@ const {
     setCalendarCalls: (next) => { calendarCalls = next; },
   },
 });
-async function deleteBotWithLifecycle(botId: string, revalidate: () => void = () => {}, setupRequest?: TeamSetupRequest) {
-  const deletionResponse = (status: number, body: { error?: string; ok?: boolean }) => ({ status, body });
-      revalidate();
-      const bot = store.bot(botId);
-      if (!bot) return deletionResponse( 404, { error: "no such bot" });
-      if (computerProviderConfigTransitions.size > 0) {
-        return deletionResponse( 409, { error: "computer provider settings are being updated — wait before deleting this bot" });
-      }
-      if (localVmModeChangeBusy) {
-        return deletionResponse(409, { error: "Local VM settings are being updated — wait before deleting this bot" });
-      }
-      if (boxLifecycleBusyBots.has(bot.id)) {
-        return deletionResponse( 409, { error: "wait for this bot's cloud computer action to finish before deleting the bot" });
-      }
-      const activeRoutine = routines!.activeRunForBot(bot.id);
-      if (activeRoutine) {
-        return deletionResponse( 409, {
-          error: "stop this bot's active routine before deleting the bot",
-        });
-      }
-      const activeGroup = activeGroupTurnForBot(bot.id);
-      if (activeGroup) {
-        return deletionResponse( 409, {
-          error: `stop this bot's work in channel ${activeGroup.group.name} before deleting the bot`,
-        });
-      }
-      // A direct turn that has already claimed the bot can provision a Box in
-      // its background setup. Do not let deletion race that work while a Box
-      // account is configured; the person can stop the turn and retry.
-      if ((box.boxConfigured(cfg) || vpsSshAlias(cfg)) && (bot.busy || hasDirectDispatch(bot.id))) {
-        return deletionResponse( 409, { error: "stop this bot's work before checking and deleting its cloud computer" });
-      }
-      const botBoxRecovery = boxCreateRecoverySnapshot().filter((entry) => entry.botId === bot.id);
-      const botBoxDeletions = boxDeletionSnapshot().filter((entry) => entry.ownerBotId === bot.id);
-      if (botBoxRecovery.some((entry) => !entry.resolved)) {
-        return deletionResponse( 409, {
-          error: "finish reconciling this bot's pending cloud computer creation before deleting it — check ascii.dev, then retry Box setup",
-        });
-      }
-      // Bot deletion awaits VM/browser/provider cleanup. Claim the bot and
-      // every channel it belongs to before that first await so a phone save
-      // cannot begin halfway through teardown (or vice versa). The computer
-      // lifecycle claim is synchronous too, so either both claims are held or
-      // neither survives this request.
-      const releaseComputerLifecycle = claimBotComputerLifecycle(bot.id);
-      const releasePhoneSecretMutation = claimPhoneSecretBotDeletion(bot.id);
-      if (!releasePhoneSecretMutation) {
-        releaseComputerLifecycle();
-        return deletionResponse( 409, { error: "this bot or one of its channels is securely saving a credential" });
-      }
-      let claimedLocalVmTarget: LocalVmTarget | null = null;
-      try {
-        let localVmCleanup: { target: LocalVmTarget; removeContainer: boolean } | null = null;
-        if (localVmMode(cfg) === "per-bot") {
-          const target = perBotLocalVmTarget(bot.id);
-          if (localVmActiveThreads.has(target.key) || localVmLifecycleBusy.has(target.key)) {
-            return deletionResponse( 409, { error: "stop this bot's Local VM turn or setup action before deleting the bot" });
-          }
-          if (localVmLeaseFor(target).current(localVmOwnerBusy)) {
-            return deletionResponse(409, { error: "stop this bot's Local VM turn before deleting the bot" });
-          }
-          // Hold the target from preflight through deletion. A simultaneous
-          // mode change or lifecycle route must not recreate the container
-          // after we checked it and before its bot owner disappears.
-          localVmLifecycleBusy.add(target.key);
-          claimedLocalVmTarget = target;
-          const vm = await containerComputerStatus(undefined, undefined, target);
-          if (!vm.daemonUp && existsSync(target.workspaceDir)) {
-            return deletionResponse( 409, {
-              error: "start the container runtime so OpenMausBot can remove this bot's Local VM while deleting it",
-            });
-          }
-          if (vm.container !== "missing" && !vm.managed) {
-            return deletionResponse(409, {
-              error: `The container named ${vm.container_name} was not created by OpenMausBot. Remove it manually before deleting this bot`,
-            });
-          }
-          localVmCleanup = {
-            target,
-            removeContainer: vm.container !== "missing",
-          };
-        }
-
-        // Preflight every provider before deleting any resource. Cleanup can
-        // still fail mid-flight across independent providers, but a missing
-        // credential or offline daemon should not cause avoidable partial work.
-        const vpsInventory = await vps.listManagedVpsComputers(cfg, managedBoxOwners());
-        if (vpsInventory.configured && !vpsInventory.available) {
-          return deletionResponse( 503, {
-            error: `${vpsInventory.problem ?? "VPS computer inventory is unavailable"}. The bot was kept so its computer can be retried safely`,
-          });
-        }
-        const ownedVpsComputers = vpsInventory.instances.filter((instance) => instance.ownerBotId === bot.id);
-
-        if ((botBoxRecovery.length > 0 || botBoxDeletions.length > 0) && !box.boxConfigured(cfg)) {
-          return deletionResponse(409, {
-            error: "Reconnect the Box account that owns this bot's remembered cloud computer, then retry deletion",
-          });
-        }
-        const cloudInventory = await box.listManagedBoxes(cfg, managedBoxOwners());
-        if (cloudInventory.configured && !cloudInventory.available) {
-          return deletionResponse( 503, {
-            error: `${cloudInventory.problem ?? "cloud computer inventory is unavailable"}. The bot was kept so its computer can be retried safely`,
-          });
-        }
-        const ownedBoxComputers = cloudInventory.instances.filter((instance) => instance.ownerBotId === bot.id);
-
-        // Revalidate a reviewed Chief-of-Staff request and establish the
-        // browser cleanup intent before the first irreversible provider
-        // mutation. A stale review or damaged journal therefore leaves every
-        // computer intact. Cross-provider rollback is impossible, so every
-        // subsequent operation is exact and retry-safe.
-        revalidate();
-        const browserCleanupRequest = browserCleanup.prepare("bot", bot.id);
-        try {
-          // Provider-owned computers are durable, billable resources. Remove
-          // each exact, freshly revalidated identity before making its bot
-          // owner disappear. Shared team computers use a different owner id
-          // and are intentionally absent from these lists.
-          for (const instance of ownedBoxComputers) {
-            const removed = await box.deleteManagedBox(cfg, managedBoxOwners(), instance.boxId, instance.name);
-            if (removed.pending) {
-              throw Object.assign(
-                new Error("The cloud computer deletion has started but is still finishing. The bot was kept; retry in a moment"),
-                { status: 409 },
-              );
-            }
-          }
-          for (const instance of ownedVpsComputers) {
-            await vps.removeManagedVpsComputer(cfg, managedBoxOwners(), instance.name, instance.name);
-          }
-          if (localVmCleanup) {
-            if (localVmCleanup.removeContainer) {
-              await containerComputerAction("remove", undefined, undefined, localVmCleanup.target);
-            }
-            // Unlike the standalone "Delete VM" action, deleting the bot is
-            // a complete erasure: its now-ownerless desktop files and browser
-            // session must not remain hidden on disk or block the event loop.
-            await removeDirectory(localVmCleanup.target.workspaceDir, { recursive: true, force: true });
-            localVmSeen.delete(localVmCleanup.target.key);
-            localVmIdles.get(localVmCleanup.target.key)?.cancel();
-            localVmIdles.delete(localVmCleanup.target.key);
-            localVmLeases.forget(localVmCleanup.target.key);
-          }
-          // a running turn dies with its bot
-          // Invalidate every bot-callable bearer before the first asynchronous
-          // teardown step. A request that already passed its initial header
-          // check is revalidated after its body arrives and must fail closed.
-          for (const entry of pendingTeamSetupResumes.values()) {
-            if (entry.request.botId === bot.id) cancelTeamSetupResumesForThread(entry.request.threadId);
-          }
-          for (const task of store.tasks(bot.id)) {
-            cancelTeamSetupResumesForThread(task.threadId);
-            revokeInternalCapabilitiesForThread(task.threadId);
-          }
-          await interruptAllDirectThreads(bot.id);
-          // Deletion removes the thread before a late turn.completed can fold
-          // staged provider images into a message, so dispose them here.
-          for (const task of store.tasks(bot.id)) {
-            purgeGeneratedImagesForThread(task.threadId);
-            settleDirectFollowup(directTurnGenerationByThread.get(task.threadId));
-            directTurnGenerationByThread.delete(task.threadId);
-            directTurnBots.delete(task.threadId);
-          }
-          stopScreenPoller(bot.id);
-          activeVpsThreads.delete(bot.id);
-          lastReply.delete(bot.threadId);
-          // a peer approval naming this bot can never be meaningfully answered
-          // now, and its caller would otherwise wait out the 15-minute timeout
-          cancelPeerApprovalsFor(bot.id);
-          discardDelegations(commsBus, bot.threadId);
-          computerControl.forget(bot.id);
-          computerControlRevision.delete(bot.id);
-          const target = perBotLocalVmTarget(bot.id);
-          localVmIdles.get(target.key)?.cancel();
-          localVmIdles.delete(target.key);
-          // Provider and local-computer teardown above can await for an
-          // arbitrary amount of time. A reviewed Chief deletion is bound to
-          // the exact target profile it presented; re-check that receipt at
-          // the final durable mutation boundary so a concurrent profile edit
-          // cannot be erased under a stale approval.
-          revalidate();
-          store.deleteBot(bot.id, setupRequest);
-          // Removing schedules is not a security revocation. Keep them intact
-          // if the bot/receipt write fails, so a failed deletion is retryable.
-          routines!.disableForBot(bot.id);
-          webhooks.disableForBot(bot.id);
-          calendarCalls!.removeBot(bot.id);
-          browserLive.closeForBot(bot.id);
-          await forgetTemporaryBrowser(bot.id);
-        } catch (error) {
-          if (browserCleanupRequest) {
-            // Store removal is already durable once the in-memory owner is
-            // gone. A later cleanup error must retain its browser erasure
-            // intent for retry instead of aborting a completed deletion.
-            if (store.bot(bot.id)) browserCleanup.abort(browserCleanupRequest);
-            else browserCleanup.commit(browserCleanupRequest);
-          }
-          throw error;
-        }
-        if (browserCleanupRequest) {
-          const committedCleanup = browserCleanup.commit(browserCleanupRequest);
-          const acknowledged = await browserCleanup.ensure(committedCleanup);
-          requireBrowserCleanupAcknowledged(acknowledged, `Browser data for ${bot.name}`);
-        }
-        return deletionResponse( 200, { ok: true });
-      } finally {
-        if (claimedLocalVmTarget) localVmLifecycleBusy.delete(claimedLocalVmTarget.key);
-        releaseComputerLifecycle();
-        releasePhoneSecretMutation();
-      }
-}
+const { deleteBotWithLifecycle } = createBotLifecycle({
+  computer: {
+    computerProviderConfigTransitions, boxLifecycleBusyBots, claimBotComputerLifecycle, managedBoxOwners,
+    localVmOwnerBusy, localVmLeases, localVmLeaseFor, localVmActiveThreads, localVmLifecycleBusy,
+    localVmSeen, localVmIdles, activeVpsThreads, computerControl, computerControlRevision,
+  },
+  helpers: {
+    activeGroupTurnForBot, interruptAllDirectThreads, purgeGeneratedImagesForThread,
+    settleDirectFollowup, directTurnGenerationByThread, stopScreenPoller, lastReply,
+    browserCleanup, browserLive, forgetTemporaryBrowser, commsBus,
+    pendingTeamSetupResumes, cancelTeamSetupResumesForThread,
+  },
+  lateBound: {
+    routines: () => routines,
+    calendarCalls: () => calendarCalls,
+    localVmModeChangeBusy: () => localVmModeChangeBusy,
+    webhooks: () => webhooks,
+    claimPhoneSecretBotDeletion: (botId) => claimPhoneSecretBotDeletion(botId),
+  },
+});
 
 // ── team setup / profile request cards ──────────────────────────────────
 // The ProfileRequestService and TeamSetupRequestService wiring with their
 // card resolution/send helpers (including resolveAndSendProfile, which
 // physically sat just before the WebhookManager wiring) live in
 // ./team-setup-lifecycle.ts; index.ts wires it at profileRequests'
-// original site. deleteBotWithLifecycle stays above and crosses by value.
+// original site. deleteBotWithLifecycle lives in ./bot-lifecycle.ts, wired
+// above this cluster, and crosses by value.
 const { profileRequests, teamSetupTeams, teamSetupRequests, resolveAndSendTeamSetup, resolveAndSendProfile } = createTeamSetupLifecycle({
   helpers: {
-    fullAccessForSource, proposalPersistence, assertTeamComputerChangeIdle, connectorThread,
+    fullAccessForSource, proposalPersistence: (botId, threadId) => proposalPersistence(botId, threadId), assertTeamComputerChangeIdle, connectorThread,
     activeGroupTurnForBot, checkedModelSelection, wireBot, teamSetupResumeGenerations,
     dispatchTeamSetupResume, broadcast, deleteBotWithLifecycle,
   },
@@ -2200,320 +1994,13 @@ function roomPostEligibility(
   return { ok: true };
 }
 
-function proposalPersistence(botId: string, threadId: string) {
-  if (!store.bot(botId)) {
-    return { ok: false as const, status: 403, error: "unknown sender" };
-  }
-  if (!connectorThread(botId, threadId)) {
-    return { ok: false as const, status: 403, error: "source conversation does not belong to sender" };
-  }
-  if (fullAccessForSource(botId, threadId)) return { ok: true as const };
-  // Only cards on the visible branch can be acted on from the composer.
-  // Abandoned branches must not permanently consume the proposal quota.
-  // Routine and profile proposals share one budget per bot per thread, so
-  // one thread cannot pile up 8 of each.
-  const openRequests = store.activePath(threadId).filter(
-    (message) =>
-      (message.card?.routineRequest?.botId === botId || message.card?.profileRequest?.botId === botId || message.card?.teamSetupRequest?.botId === botId) &&
-      !message.card.answered &&
-      !message.card.dismissed,
-  ).length;
-  return openRequests >= 8
-    ? { ok: false as const, status: 429, error: "confirm or cancel an existing proposal first" }
-    : { ok: true as const };
-}
-
-function skillProposalPersistence(botId: string, threadId: string) {
-  if (!store.bot(botId)) {
-    return { ok: false as const, status: 403, error: "unknown sender" };
-  }
-  if (!connectorThread(botId, threadId)) {
-    return { ok: false as const, status: 403, error: "source conversation does not belong to sender" };
-  }
-  if (fullAccessForSource(botId, threadId)) return { ok: true as const };
-  const openRequests = store.activePath(threadId).filter(
-    (message) =>
-      message.card?.skillRequest?.botId === botId &&
-      !message.card.answered &&
-      !message.card.dismissed,
-  ).length;
-  return openRequests >= 8
-    ? { ok: false as const, status: 429, error: "confirm or cancel an existing learned-skill card first" }
-    : { ok: true as const };
-}
-
-/** Listing endpoints expose lifecycle metadata, never the staged instructions
- * themselves. The exact review copy lives only on the durable approval card. */
-function stagedSkillListing(staged: ReturnType<typeof listStagedSkillWrites>[number]) {
-  const { files: _files, baseSha256: _baseSha256, baseAppliedStageId: _baseAppliedStageId, ...listing } = staged;
-  return listing;
-}
-
-/** Capture proposal cleanup before a transcript is deleted. Staged writes
- * are bot-scoped and live outside the thread, so deleting the only card
- * without this would reserve its name for up to 30 days with no decision UI.
- * Ownership comes from the server-authored sender, never the card payload. */
-function stagedSkillCleanupsForThread(threadId: string): Array<{ botId: string; stagedId: string }> {
-  const directOwner = store.botByThread(threadId)?.id;
-  const seen = new Set<string>();
-  const cleanups: Array<{ botId: string; stagedId: string }> = [];
-  for (const message of store.messagesFor(threadId)) {
-    const request = message.card?.skillRequest;
-    const botId = message.from?.botId ?? directOwner;
-    if (!request || !botId) continue;
-    const key = `${botId}:${request.stagedId}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    cleanups.push({ botId, stagedId: request.stagedId });
-  }
-  return cleanups;
-}
-
-function rejectDeletedThreadSkillStages(cleanups: Array<{ botId: string; stagedId: string }>): void {
-  for (const cleanup of cleanups) rejectStagedSkillWrite(cleanup.botId, cleanup.stagedId);
-}
-
-function skillCardCopy(staged: { action: "create" | "update"; name: string; gist: string; warnings: string[] }): {
-  title: string;
-  subtitle: string;
-  tool: string;
-} {
-  const warnings = staged.warnings.length ? `\n\nWarnings:\n- ${staged.warnings.join("\n- ")}` : "";
-  return {
-    title: staged.action === "create"
-      ? `Enable skill "${staged.name}"?`
-      : `Update skill "${staged.name}"?`,
-    subtitle: `${staged.gist || staged.name}\n\nAdds one line to the prompt index; the body is read only when used.${warnings}`,
-    tool: "stage_skill",
-  };
-}
-
-function appendSkillRequestCard(args: {
-  botId: string;
-  threadId: string;
-  applied?: boolean;
-  staged: {
-    id: string;
-    action: "create" | "update";
-    name: string;
-    gist: string;
-    source: string;
-    files: Array<{ path: string; content: string }>;
-    sha256: string;
-    warnings: string[];
-  };
-}): { requestId: string; summary: string } {
-  const requestId = randomUUID();
-  const copy = skillCardCopy(args.staged);
-  const payload: SkillRequestCardData = {
-    version: 1,
-    requestId,
-    botId: args.botId,
-    threadId: args.threadId,
-    stagedId: args.staged.id,
-    action: args.staged.action,
-    name: args.staged.name,
-    gist: args.staged.gist,
-    source: args.staged.source,
-    preview: args.staged.files.find((file) => file.path === "SKILL.md")?.content ?? "",
-    sha256: args.staged.sha256,
-    warnings: args.staged.warnings,
-    createdAt: Date.now(),
-  };
-  const from = store.bot(args.botId);
-  store.appendMessage(args.threadId, {
-    role: "bot",
-    kind: "options",
-    from: from ? { botId: from.id, name: from.name, color: from.color } : undefined,
-    card: {
-      title: copy.title,
-      subtitle: copy.subtitle,
-      options: args.applied ? [] : [args.staged.action === "create" ? "Enable" : "Update", "Deny"],
-      ...(args.applied ? { answered: "allow", title: `Skill "${args.staged.name}" ${args.staged.action === "create" ? "enabled" : "updated"}` } : {}),
-      requestId,
-      tool: copy.tool,
-      skillRequest: payload,
-    },
-  });
-  return {
-    requestId,
-    summary: `${copy.title} ${args.staged.gist}`.trim(),
-  };
-}
-
-function resolveSkillRequest(args: {
-  botId: string;
-  botName?: string;
-  threadId: string;
-  requestId: string;
-  behavior: "allow" | "deny" | "answer";
-  reviewedSha256?: string;
-}):
-  | { claimed: false }
-  | { claimed: true; status: number; error: string }
-  | { claimed: true; outcome: "allowed-once" | "rejected"; alreadySettled?: true } {
-  const message = store.messagesFor(args.threadId).find(
-    (candidate) => candidate.card?.requestId === args.requestId && candidate.card.skillRequest,
-  );
-  const card = message?.card;
-  const request = card?.skillRequest;
-  if (!request || !card || !message) return { claimed: false };
-  if (request.botId !== args.botId) {
-    return { claimed: true, status: 403, error: "this skill request belongs to a different bot" };
-  }
-  if (card.answered || card.dismissed) {
-    // Settlement is durable before cleanup. Retry cleanup for either outcome
-    // so a disk failure cannot leave a denied name permanently reserved.
-    const cleanup = rejectStagedSkillWrite(args.botId, request.stagedId);
-    if ("applied" in cleanup && cleanup.applied && card.answered !== "allow") {
-      store.patchMessage(args.threadId, message.id, {
-        card: { ...card, answered: "allow", dismissed: false, held: undefined },
-      });
-      return { claimed: true, outcome: "allowed-once", alreadySettled: true };
-    }
-    return { claimed: true, outcome: card.answered === "allow" ? "allowed-once" : "rejected", alreadySettled: true };
-  }
-  if (args.behavior !== "allow") {
-    const rejected = rejectStagedSkillWrite(args.botId, request.stagedId);
-    if ("error" in rejected && rejected.error !== "no such staged skill") {
-      return { claimed: true, status: 409, error: rejected.error };
-    }
-    if ("applied" in rejected) {
-      store.patchMessage(args.threadId, message.id, {
-        card: { ...card, answered: "allow", dismissed: false, held: undefined },
-      });
-      appendDecision(DATA_DIR, {
-        threadId: args.threadId,
-        requestId: args.requestId,
-        botId: args.botId,
-        botName: args.botName,
-        tool: card.tool,
-        summary: card.subtitle,
-        decision: "user-approved",
-        source: "user",
-      });
-      return { claimed: true, outcome: "allowed-once" };
-    }
-    store.patchMessage(args.threadId, message.id, {
-      card: { ...card, answered: "deny", dismissed: true, held: undefined },
-    });
-    appendDecision(DATA_DIR, {
-      threadId: args.threadId,
-      requestId: args.requestId,
-      botId: args.botId,
-      botName: args.botName,
-      tool: card.tool,
-      summary: card.subtitle,
-      decision: "user-denied",
-      source: "user",
-    });
-    return { claimed: true, outcome: "rejected" };
-  }
-  if (typeof request.preview !== "string" || typeof request.sha256 !== "string") {
-    return {
-      claimed: true,
-      status: 409,
-      error: "this proposal was created by an older build — deny it and ask the bot to create it again",
-    };
-  }
-  if (args.reviewedSha256 !== request.sha256) {
-    return {
-      claimed: true,
-      status: 409,
-      error: "reviewedSha256 must match the skill shown on the approval card",
-    };
-  }
-  const previewSha256 = createHash("sha256").update(request.preview).digest("hex");
-  if (previewSha256 !== request.sha256) {
-    return { claimed: true, status: 422, error: "the skill preview changed after review — deny and recreate it" };
-  }
-  const staged = getStagedSkillWrite(args.botId, request.stagedId);
-  if (!staged) {
-    // A later proposal may have pruned this already-applied replay record.
-    // The protected manifest still binds the stage id and reviewed hash, so
-    // the old card can be settled without asking the model to recreate it.
-    const replayed = applyStagedSkillWrite(args.botId, request.stagedId, {
-      expectedSha256: request.sha256,
-    });
-    if (
-      "error" in replayed ||
-      replayed.name !== request.name ||
-      replayed.source !== request.source
-    ) {
-      return {
-        claimed: true,
-        status: 422,
-        error: "the staged skill no longer matches this approval card",
-      };
-    }
-    const patched = store.patchMessage(args.threadId, message.id, {
-      card: { ...card, answered: "allow", held: undefined },
-    });
-    if (!patched) {
-      return { claimed: true, status: 409, error: "the learned-skill approval card is no longer available" };
-    }
-    appendDecision(DATA_DIR, {
-      threadId: args.threadId,
-      requestId: args.requestId,
-      botId: args.botId,
-      botName: args.botName,
-      tool: card.tool,
-      summary: card.subtitle,
-      decision: "user-approved",
-      source: "user",
-    });
-    return { claimed: true, outcome: "allowed-once" };
-  }
-  if (
-    request.requestId !== args.requestId ||
-    request.threadId !== args.threadId ||
-    staged.action !== request.action ||
-    staged.name !== request.name ||
-    staged.source !== request.source ||
-    staged.sha256 !== request.sha256
-  ) {
-    return { claimed: true, status: 422, error: "the staged skill no longer matches this approval card" };
-  }
-  const applied = applyStagedSkillWrite(args.botId, request.stagedId, {
-    expectedSha256: request.sha256,
-    onApplied: () => {
-      const patched = store.patchMessage(args.threadId, message.id, {
-        card: { ...card, answered: "allow", held: undefined },
-      });
-      if (!patched) throw new Error("the learned-skill approval card is no longer available");
-    },
-  });
-  if ("error" in applied) {
-    store.patchMessage(args.threadId, message.id, {
-      card: { ...card, held: applied.error },
-    });
-    return { claimed: true, status: 422, error: applied.error };
-  }
-  appendDecision(DATA_DIR, {
-    threadId: args.threadId,
-    requestId: args.requestId,
-    botId: args.botId,
-    botName: args.botName,
-    tool: card.tool,
-    summary: card.subtitle,
-    decision: "user-approved",
-    source: "user",
-  });
-  return { claimed: true, outcome: "allowed-once" };
-}
-
-function sendSkillResolution(
-  res: ServerResponse,
-  result: ReturnType<typeof resolveSkillRequest>,
-): boolean {
-  if (!result.claimed) return false;
-  if ("error" in result) {
-    json(res, result.status, { error: result.error });
-    return true;
-  }
-  json(res, 200, { ok: true, outcome: result.outcome, alreadySettled: result.alreadySettled });
-  return true;
-}
+const {
+  proposalPersistence, skillProposalPersistence, stagedSkillListing,
+  stagedSkillCleanupsForThread, rejectDeletedThreadSkillStages, appendSkillRequestCard,
+  resolveSkillRequest, sendSkillResolution,
+} = createSkillLifecycle({
+  helpers: { connectorThread, fullAccessForSource },
+});
 
 const phoneSecretSubmissions = new PhoneSecretSubmissionRegistry();
 
