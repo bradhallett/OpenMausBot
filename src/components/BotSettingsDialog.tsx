@@ -238,7 +238,7 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
             onOpen={(target) => dispatch({ type: "openOverlay", kind: "settings", open: true, section: target })}
             onSetup={derived.canCoordinate && !bot.busy ? () => {
               dispatch({ type: "closeOverlay", kind: "settings" });
-              dispatch({ type: "send", botId: bot.id, text: "/setup", threadId: bot.threadId });
+              dispatch({ type: "send", botId: bot.id, text: "/setup", at: Date.now(), threadId: bot.threadId });
             } : undefined}
           />
         );

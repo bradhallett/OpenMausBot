@@ -81,7 +81,7 @@ export function overlaysReducer(overlays: OverlaysState, action: Action, selecti
             ...overlays,
             open: overlays.open.filter((kind) => kind !== "settings"),
             botSettingsSection:
-              (action.section as BotSettingsSection | undefined) ??
+              action.section ??
               (selectionChanged ? "overview" : overlays.botSettingsSection),
             botSettingsExpandAccordion: false,
           };
@@ -101,7 +101,7 @@ export function overlaysReducer(overlays: OverlaysState, action: Action, selecti
             "settings",
           ],
           botSettingsSection:
-            (action.section as BotSettingsSection | undefined) ??
+            action.section ??
             (selectionChanged ? "overview" : overlays.botSettingsSection),
           // Mascot / bare open omits `section` → accordion stays fully collapsed.
           // Deep links expand that row even when the panel is already open.
@@ -123,10 +123,10 @@ export function overlaysReducer(overlays: OverlaysState, action: Action, selecti
         ...overlays,
         open: [...openList, action.kind],
         ...(action.kind === "plugins" && action.section !== undefined
-          ? { pluginsSurface: action.section as "apps" | "mcp" }
+          ? { pluginsSurface: action.section }
           : {}),
         ...(action.kind === "appSettings" && action.section !== undefined
-          ? { appSettingsSection: action.section as AppSettingsSection }
+          ? { appSettingsSection: action.section }
           : {}),
       };
     }

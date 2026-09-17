@@ -155,14 +155,14 @@ describe("independent bot threads", () => {
 
   it("pins send, stop, edit, approval and queued-message actions before navigation", () => {
     const actions: Action[] = [
-      { type: "send", botId: bot.id, text: "Go" }, { type: "interrupt", botId: bot.id },
+      { type: "send", botId: bot.id, text: "Go", at: 1_700_000_000_000 }, { type: "interrupt", botId: bot.id },
       { type: "editMessage", botId: bot.id, messageId: "first-message", text: "Changed" },
       { type: "answerCard", botId: bot.id, messageId: "approval", answer: "Allow" },
       { type: "dismissCard", botId: bot.id, messageId: "approval" },
       { type: "cancelQueued", botId: bot.id, queueId: "queued" },
     ];
     for (const action of actions) expect(pinBotThreadAction(action, [bot])).toMatchObject({ threadId: "first" });
-    const pinned: Action = { type: "send", botId: bot.id, text: "Background", threadId: "second" };
+    const pinned: Action = { type: "send", botId: bot.id, text: "Background", at: 1_700_000_000_000, threadId: "second" };
     expect(pinBotThreadAction(pinned, [bot])).toBe(pinned);
   });
 
@@ -949,7 +949,7 @@ describe("onboarding quiz", () => {
 
   it("hides the quiz as soon as the person sends a message", () => {
     const state = { ...initialState, bots: [bot], selectedId: bot.id };
-    const next = reducer(state, { type: "send", botId: bot.id, text: "Hi bro" });
+    const next = reducer(state, { type: "send", botId: bot.id, text: "Hi bro", at: 1_700_000_000_000 });
     expect(next.bots[0]?.messages.find((message) => message.id === "q")?.card?.dismissed).toBe(true);
   });
 
@@ -984,7 +984,7 @@ describe("onboarding quiz", () => {
       activeLeafId: "ask",
     };
     const state = { ...initialState, bots: [askBot], selectedId: askBot.id };
-    const next = reducer(state, { type: "send", botId: askBot.id, text: "ok" });
+    const next = reducer(state, { type: "send", botId: askBot.id, text: "ok", at: 1_700_000_000_000 });
     expect(next.bots[0]?.messages.find((message) => message.id === "ask")?.card?.dismissed).toBeUndefined();
     expect(next.bots[0]?.messages.find((message) => message.id === "q")?.card?.dismissed).toBe(true);
   });
@@ -1015,6 +1015,7 @@ describe("optimistic sent messages", () => {
         threadId: bot.threadId,
         sendId: "send-preview",
         text: "look\n\n<attached-image path=\"/private/photo.png\" />",
+        at: 1_700_000_000_000,
       },
     );
     expect(sent.bots[0]?.messages.at(-1)).toMatchObject({
@@ -1045,7 +1046,7 @@ describe("optimistic sent messages", () => {
   it("removes only the optimistic row when a send queues or fails", () => {
     const sent = reducer(
       { ...initialState, bots: [bot] },
-      { type: "send", botId: bot.id, sendId: "send-failed", text: "later" },
+      { type: "send", botId: bot.id, sendId: "send-failed", text: "later", at: 1_700_000_000_000 },
     );
     const removed = reducer(sent, {
       type: "optimisticMessageRemoved",
@@ -1076,6 +1077,7 @@ describe("optimistic sent messages", () => {
         threadId: group.threadId,
         sendId: "room-preview",
         text: "show this",
+        at: 1_700_000_000_000,
         mode: "chat",
       },
     );
