@@ -213,7 +213,7 @@ const {
 // The factory is wired ahead of createDelegationWatch — the earliest
 // module-level by-value consumer (retireProviderTurn) — because these were
 // hoisted declarations here; thunks cover the deps declared below. The
-// install lets stay in this file: the install endpoint and the maintenance
+// install lets stay in index.ts: the install endpoint and the maintenance
 // idle gate read and write them; the summary reads them through thunks.
 const {
   retiredProviderTurns, pendingCancelledProviderHandshakes, generatedImagesByTurn,
