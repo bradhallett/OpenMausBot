@@ -147,7 +147,9 @@ export function ArchivedBotsPanel({
     setRestoringAll(true);
     setError("");
     try {
-      const responses = await Promise.all(
+      // One failed PATCH must not strand the bots that did restore: report
+      // each success to the store as it lands, then surface the failures.
+      const results = await Promise.allSettled(
         bots.map((bot) =>
           api(`/api/bots/${bot.id}`, {
             method: "PATCH",
@@ -155,17 +157,30 @@ export function ArchivedBotsPanel({
           }),
         ),
       );
-      for (const response of responses) dispatch({ type: "botPatched", bot: response.bot });
-      const first = bots[0];
-      if (first) dispatch({ type: "select", id: first.id });
-      onRestored(
-        bots.length === 1
-          ? t("sidebar.archived.restoredOne")
-          : t("sidebar.archived.restoredMany", { count: bots.length }),
-      );
-      onClose();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      let restored = 0;
+      let firstFailure: string | null = null;
+      results.forEach((result, index) => {
+        if (result.status === "fulfilled") {
+          restored += 1;
+          dispatch({ type: "botPatched", bot: result.value.bot });
+          return;
+        }
+        const cause = result.reason;
+        const message = cause instanceof Error ? cause.message : String(cause);
+        firstFailure ??= `${bots[index].name}: ${message}`;
+      });
+      if (restored > 0) {
+        const firstIndex = results.findIndex((result) => result.status === "fulfilled");
+        const first = bots[firstIndex];
+        if (first) dispatch({ type: "select", id: first.id });
+        onRestored(
+          restored === 1
+            ? t("sidebar.archived.restoredOne")
+            : t("sidebar.archived.restoredMany", { count: restored }),
+        );
+      }
+      if (firstFailure) setError(firstFailure);
+      else onClose();
     } finally {
       setRestoringAll(false);
     }
@@ -261,4 +276,3 @@ export function ArchivedBotsPanel({
     document.body,
   );
 }
-

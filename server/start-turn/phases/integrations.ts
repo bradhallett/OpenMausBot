@@ -570,4 +570,3 @@ export async function assembleTurnIntegrations({
   }
   return { integrations, previewCapture, computerKind, worksInWorkspace, privateWorkspace, skillInstructions, packagePlaybooks, cwd, checkpointCwd, teamComputer };
 }
-

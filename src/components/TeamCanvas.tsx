@@ -102,10 +102,13 @@ export function TeamCanvas({ sections, canManage, onMove, onInstructions, onEdit
   const [layoutLoaded, setLayoutLoaded] = useState(false);
   const [menuAbove, setMenuAbove] = useState<string | null>(null);
   const tiles = useMemo(() => layoutTeams(sections, positions), [sections, positions]);
-  const current = useRef({ view, positions, tiles, selectedId: state.selectedId, settingsOpen: overlayOpen(state, "settings") });
+  const settingsOpen = overlayOpen(state, "settings");
+  const current = useRef({ view, positions, tiles, selectedId: state.selectedId, settingsOpen });
+  // Keep the gesture/observer mirror in step with committed state only: a
+  // render that React discards must never move the canvas under the pointer.
   useLayoutEffect(() => {
-    current.current = { view, positions, tiles, selectedId: state.selectedId, settingsOpen: overlayOpen(state, "settings") };
-  });
+    current.current = { view, positions, tiles, selectedId: state.selectedId, settingsOpen };
+  }, [view, positions, tiles, state.selectedId, settingsOpen]);
 
   // Layout is personal presentation, not team configuration. Key it to the
   // workspace's identity so switching hosted workspaces never shares a layout.
