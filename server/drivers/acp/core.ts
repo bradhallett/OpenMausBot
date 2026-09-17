@@ -20,16 +20,7 @@ import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promi
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 
 import { PROVIDER_CREDENTIAL_ENV, WORKSPACE_CREDENTIAL_ENV } from "../../config.ts";
-import { decodeInjectId } from "../local-inject.ts";
 import { describeSpawnFailure, execCli, killCliTree, spawnCli } from "../../procs.ts";
-
-/**
- * A `host::model` pick talks to a loopback server with its own key.
- * Subscription ACP login (grok.com cached_token) must not fail that turn.
- */
-export function skipSubscriptionAuthForLocalInject(model: string | undefined): boolean {
-  return Boolean(decodeInjectId(model));
-}
 
 import type {
   DriverCreateInput,
@@ -39,10 +30,8 @@ import type {
   ProviderInstance,
   ProviderSnapshot,
   ModelCatalog,
-  ModelVariantOption,
   SendTurnInput,
   ProviderErrorCode,
-  TurnImageInput,
 } from "../../contracts.ts";
 import { newId } from "../../contracts.ts";
 import { augmentedPath } from "../../env-path.ts";
@@ -59,17 +48,26 @@ import {
 } from "./protocol.ts";
 import type {
   AcpClientFileParams,
-  AcpConfigOption,
   AcpInitializeResult,
-  AcpLogMessageParams,
   AcpPromptResult,
   AcpRequestPermissionParams,
   AcpSessionConfigResult,
   AcpSessionStartResult,
-  AcpSessionToolCall,
   AcpSessionUpdateParams,
   AcpTokenUsage,
 } from "./wire-types.ts";
+import { nativeLogMessage } from "./log-sanitize.ts";
+import {
+  acpMcpServers,
+  acpVariantOption,
+  decodeAcpConfig,
+  readAcpImageBlocks,
+  sessionOperationKey,
+  skipSubscriptionAuthForLocalInject,
+} from "./wire.ts";
+
+// Re-exported because the ACP tests import this helper from the core.
+export { skipSubscriptionAuthForLocalInject } from "./wire.ts";
 
 export interface AcpConfig {
   cli: string;
@@ -210,112 +208,10 @@ const NEW_SESSION_TIMEOUT = envOr("OPENMAUS_ACP_NEW_SESSION_TIMEOUT_MS", 300_000
 const LOAD_SESSION_TIMEOUT = envOr("OPENMAUS_ACP_LOAD_SESSION_TIMEOUT_MS", 120_000); // history replay on a long thread is slow
 const CLIENT_FILE_MAX_BYTES = 8 * 1024 * 1024;
 
-function acpVariantOption(result: AcpSessionConfigResult | null): { configId: string; options: ModelVariantOption[]; currentValue?: string } | undefined {
-  const option = (Array.isArray(result?.configOptions) ? result.configOptions : []).find(
-    (entry): entry is AcpConfigOption & { id: string } =>
-      entry?.type === "select" && typeof entry.id === "string"
-      && (entry.id === "effort" || entry.category === "thought_level"),
-  );
-  if (!option) return;
-  const options: ModelVariantOption[] = [];
-  const seen = new Set<string>();
-  const collect = (entries: readonly AcpConfigOption[] | undefined) => {
-    if (!Array.isArray(entries)) return;
-    for (const entry of entries) {
-      if (typeof entry?.value === "string" && !seen.has(entry.value)) {
-        seen.add(entry.value);
-        options.push({ id: entry.value, label: typeof entry.name === "string" ? entry.name : entry.value });
-      } else if (Array.isArray(entry?.options)) collect(entry.options);
-    }
-  };
-  collect(option.options);
-  return {
-    configId: option.id,
-    options,
-    ...(typeof option.currentValue === "string" ? { currentValue: option.currentValue } : {}),
-  };
-}
-const TOOL_LOG_TEXT_LIMIT = 64_000;
-
-async function readAcpImageBlocks(images: readonly TurnImageInput[]) {
-  return Promise.all(images.map(async (image) => ({
-    type: "image" as const,
-    data: (await readFile(image.path)).toString("base64"),
-    mimeType: image.mime,
-  })));
-}
-
-function sanitizeToolLogValue(value: unknown, budget: { nodes: number; text: number }, depth = 0): unknown {
-  if (depth > 12 || budget.nodes-- <= 0) return undefined;
-  if (typeof value === "string") {
-    if (/^data:image\//iu.test(value) || budget.text <= 0) return undefined;
-    const limit = Math.min(TOOL_LOG_TEXT_LIMIT, budget.text);
-    const text = value.length <= limit ? value : `[Earlier output truncated]\n\n${value.slice(-limit)}`;
-    budget.text -= text.length;
-    return text;
-  }
-  if (Array.isArray(value)) {
-    return value.flatMap((entry) => {
-      const sanitized = sanitizeToolLogValue(entry, budget, depth + 1);
-      return sanitized === undefined ? [] : [sanitized];
-    });
-  }
-  if (!value || typeof value !== "object") return value;
-  const record = value as Record<string, unknown>;
-  return Object.fromEntries(Object.entries(record).flatMap(([key, entry]) => {
-    if ((record.type === "image" && (key === "data" || key === "blob")) ||
-      (key === "blob" && typeof record.mimeType === "string" && record.mimeType.startsWith("image/"))) return [];
-    const sanitized = sanitizeToolLogValue(entry, budget, depth + 1);
-    return sanitized === undefined ? [] : [[key, sanitized]];
-  }));
-}
-
-function sanitizeAcpToolMessage(message: AcpWireMessage): unknown {
-  const params = message.params as AcpLogMessageParams | undefined;
-  const isToolUpdate = message.method === "session/update"
-    && ["tool_call", "tool_call_update"].includes(params?.update?.sessionUpdate ?? "");
-  const isPermission = message.method === "session/request_permission";
-  if (!isToolUpdate && !isPermission) return message;
-  return sanitizeToolLogValue(message, { nodes: 512, text: TOOL_LOG_TEXT_LIMIT });
-}
-
-function decodeAcpConfig(defaultCli: string) {
-  return (raw: unknown): AcpConfig => {
-    const o = (raw ?? {}) as Record<string, unknown>;
-    return {
-      cli: typeof o.cli === "string" ? o.cli : defaultCli,
-      fullAuto: o.fullAuto === true,
-      workspace: typeof o.workspace === "string" ? o.workspace : undefined,
-    };
-  };
-}
-
 /**
  * ACP JSON-RPC-over-stdio driver. Harness differences (argv, auth, catalog)
  * live in `support`; this is the shared handshake and turn runtime.
  */
-/** What "the same operation" means for a remembered session allow: the
- * tool call's shape with keys sorted, so two identical requests key alike
- * however the agent ordered its JSON. null when nothing identifies it. */
-function sessionOperationKey(toolCall: AcpSessionToolCall): string | null {
-  const rawInput = toolCall?.rawInput;
-  const command = typeof rawInput?.command === "string" ? rawInput.command : undefined;
-  const hasInput = rawInput && typeof rawInput === "object" && Object.keys(rawInput).length > 0;
-  if (!command && !hasInput) return null;
-  const stable = (value: unknown): unknown =>
-    Array.isArray(value)
-      ? value.map(stable)
-      : value && typeof value === "object"
-        ? Object.fromEntries(Object.keys(value as Record<string, unknown>).sort().map((key) => [key, stable((value as Record<string, unknown>)[key])]))
-        : value;
-  return JSON.stringify(stable({
-    kind: toolCall?.kind,
-    title: toolCall?.title,
-    command,
-    input: rawInput,
-    locations: toolCall?.locations,
-  }));
-}
 
 export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> {
   const DRIVER_KIND = support.driverKind;
@@ -383,105 +279,6 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
       // as the native session lasts. A generic title with no input identifies
       // nothing and is never remembered.
       const sessionAllows = new Map<string, Set<string>>();
-
-      // ACP content blocks may carry a complete raster image inline. Keep the
-      // bytes on the wire, but never duplicate megabytes of base64 into the
-      // provider-native diagnostic log in either direction.
-      const nativeLogMessage = (message: AcpWireMessage): unknown => {
-        // the raw frame keeps params opaque; the redactor reads the two
-        // shapes it may rewrite (prompt blocks, update content) through one view
-        let params = message.params as AcpLogMessageParams | undefined;
-        let redacted: AcpWireMessage = message;
-        const prompt = message.method === "session/prompt" ? params?.prompt : null;
-        if (Array.isArray(prompt)) {
-          redacted = {
-            ...message,
-            params: {
-              ...params,
-              prompt: prompt.map((content) =>
-                content?.type === "image" && typeof content.data === "string"
-                  ? { ...content, data: `[image data: ${content.data.length} base64 chars]` }
-                  : content
-              ),
-            },
-          };
-          params = redacted.params as AcpLogMessageParams;
-        }
-        const update = params?.update;
-        const content = update?.content;
-        if (
-          redacted.method !== "session/update" ||
-          update?.sessionUpdate !== "agent_message_chunk" ||
-          content?.type !== "image" ||
-          typeof content.data !== "string"
-        ) return support.sanitizeToolPayload ? sanitizeAcpToolMessage(redacted) : redacted;
-        redacted = {
-          ...redacted,
-          params: {
-            ...params,
-            update: {
-              ...update,
-              content: { ...content, data: `[image data: ${content.data.length} base64 chars]` },
-            },
-          },
-        };
-        return support.sanitizeToolPayload ? sanitizeAcpToolMessage(redacted) : redacted;
-      };
-      // ACP session mcpServers: stdio is the baseline every ACP agent
-      // supports (mcpCapabilities.http/.sse only add EXTRA transports), so
-      // an injected stdio proxy — e.g. the peer-agent comms tool — attaches
-      // fine here. A url server is listed in ACP's http/sse shape and kept
-      // for the session only when the agent advertised that transport.
-      // env and headers are the ACP {name,value}[] shape.
-      type AcpMcpServer =
-        | { name: string; command: string; args: string[]; env: Array<{ name: string; value: string }> }
-        | { type: "http" | "sse"; name: string; url: string; headers: Array<{ name: string; value: string }> };
-      const acpMcpServers = (turn: SendTurnInput) => {
-        const servers: AcpMcpServer[] = [];
-        const acpEnv = (env: Record<string, string>) =>
-          Object.entries(env).map(([name, value]) => ({ name, value: String(value) }));
-        const agents = turn.integrations?.agents;
-        if (agents) {
-          servers.push({ name: "agents", command: agents.command, args: agents.args, env: acpEnv(agents.env) });
-        }
-        const composio = turn.integrations?.composio;
-        if (composio) {
-          servers.push({
-            name: "composio",
-            command: composio.command,
-            args: composio.args,
-            env: acpEnv(composio.env),
-          });
-        }
-        const browser = turn.integrations?.browser;
-        if (browser) {
-          servers.push({ name: "browser", command: browser.command, args: browser.args, env: acpEnv(browser.env) });
-        }
-        // The bot's computer, mounted exactly like the Claude driver does:
-        // host and sandbox Cua connections expose Cua Driver's own MCP server.
-        // (A cloud box is not mounted here at all: a cloud turn runs ON the box.)
-        if (turn.integrations?.localComputer) {
-          const local = turn.integrations.localComputer;
-          servers.push({
-            name: "computer",
-            command: local.command,
-            args: local.args,
-            env: acpEnv(local.env ?? {}),
-          });
-        }
-        // user-configured servers, after the built-ins: a residual name
-        // collision keeps the built-in (reserved names are filtered at the
-        // config boundary; this is defense in depth).
-        for (const [name, server] of Object.entries(turn.integrations?.custom ?? {})) {
-          if (servers.some((existing) => existing.name === name)) continue;
-          if ("url" in server) {
-            servers.push({ type: server.type, name, url: server.url, headers: acpEnv(server.headers) });
-            continue;
-          }
-          servers.push({ name, command: server.command, args: server.args, env: acpEnv(server.env) });
-        }
-        return servers;
-      };
 
       const sendTurn = async (turn: SendTurnInput) => {
         const { threadId } = turn;
@@ -897,8 +694,8 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               child.stdin.write(line);
             } catch {}
           },
-          onSend: (message) => appendNative(threadId, { dir: "out", source: SOURCE, msg: nativeLogMessage(message) }),
-          onMessage: (message) => appendNative(threadId, { dir: "in", source: SOURCE, msg: nativeLogMessage(message) }),
+          onSend: (message) => appendNative(threadId, { dir: "out", source: SOURCE, msg: nativeLogMessage(support, message) }),
+          onMessage: (message) => appendNative(threadId, { dir: "in", source: SOURCE, msg: nativeLogMessage(support, message) }),
           onServerRequest: handleServerRequest,
           onNotification: handleNotification,
           // A stdout read failure is a host-side transport error, not a
