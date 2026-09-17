@@ -1,14 +1,13 @@
 // OpenMausBot server — the harness host. Clients hold no transports
 // (upstream rule): the React app dispatches typed commands over HTTP and
 // folds one SSE event stream; every provider process runs here.
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer } from "node:http";
 import { join } from "node:path";
 
 import { SharedComputers } from "./shared-computers.ts";
 
 import { BrowserCleanupCoordinator } from "./browser-lifecycle-cleanup.ts";
 import { createDesktopBridge } from "./desktop-bridge.ts";
-import { flushDecisionLog } from "./decision-log.ts";
 import * as composio from "./composio.ts";
 import {
   instanceConfigs,
@@ -18,20 +17,13 @@ import {
   DATA_DIR,
 } from "./config.ts";
 import { resetPathCache } from "./env-path.ts";
-import {
-  flushUsageLedger,
-  type UsageTrigger,
-} from "./usage-ledger.ts";
+import type { UsageTrigger } from "./usage-ledger.ts";
 import type { RequestAuth } from "./request-auth.ts";
-import { fleetAvailable, fleetRequest, fleetSocketPath } from "./fleet-client.ts";
-import { entitled } from "./enterprise.ts";
 
 
-import { closeMessageDb } from "./message-db.ts";
 import { EventBus } from "./harness/bus.ts";
 import { ManagedDesktopProviders } from "./managed-desktop.ts";
 import { titleFromLlm } from "./store.ts";
-import { flushAllMemoryJournals } from "./memory-journal.ts";
 
 import { createBotLifecycle } from "./bot-lifecycle.ts";
 import { createCalendarRooms } from "./calendar-rooms.ts";
@@ -55,7 +47,6 @@ import {
 
 
 
-import { flushAllProfileHistory } from "./profile-versions.ts";
 import type { WebhookIngress } from "./webhook-ingress.ts";
 import { WebhookManager } from "./webhooks.ts";
 import { loadBundledSkills, loadUserSkills, mergeSkills } from "./skill-library.ts";
@@ -78,39 +69,11 @@ import {
   hostedWorkspaceConfigured,
   type WorkspaceAccess,
 } from "./enterprise.ts";
-import { serverVersion } from "./environment.ts";
-import { createWorkspaceBackupRoutes, isWorkspaceBackupSessionControl } from "./workspace-backup-http.ts";
-import { createServeStatic, json, readBody } from "./http.ts";
-import { createInternalRoutes } from "./routes/internal.ts";
-import { createRoutinesRoutes } from "./routes/routines.ts";
-import { createCalendarCallRoutes } from "./routes/calendar-calls.ts";
-import { createInstanceRoutes } from "./routes/instances.ts";
-import { createMcpRoutes } from "./routes/mcp.ts";
-import { createTtsRoutes } from "./routes/tts.ts";
-import { createConnectorRoutes } from "./routes/connectors.ts";
-import { createWebhookRoutes } from "./routes/webhooks.ts";
-import { createMessageRoutes } from "./routes/messages.ts";
-import { createTeamRoutes } from "./routes/teams.ts";
-import { createBotRoutes } from "./routes/bots.ts";
-import { createBotManagementRoutes } from "./routes/bot-management.ts";
-import { createBotThreadOpsRoutes } from "./routes/bot-thread-ops.ts";
-import { createBotTasksRoutes } from "./routes/bot-tasks.ts";
-import { createBotProfileRoutes } from "./routes/bot-profile.ts";
-import { createBotMemoryRoutes } from "./routes/bot-memory.ts";
-import { createPreAuthRoutes } from "./routes/pre-auth.ts";
-import { createAuthSessionRoutes } from "./routes/auth-session.ts";
-import { createBotCardsRoutes } from "./routes/bot-cards.ts";
-import { createBotComputerRoutes } from "./routes/bot-computer.ts";
-import { createWorkspaceCommsRoutes } from "./routes/workspace-comms.ts";
-import { createComputersRoutes } from "./routes/computers.ts";
-import { createSystemRoutes } from "./routes/system.ts";
-import { createUsageRoutes } from "./routes/usage.ts";
-import { createConfigRoutes } from "./routes/config.ts";
-import { createBrowserLiveRoutes } from "./routes/browser-live.ts";
-import { createFleetRoutes } from "./routes/fleet.ts";
-import type { RouteContext } from "./routes/http.ts";
+import { isWorkspaceBackupSessionControl } from "./workspace-backup-http.ts";
+import { createRouteHandlers } from "./route-wiring.ts";
+import { createRequestHandler } from "./request-handler.ts";
+import { createServeStatic, json } from "./http.ts";
 import {
-  computerSelectionTurns,
   revokeAllInternalCapabilities,
   revokeInternalCapabilitiesForThread,
 } from "./internal-capabilities.ts";
@@ -125,7 +88,6 @@ import {
 } from "./runtime.ts";
 import {
   botForThread,
-  claimTurnResource,
   directTurnBots,
   threadBusy,
   turnComputerResources,
@@ -1055,493 +1017,261 @@ const serveStatic = createServeStatic(STATIC_DIR);
 // onto it. Reject non-loopback Hosts outright (defeats rebinding) and
 // origins outside loopback (blocks remote-web CSRF).
 
-const workspaceBackupRoutes = createWorkspaceBackupRoutes({
-  dataDir: DATA_DIR,
-  appVersion: serverVersion(),
-  readBody,
-  restored: workspaceRestore,
-  status: () => ({ busy: workspaceMaintenance.active, pendingRestore: workspaceMaintenance.pendingRestore }),
-  authorized: (req, original) => {
-    const current = resolveRequestAuth(req, {
-      sessions, cookieName: SESSION_COOKIE, streamPath: "/api/events",
-      url: new URL(req.url ?? "/", `http://localhost:${PORT}`),
-      loopbackMutationToken: desktopMutationToken, companionMutationToken,
-    }).auth;
-    return Boolean(current?.scopes.includes("admin") && current.kind === original.kind &&
-      (current.kind !== "session" || (original.kind === "session" && current.session.id === original.session.id)));
-  },
-  exclusive: (work, keepLocked) => workspaceMaintenance.run(async () => {
-    // Recheck inside the exclusive gate: the restore body can arrive slowly
-    // while another client assigns a computer after the initial route check.
-    if (keepLocked && teamComputers.list().some(computer => computer.section !== null)) {
-      throw Object.assign(new Error("Unassign team computers before restoring this workspace"), { status: 409 });
-    }
-    return work();
-  }, {
-    idle: () => !providerFleet.providerFleetReloading && !providerAuthSessions.active && !browserEngineInstall &&
-      !routines?.isTicking && !calendarCalls?.isTicking &&
-      !localVmImageBusy && !localVmProvisionBusy && !localVmModeChangeBusy &&
-      !localVmLifecycleBusy.size && !boxLifecycleBusyBots.size && !vpsPreviewRequests.size && !orphanBoxLifecycleBusyIds.size &&
-      !computerProviderConfigTransitions.size && !checkpointRestoreLeases.size &&
-      teamComputers.list().every(computer => !teamComputerInUse(computer)) &&
-      store.bots.every((bot) => !botHasActiveTurn(bot.id) && !routines?.activeRunForBot(bot.id) && !botComputerControlSnapshot(bot.id).held) &&
-      store.groups.every((group) => !groupIsWorking(group)),
-    pause: () => { routines?.stop(); calendarCalls?.stop(); watchdog.stop(); },
-    resume: () => { routines?.start(); calendarCalls?.start(); watchdog.start(); },
-    flush: async () => {
-      await Promise.all([flushAllProfileHistory(), flushAllMemoryJournals(), flushUsageLedger(DATA_DIR), flushDecisionLog(DATA_DIR)]);
-      // With writers gated and work idle, release our WAL connection for the
-      // consistent snapshot. Store reopens it lazily after maintenance.
-      closeMessageDb();
-    },
-  }, keepLocked),
-});
-
-const routinesRoutes = createRoutinesRoutes({ routines: () => routines! });
-
-// The /api/internal family: everything a spawned proxy reaches over
-// localhost with its per-turn capability (see ./routes/internal.ts).
-const internalRoutes = createInternalRoutes({
-  store, cfg, registry, sharedComputers, computerControl, browserRuntime, commsBus, approvalBus,
-  roomHandoffs, routineRequests, profileRequests, teamSetupRequests, routines: () => routines,
-  computerSelectionTurns, delegationWatch, turnComputerResources, autoVmClaims, personAskAt, roomPostBudgets,
-  ASK_BOT_TIMEOUT_MS, MAX_COMMS_DEPTH, MAX_THREADS_OPENED_PER_TURN, MAX_WORKSPACE_BOTS, ROOM_POST_MAX_CHARS, LAZY_VM_CLAIM_GRACE_MS,
-  askBotAndWait, agentRoutine, appendSkillRequestCard, botComputerControlSnapshot, startOrQueueOpenedThread, startTurn,
-  selectableComputers, computerPreviewSurface, browserIntegration, currentBrowserSession, createChannel, updateChannel,
-  activeGroupTurnForBot, activeRoutineRunForThread, credentialDesktopHandoff, lastHumanRoomMessageAt,
-  maybeResumeConnectors, notify, proposalPersistence, skillProposalPersistence, roomHandoffProblem,
-  roomPostEligibility, routineTimeZone, stagedSkillListing, teamSetupTeams, threadBusy,
-  authorizedInternalCapability, internalCapabilityIsActive, claimTurnResource, connectorThread,
-  delegatedFullAccess, fullAccessForSource, grantDelegatedFullAccess, isUnattended, peerReviewRequired,
-});
-
-// Route groups extracted from handleRequest's dispatch chain below; wired
-// here, after the index.ts-local collaborators they close over exist.
-const handleCalendarCalls = createCalendarCallRoutes({
-  calendarCalls: () => calendarCalls!,
-  ensureCalendarCallRoom,
-  publicGroupState,
-});
-const handleMessages = createMessageRoutes({
-  pageSize,
-  DEFAULT_PAGE,
-  messagePage,
-  messageWindow,
-  wireBot,
-  wireTask,
-  publicBotQueuedMessages,
-  publicGroupState,
-  botComputerControlSnapshot,
-});
-const handleInstances = createInstanceRoutes({
-  providerConfigBusy: { get: () => providerConfigBusy, set: (value) => { providerConfigBusy = value; } },
-  providerAuthSessions,
-  sessions,
-  describeInstances,
-  configStatus,
-  broadcast,
-  persistProviderInstance,
-  providerInstancesChanging,
-  activeGroupTurnForBot,
-});
-const handleMcp = createMcpRoutes({ sessions, mcpServerResponse, mcpServerBody, persistMcpServers });
-const handleUsage = createUsageRoutes();
-const handleConfig = createConfigRoutes({
-  providerConfigBusy: { get: () => providerConfigBusy, set: (value) => { providerConfigBusy = value; } },
-  localVmModeChangeBusy: { get: () => localVmModeChangeBusy, set: (value) => { localVmModeChangeBusy = value; } },
-  localVmImageBusy: () => localVmImageBusy,
-  computerProviderConfigTransitions,
-  localVmActiveThreads,
-  localVmLifecycleBusy,
-  perBotLocalVmCountForModeChange,
-  managedBoxOwners,
-  providerOperationConflict,
-  configStatus,
-  configForAccess,
-  sessions,
-  broadcast,
-  browserRuntime,
-  browserLive,
-  browserCleanup,
-  sharedComputers,
-  sharedComputerControl,
-  reloadProviders,
-  drainQueuedSends,
-  drainDelegationWakes,
-  drainConnectorResumes,
-  drainSecretResumes,
-  drainTeamSetupResumes,
-});
-const handleTts = createTtsRoutes();
-const handleConnectors = createConnectorRoutes();
-const handleWebhooks = createWebhookRoutes({ webhooks, webhookIngressStatus });
-const handleTeams = createTeamRoutes({
-  createChannel,
-  publicGroupState,
-  publicBot,
-  messagePage,
-  broadcast,
-  routines: () => routines,
-});
-const handleBots = createBotRoutes({
-  routines: () => routines,
-  broadcast,
-  publicGroupState,
-  wireBot,
-  updateChannel,
-  channelTaskBlocked,
-  phoneSecretSubmissions,
-  createGroupTaskRequestSchema,
-  createSidebarSectionSchema,
-  groupWithThread,
-  groupSpeakers,
-  lastReply,
-  sendSequencer,
-  noteTurnTrigger,
-  messageSender,
-  resolveReplyTarget,
-  stagedSkillCleanupsForThread,
-  rejectDeletedThreadSkillStages,
-  cancelTeamSetupResumesForThread,
-  DESKTOP_MANAGED,
-  startGroupTurn,
-  drainQueuedChannelSends,
-  runningTurnInstance,
-  cancelGroupTurnOperations,
-  assertTeamComputerChangeIdle,
-  teamComputers,
-});
-const handleBotManagement = createBotManagementRoutes({
-  routines: () => routines,
-  broadcast,
-  wireBot,
-  storedAvatarExists,
-  checkedModelSelection,
-  activeGroupTurnForBot,
-  cancelGroupTurnOperations,
-  sessions,
-  DESKTOP_MANAGED,
-  MAX_WORKSPACE_BOTS,
-  interruptAllDirectThreads,
-  runningTurnInstance,
-  assertTeamComputerChangeIdle,
-  activeVpsThreads,
-  browserRuntime,
-  browserLive,
-  currentBrowserSession,
-  forgetTemporaryBrowser,
-  deleteBotWithLifecycle,
-});
-const handleBotThreadOps = createBotThreadOpsRoutes({
-  routines: () => routines,
-  DESKTOP_MANAGED,
-  noteTurnTrigger,
-  messageSender,
-  sendSequencer,
-  resolveReplyTarget,
-  clearUnattended,
-  drainQueuedSends,
-  startOrQueueDirectMessage,
-  phoneSecretSubmissions,
-  startTurn,
-  resolveAndSendTeamSetup,
-  resolveAndSendRoutine,
-  resolveAndSendProfile,
-  resolveSkillRequest,
-  sendSkillResolution,
-  approvalBus,
-  handoffs,
-  interruptDirectThread,
-  cancelDirectTurnDispatch,
-  activeGroupTurnForBot,
-  cancelGroupTurnOperations,
-  runningTurnInstance,
-});
-const handleBotTasks = createBotTasksRoutes({
-  routines: () => routines,
-  broadcast,
-  wireBot,
-  wireTask,
-  DESKTOP_MANAGED,
-  phoneSecretSubmissions,
-  checkedModelSelection,
-  checkedTaskModelSwitch,
-  stagedSkillCleanupsForThread,
-  rejectDeletedThreadSkillStages,
-  roomHandoffs,
-  handoffs,
-  cancelTeamSetupResumesForThread,
-  settleDirectFollowup,
-  directTurnGenerationByThread,
-});
-const handleBotProfile = createBotProfileRoutes({
-  broadcast,
-  wireBot,
-  previewSystemPrompt,
-  botOverview,
-  stagedSkillListing,
-});
-const handleBotMemory = createBotMemoryRoutes({
-  checkpointRestoreLeases,
-});
-const handlePreAuth = createPreAuthRoutes({
-  sessions,
-  emailSignIn,
-  customDomainVerifier,
+const {
+  workspaceBackupRoutes, routinesRoutes, internalRoutes, handleCalendarCalls, handleMessages,
+  handleInstances, handleMcp, handleUsage, handleConfig, handleTts,
+  handleConnectors, handleWebhooks, handleTeams, handleBots, handleBotManagement,
+  handleBotThreadOps, handleBotTasks, handleBotProfile, handleBotMemory, handlePreAuth,
+  handleAuthSession, handleWorkspaceComms, handleComputers, handleBotCards, handleBotComputer,
+  handleSystem, handleBrowserLive, handleFleet,
+} = createRouteHandlers({
+  DATA_DIR,
+  PORT,
   SESSION_COOKIE,
   DESKTOP_MANAGED,
   HOSTED_WORKSPACE,
-  serveStatic,
-  workspaceAccess: () => workspaceAccess,
-});
-const handleAuthSession = createAuthSessionRoutes({
+  STATIC_DIR,
+  MAX_WORKSPACE_BOTS,
+  MAX_COMMS_DEPTH,
+  ASK_BOT_TIMEOUT_MS,
+  MAX_THREADS_OPENED_PER_TURN,
+  ROOM_POST_MAX_CHARS,
+  LAZY_VM_CLAIM_GRACE_MS,
+  handoffs,
+  LOCAL_VM_IDLE_MS,
   sessions,
-  SESSION_COOKIE,
-  DESKTOP_MANAGED,
-  publicUrl,
-  customDomainStatus,
-  customDomainVerifier,
-});
-const handleWorkspaceComms = createWorkspaceCommsRoutes({
-  sessions,
+  store,
+  cfg,
+  registry,
+  workspaceRestore,
+  workspaceMaintenance,
   sharedComputers,
   sharedComputerControl,
-  MAX_COMMS_DEPTH,
-  delegationWatch,
-});
-const handleComputers = createComputersRoutes({
+  providerFleet,
+  providerAuthSessions,
+  persistProviderInstance,
+  reloadProviders,
+  providerInstancesChanging,
+  personAskAt,
+  directTurnGenerationByThread,
+  webhooks,
+  emailSignIn,
+  customDomainVerifier,
+  serveStatic,
+  publicUrl,
+  customDomainStatus,
+  webhookIngressStatus,
+  noteTurnTrigger,
+  messageSender,
+  browserCleanup,
+  groupIsWorking,
+  threadBusy,
   routines: () => routines,
-  sessions,
-  interruptAllDirectThreads,
-  cancelDirectTurnDispatch,
-  activeGroupTurnForBot,
-  cancelGroupTurnOperations,
-  runningTurnInstance,
-  teamComputers,
-  teamComputersPayload,
+  calendarCalls: () => calendarCalls,
+  desktopMutationToken: () => desktopMutationToken,
+  companionMutationToken: () => companionMutationToken,
+  workspaceAccess: () => workspaceAccess,
+  providerConfigBusy: { get: () => providerConfigBusy, set: (value) => { providerConfigBusy = value; } },
+  localVmImageBusy: { get: () => localVmImageBusy, set: (value) => { localVmImageBusy = value; } },
+  localVmModeChangeBusy: { get: () => localVmModeChangeBusy, set: (value) => { localVmModeChangeBusy = value; } },
+  localVmProvisionBusy: { get: () => localVmProvisionBusy, set: (value) => { localVmProvisionBusy = value; } },
+  browserEngineInstall: { get: () => browserEngineInstall, set: (value) => { browserEngineInstall = value; } },
+  browserEngineInstallError: { get: () => browserEngineInstallError, set: (value) => { browserEngineInstallError = value; } },
   computerControl,
+  browserRuntime,
+  browserLive,
+  browserIntegration,
+  currentBrowserSession,
   controlLeaseIdSchema,
-  computerProviderConfigTransitions,
-  providerTransitionMessage,
+  forgetTemporaryBrowser,
+  cancelDirectTurnDispatch,
+  localVmLifecycleBusy,
+  localVmActiveThreads,
   boxLifecycleBusyBots,
-  assertTeamControlCanBeTaken,
+  vpsPreviewRequests,
+  orphanBoxLifecycleBusyIds,
+  computerProviderConfigTransitions,
+  checkpointRestoreLeases,
+  teamComputerInUse,
   botHasActiveTurn,
   botComputerControlSnapshot,
-  claimTeamComputerLifecycle,
-  claimBotComputerLifecycle,
-  teamComputerInUse,
-  managedBoxOwners,
-  claimBoxInventoryRequest,
-  claimManagedBoxMutation,
-  claimManagedVpsMutation,
+  inheritedTeamComputer,
+  computerPreviewBot,
+  computerPreviewSurface,
+  botComputerControlKey,
+  selectableComputers,
   localVmOwnerBusy,
   localVmLeaseFor,
   localVmIdleFor,
   localVmTargetForBot,
   localVmInventoryPayload,
-  localVmLifecycleBusy,
-  LOCAL_VM_IDLE_MS,
-  computerPreviewBot,
-  computerPreviewSurface,
+  teamComputers,
+  teamComputersPayload,
+  managedBoxOwners,
+  claimTeamComputerLifecycle,
+  claimBotComputerLifecycle,
+  claimBoxInventoryRequest,
+  claimManagedBoxMutation,
+  claimManagedVpsMutation,
+  assertTeamControlCanBeTaken,
+  assertTeamComputerChangeIdle,
+  providerOperationConflict,
+  providerTransitionMessage,
+  activeVpsThreads,
+  autoVmClaims,
+  interruptAllDirectThreads,
+  interruptDirectThread,
+  runningTurnInstance,
+  askBotAndWait,
+  sendSequencer,
+  activeGroupTurnForBot,
+  cancelGroupTurnOperations,
+  broadcast,
+  notify,
+  groupSpeakers,
+  lastReply,
+  watchdog,
+  clearUnattended,
+  isUnattended,
+  createChannel,
+  updateChannel,
+  channelTaskBlocked,
+  roomHandoffProblem,
+  publicGroupState,
+  groupWithThread,
+  roomHandoffs,
+  DEFAULT_PAGE,
+  pageSize,
+  messagePage,
+  messageWindow,
+  startGroupTurn,
+  drainQueuedChannelSends,
+  cancelTeamSetupResumesForThread,
+  resolveReplyTarget,
+  lastHumanRoomMessageAt,
+  roomPostEligibility,
+  maybeResumeConnectors,
+  connectorThread,
+  connectorMessage,
+  secretMessage,
+  resumeSecretCard,
   localVmPayload,
   existingPerBotLocalVmCount,
-  localVmImageBusy: { get: () => localVmImageBusy, set: (value) => { localVmImageBusy = value; } },
-  localVmModeChangeBusy: () => localVmModeChangeBusy,
-  localVmProvisionBusy: { get: () => localVmProvisionBusy, set: (value) => { localVmProvisionBusy = value; } },
-});
-const handleBotCards = createBotCardsRoutes({
+  perBotLocalVmCountForModeChange,
+  roomPostBudgets,
+  approvalBus,
+  ensureCalendarCallRoom,
+  commsBus,
+  routineRequests,
+  routineTimeZone,
+  agentRoutine,
+  resolveAndSendRoutine,
+  delegationWatch,
+  activeRoutineRunForThread,
+  settleDirectFollowup,
+  drainDelegationWakes,
+  appendSkillRequestCard,
+  proposalPersistence,
+  skillProposalPersistence,
+  stagedSkillListing,
+  stagedSkillCleanupsForThread,
+  rejectDeletedThreadSkillStages,
+  resolveSkillRequest,
+  sendSkillResolution,
   phoneSecretSubmissions,
   phoneSecretSubmissionKey,
   currentSecretState,
   provideSecretFromPhone,
-  secretMessage,
-  resumeSecretCard,
-  connectorMessage,
-  maybeResumeConnectors,
-});
-const handleBotComputer = createBotComputerRoutes({
-  inheritedTeamComputer,
-  computerPreviewBot,
-  computerPreviewSurface,
-  botComputerControlKey,
-  botComputerControlSnapshot,
-  assertTeamControlCanBeTaken,
-  claimTeamComputerLifecycle,
-  claimBotComputerLifecycle,
-  botHasActiveTurn,
-  providerTransitionMessage,
-  computerProviderConfigTransitions,
-  boxLifecycleBusyBots,
-  vpsPreviewRequests,
-  activeVpsThreads,
-  computerControl,
-  controlLeaseIdSchema,
-});
-const handleSystem = createSystemRoutes({
-  STATIC_DIR,
-  browserEngineInstall: { get: () => browserEngineInstall, set: (value) => { browserEngineInstall = value; } },
-  browserEngineInstallError: { get: () => browserEngineInstallError, set: (value) => { browserEngineInstallError = value; } },
-  broadcast,
+  credentialDesktopHandoff,
+  wireBot,
+  wireTask,
+  publicBot,
+  publicBotQueuedMessages,
+  storedAvatarExists,
+  previewSystemPrompt,
+  botOverview,
+  delegatedFullAccess,
+  fullAccessForSource,
+  grantDelegatedFullAccess,
+  peerReviewRequired,
+  checkedModelSelection,
+  checkedTaskModelSwitch,
   configStatus,
+  configForAccess,
+  mcpServerResponse,
+  mcpServerBody,
+  persistMcpServers,
+  describeInstances,
+  authorizedInternalCapability,
+  internalCapabilityIsActive,
+  createSidebarSectionSchema,
+  createGroupTaskRequestSchema,
+  startTurn,
+  startOrQueueDirectMessage,
+  startOrQueueOpenedThread,
+  drainQueuedSends,
+  profileRequests,
+  teamSetupTeams,
+  teamSetupRequests,
+  resolveAndSendTeamSetup,
+  resolveAndSendProfile,
+  deleteBotWithLifecycle,
+  drainConnectorResumes,
+  drainSecretResumes,
+  drainTeamSetupResumes,
 });
 
-const handleBrowserLive = createBrowserLiveRoutes({
-  store,
-  readBody,
-  browserLive,
-  browserIntegration,
-  currentBrowserSession,
+
+const handleRequest = createRequestHandler({
+  PORT,
+  resolveRequestAuth,
   sessions,
+  SESSION_COOKIE,
+  desktopMutationToken: () => desktopMutationToken,
+  companionMutationToken: () => companionMutationToken,
+  sharedComputersEnabled,
+  cfg,
+  parseCookies,
   HOSTED_WORKSPACE,
+  requestOrigin,
+  serializeSessionCookie,
+  cookieMaxAgeSeconds,
+  json,
+  loadBrand,
   workspaceAccess: () => workspaceAccess,
+  teamComputers,
+  workspaceBackupRoutes,
+  workspaceMaintenance,
+  isWorkspaceBackupSessionControl,
+  eventsRoutes,
+  routinesRoutes,
+  internalRoutes,
+  handleCalendarCalls,
+  handleMessages,
+  handleInstances,
+  handleMcp,
+  handleUsage,
+  handleConfig,
+  handleTts,
+  handleConnectors,
+  handleWebhooks,
+  handleTeams,
+  handleBots,
+  handleBotManagement,
+  handleBotThreadOps,
+  handleBotTasks,
+  handleBotProfile,
+  handleBotMemory,
+  handlePreAuth,
+  handleAuthSession,
+  handleWorkspaceComms,
+  handleComputers,
+  handleBotCards,
+  handleBotComputer,
+  handleSystem,
+  handleBrowserLive,
+  handleFleet,
 });
-
-const handleFleet = createFleetRoutes({
-  entitled,
-  fleetSocketPath,
-  fleetAvailable,
-  fleetRequest,
-  readBody,
-});
-
-
-const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
-  let url: URL;
-  try {
-    url = new URL(req.url ?? "/", `http://localhost:${PORT}`);
-  } catch {
-    return json(res, 400, { error: "invalid request URL" });
-  }
-  const path = url.pathname;
-  const method = req.method ?? "GET";
-  let releaseWorkspaceRequest: (() => void) | undefined;
-  try {
-    if (await handlePreAuth(req, res, { method, path, url })) return;
-    const gate = resolveRequestAuth(req, {
-      sessions,
-      cookieName: SESSION_COOKIE,
-      streamPath: "/api/events",
-      url,
-      loopbackMutationToken: desktopMutationToken,
-      companionMutationToken,
-      features: { sharedComputers: sharedComputersEnabled(cfg) },
-    });
-    // The browser's cookie carries the term it was set with, and the
-    // session's term slides on use (sessions.ts `renew`), so re-issue the
-    // cookie on every cookie-authenticated request. One small header; and
-    // unlike "send once per renewal" it survives a lost response and a
-    // restart. Later handlers that clear the cookie (logout, self-revoke)
-    // overwrite this header, which is the order we want.
-    if (gate.auth?.kind === "session" && gate.auth.via === "cookie") {
-      const presented = parseCookies(req.headers.cookie).get(SESSION_COOKIE);
-      if (presented) {
-        const secure = HOSTED_WORKSPACE || requestOrigin(req)?.startsWith("https://") === true;
-        res.setHeader("set-cookie", serializeSessionCookie(SESSION_COOKIE, presented, { secure, maxAgeSeconds: cookieMaxAgeSeconds(gate.auth.session) }));
-      }
-    }
-    // Reachability probe, public: the phone races it across a server's
-    // addresses before it has a session, and the tunnel verifier polls it.
-    // A stranger learns only the app name; pid (the desktop boot probe keys
-    // on it) and the static flag stay behind the gate below.
-    if (method === "GET" && path === "/api/health" && !gate.auth) {
-      return json(res, 200, { app: "openmausbot" });
-    }
-    // The brand is public too: the sign-in page must carry the deployment's
-    // name and icon before anyone has a session, and it holds nothing secret.
-    if (method === "GET" && path === "/api/brand" && !gate.auth) {
-      return json(res, 200, loadBrand());
-    }
-    if (!gate.auth) return json(res, gate.status, { error: gate.error });
-    const auth = gate.auth;
-    /** per-request values shared by the route modules extracted below */
-    const rctx: RouteContext = { method, path, url, auth };
-    if (HOSTED_WORKSPACE && auth.kind === "session") {
-      const failure = workspaceAccess
-        ? await workspaceAccess.authorize(req, auth)
-        : { status: 503, error: "Workspace sign-in is unavailable." };
-      if (failure) return json(res, failure.status, { error: failure.error });
-    }
-
-    if (method === "POST" && path === "/api/workspace-backup/restore" && teamComputers.list().some(computer => computer.section !== null)) {
-      return json(res, 409, { error: "Unassign team computers before restoring a workspace; restored team names must not gain access to existing desktops" });
-    }
-    if (await workspaceBackupRoutes(req, res, path, auth)) return;
-    // Count ordinary requests until their asynchronous handler returns, not
-    // merely until the browser disconnects. A cancelled upload can still write.
-    if (path.startsWith("/api/") && path !== "/api/events" && path !== "/api/health" && !path.startsWith("/api/shared-computers/") && !isWorkspaceBackupSessionControl(method, path)) {
-      releaseWorkspaceRequest = workspaceMaintenance.request();
-    }
-
-    if (await handleAuthSession(req, res, rctx)) return;
-    if (await handleWorkspaceComms(req, res, rctx)) return;
-    // ── internal peer-agent comms (localhost + bot capability only) ───
-    // The agents-proxy (spawned inside a bot's agent process) calls these to
-    // discover peers and hand a message to one. Not part of the public API.
-    if (await internalRoutes(req, res, path, method, url)) return;
-
-    // ── routines calendar ────────────────────────────────────────────────
-    if (await routinesRoutes(req, res, path, method, url)) return;
-
-    // ── scheduled room sessions ────────────────────────────────────────
-    if (await handleCalendarCalls(req, res, rctx)) return;
-
-    // ── independent webhook triggers ────────────────────────────────────
-    // Management stays on the app-only server. Actual deliveries land on a
-    // second, webhook-only loopback listener so Funnel or a future hosted
-    // relay never has to expose the rest of OpenMausBot's control surface.
-    if (await handleWebhooks(req, res, rctx)) return;
-
-    if (await handleBrowserLive(req, res, rctx)) return;
-    if (eventsRoutes.handle(req, res, path, method, url, auth)) return;
-
-    // ── bots ──
-    // Paired sessions are authenticated above. The companion marker may
-    // only narrow behavior (including its capability-free local dev proxy);
-    // it never grants authority or replaces the existing request gate.
-    if (await handleMessages(req, res, rctx)) return;
-
-    if (await handleTeams(req, res, rctx)) return;
-    if (await handleBots(req, res, rctx)) return;
-    if (await handleBotManagement(req, res, rctx)) return;
-
-    if (await handleBotProfile(req, res, rctx)) return;
-
-    if (await handleBotMemory(req, res, rctx)) return;
-
-    if (await handleBotThreadOps(req, res, rctx)) return;
-
-    if (await handleBotTasks(req, res, rctx)) return;
-
-    if (await handleComputers(req, res, rctx)) return;
-
-    if (await handleSystem(req, res, rctx)) return;
-
-    if (await handleFleet(req, res, rctx)) return;
-
-    if (await handleUsage(req, res, rctx)) return;
-
-    if (await handleInstances(req, res, rctx)) return;
-
-    if (await handleMcp(req, res, rctx)) return;
-
-    if (await handleConfig(req, res, rctx)) return;
-
-    if (await handleTts(req, res, rctx)) return;
-
-    if (await handleConnectors(req, res, rctx)) return;
-
-    if (await handleBotCards(req, res, rctx)) return;
-
-    if (await handleBotComputer(req, res, rctx)) return;
-
-    return json(res, 404, { error: `no route: ${method} ${path}` });
-  } catch (e) {
-    const status = (e as any)?.status ?? 500;
-    return json(res, status, { error: e instanceof Error ? e.message : String(e) });
-  } finally {
-    releaseWorkspaceRequest?.();
-  }
-};
 
 const server = createServer(handleRequest);
 
