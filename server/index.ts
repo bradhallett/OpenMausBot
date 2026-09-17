@@ -8,7 +8,6 @@ import { SharedComputers } from "./shared-computers.ts";
 
 import { BrowserCleanupCoordinator } from "./browser-lifecycle-cleanup.ts";
 import { createDesktopBridge } from "./desktop-bridge.ts";
-import * as composio from "./composio.ts";
 import {
   instanceConfigs,
   loadConfig,
@@ -21,16 +20,9 @@ import type { UsageTrigger } from "./usage-ledger.ts";
 import type { RequestAuth } from "./request-auth.ts";
 
 
-import { EventBus } from "./harness/bus.ts";
-import { ManagedDesktopProviders } from "./managed-desktop.ts";
-
 import { createBotLifecycle } from "./bot-lifecycle.ts";
 import { createCalendarRooms } from "./calendar-rooms.ts";
-import { createComputerLifecycleWiring } from "./computer-lifecycle-wiring.ts";
-import { createPeerAgentComms } from "./peer-agent-comms.ts";
-import { createEventsPipeline } from "./events-pipeline.ts";
 import { runBootSequence } from "./boot-sequence.ts";
-import { createGroupState } from "./group-state.ts";
 import { createRoutineLifecycle } from "./routine-lifecycle.ts";
 import { createSkillLifecycle } from "./skill-lifecycle.ts";
 import { createTeamSetupLifecycle } from "./team-setup-lifecycle.ts";
@@ -45,22 +37,10 @@ import {
 } from "./browser-engine.ts";
 
 
-
 import type { WebhookIngress } from "./webhook-ingress.ts";
 import { WebhookManager } from "./webhooks.ts";
 import { loadBundledSkills, loadUserSkills, mergeSkills } from "./skill-library.ts";
-import { createDelegationWatch } from "./delegation-watch.ts";
-import { createTurnIntegrations } from "./turn-integrations.ts";
-import {
-  groupGoalCoordinatorTurns,
-  groupIsWorking,
-  hasUnboundDiscardedGroupGoalTurn,
-  removeGroupGoalCoordinatorTurn,
-} from "./group-coordination.ts";
-import { createBotViews } from "./bot-views.ts";
-import { createCheckedInputs } from "./checked-inputs.ts";
-import { createDesktopApproval } from "./desktop-approval.ts";
-import { createGroupTurnOperations } from "./group-turn-operations.ts";
+import { groupIsWorking } from "./group-coordination.ts";
 import { createConfigViews } from "./config-views.ts";
 import { createTurnSecrets } from "./turn-secrets.ts";
 import {
@@ -70,6 +50,7 @@ import {
 } from "./enterprise.ts";
 import { isWorkspaceBackupSessionControl } from "./workspace-backup-http.ts";
 import { createRouteHandlers } from "./route-wiring.ts";
+import { createEngineWiring } from "./engine-wiring.ts";
 import { createRequestHandler } from "./request-handler.ts";
 import { createServeStatic, json } from "./http.ts";
 import {
@@ -104,7 +85,6 @@ import {
 } from "./request-auth.ts";
 import { cookieMaxAgeSeconds, SessionRegistry } from "./sessions.ts";
 import { loadBrand } from "./brand.ts";
-import { PhoneSecretBridge } from "./phone-secret.ts";
 
 const PORT = Number(process.env.OMB_PORT || process.env.OGB_PORT || 8799);
 const WEBHOOK_PORT = Number(process.env.OMB_WEBHOOK_PORT || PORT + 1);
@@ -213,414 +193,221 @@ const browserCleanup: BrowserCleanupCoordinator = new BrowserCleanupCoordinator(
     return true;
   },
 });
-// ── group turn operations ─────────────────────────────────────────────────
-// The group-turn operation lifecycle — begin/finish, goal-run cards, member
-// waits, cancellation, handshake flags, activeGroupTurnForBot — lives in
-// ./group-turn-operations.ts; updateGroupGoalRunProgress and
-// groupProviderHandshakeStarted are imported from it directly by
-// ./group-state.ts. The factory is
-// wired here because createCheckedInputs just below is the earliest
-// module-level by-value consumer (activeGroupTurnForBot); every other input
-// is a thunk over consts this file declares further down.
-const {
-  beginGroupTurnOperation, finishGroupTurnOperation, finishGroupGoalRun,
-  waitForGroupMemberBot, waitForChatRoomMember, groupProviderHandshakeSettled,
-  cancelGroupTurnOperations, activeGroupTurnForBot,
-} = createGroupTurnOperations({
-  lateBound: {
-    broadcast: (payload) => broadcast(payload),
-    GROUP_GOAL_WAIT_MAX_MS: () => GROUP_GOAL_WAIT_MAX_MS,
-    routines: () => routines,
-    pendingDelegationWakes: () => pendingDelegationWakes,
-    commsBus: () => commsBus,
-    groupSpeakers: () => groupSpeakers,
-    cancelTeamSetupResumesForThread: (threadId) => cancelTeamSetupResumesForThread(threadId),
-    roomHandoffs: () => roomHandoffs,
-    drainQueuedChannelSends: () => drainQueuedChannelSends(),
-    markCancelledProviderHandshake: (threadId, ownerId) => markCancelledProviderHandshake(threadId, ownerId),
-    clearCancelledProviderHandshake: (threadId, ownerId) => clearCancelledProviderHandshake(threadId, ownerId),
-  },
-  helpers: {
-    publicGroupState: (group) => publicGroupState(group),
-    notify: (notification) => notify(notification),
-    routineSourceOwner: (run) => routineSourceOwner(run),
-    routineSourceThread: (run) => routineSourceThread(run),
-  },
-});
-// ── checked inputs ────────────────────────────────────────────────────────
-// The request validators live in ./checked-inputs.ts: the pure ones are
-// imported directly, and the model-selection pair comes from this factory
-// because it reads the providerInstancesChanging set — a const this file
-// destructures from providerFleet far below this site, hence the thunk.
-const { checkedModelSelection, checkedTaskModelSwitch } = createCheckedInputs({
-  lateBound: {
-    providerInstancesChanging: () => providerInstancesChanging,
-  },
-  helpers: {
-    activeGroupTurnForBot,
-  },
-});
-
-// ── desktop trusted approval ──────────────────────────────────────────────
-// The Electron-only approval-mode state machine lives in ./desktop-approval.ts.
-// Its sole consumer is the parentPort listener just below (the call sits in
-// a callback body, so it evaluates at runtime, never at module eval); wiring
-// here keeps it ahead of that listener. The thunks read consts this file
-// declares later: wireBot, wireTrustedApprovalBot, broadcast.
-const handleDesktopTrustedApprovalMessage = createDesktopApproval({
-  lateBound: {
-    wireBot: () => wireBot,
-    wireTrustedApprovalBot: () => wireTrustedApprovalBot,
-    broadcast: () => broadcast,
-  },
-  helpers: {
-    postDesktopPrivateMessage,
-    checkedTaskModelSwitch,
-    stopBotForEmergencyApprovalDowngrade: (botId) => stopBotForEmergencyApprovalDowngrade(botId),
-  },
-});
-
-const phoneSecrets = new PhoneSecretBridge(postDesktopPrivateMessage);
-onUtilityParentMessage((event) => {
-  const message = event?.data;
-  try {
-    if (applyDesktopMutationTokenMessage(message)) return;
-    if (handleDesktopTrustedApprovalMessage(message)) return;
-    if (browserCleanup.receive(message)) return;
-    if (phoneSecrets.receive(message)) return;
-    composio.applyManagedBrokerMessage(message);
-  } catch (error) {
-    console.error(`[desktop-sync] rejected private parent message: ${error instanceof Error ? error.message : String(error)}`);
-  }
-});
-
-const bus = new EventBus();
-bus.attach(registry.instances());
-let companyRuntimeReady!: () => void;
-const companyRuntimeStarted = new Promise<void>(resolve => { companyRuntimeReady = resolve; });
-const managedDesktop = new ManagedDesktopProviders({
-  registry,
-  dataDirectory: DATA_DIR,
-  beforeReplace: ids => stopCompanyInstances(ids),
-  afterReplace: ids => {
-    for (const id of providerInstancesChanging) if (managedDesktop.owns(id)) providerInstancesChanging.delete(id);
-    bus.attach(ids.flatMap(id => { const instance = registry.get(id); return instance ? [instance] : []; }));
-    // Existing renderer config events refresh /api/instances as well, so
-    // Company grants and revocations appear without reloading the window.
-    broadcast({ kind: "config", ...configStatus() });
-  },
-});
-// Only Electron owns this port. There is deliberately no HTTP equivalent or
-// config patch for its organization identity, endpoint, or model capability.
-onUtilityParentMessage(event => {
-  const message = event.data as { type?: unknown; requestId?: unknown; connection?: unknown } | undefined;
-  if (message?.type !== "openmausbot:managed-desktop") return;
-  const requestId = typeof message.requestId === "string" && message.requestId.length <= 100 ? message.requestId : undefined;
-  void companyRuntimeStarted.then(() => managedDesktop.apply(message.connection)).then(() => {
-    postUtilityParentMessage({ type: "openmausbot:managed-desktop-result", requestId, ok: true });
-  }, () => {
-    postUtilityParentMessage({ type: "openmausbot:managed-desktop-result", requestId, ok: false, error: "Company connection could not be applied. Reconnect from desktop Settings." });
-  });
-});
-
-// ── peer-agent comms wiring ────────────────────────────────────────────
-// The internal-capability bearer predicates, the workspace sidebar and
-// group-task schemas, and the agents proxy integration live in
-// ./peer-agent-comms.ts; index.ts wires the factory at the region's
-// original site and rebinds the names below. The local-VM lease names
-// internalCapabilityIsActive reads -- produced by the computer lifecycle
-// wired further down this file -- cross as thunks resolved at call time.
-const {
-  authorizedInternalCapability, internalCapabilityIsActive, MAX_COMMS_DEPTH, MAX_WORKSPACE_BOTS,
-  createSidebarSectionSchema, createGroupTaskRequestSchema, phoneProxyPath, AGENTS_NODE_FLAG,
-  agentsIntegration,
-} = createPeerAgentComms({
-  helpers: { PORT },
-  lateBound: {
-    localVmOwnerBusy: () => localVmOwnerBusy,
-    localVmLeaseFor: (target) => localVmLeaseFor(target),
-    localVmThreadTargets: () => localVmThreadTargets,
-  },
-});
-
-
-// ── provider/turn integrations ──────────────────────────────────────────
-// The direct-turn dispatch registry and the per-turn provider integrations
-// (browser runtime + live viewer, temporary guest browsers, phone and
-// connected-apps proxies, computer control) live in ./turn-integrations.ts.
-// The factory is wired ahead of createDelegationWatch — the earliest
-// module-level by-value consumer (retireProviderTurn) — because these were
-// hoisted declarations here; thunks cover the deps declared below. The
-// install lets stay in this file: the install endpoint and the maintenance
-// idle gate read and write them; the summary reads them through thunks.
 let browserEngineInstall: Promise<void> | null = null;
 let browserEngineInstallError: string | null = null;
 const {
-  retiredProviderTurns, pendingCancelledProviderHandshakes, generatedImagesByTurn,
-  generatedImageTurnKey, purgeGeneratedImagesForThread,
-  markCancelledProviderHandshake, clearCancelledProviderHandshake,
-  retireProviderTurn, shouldIgnoreProviderEvent,
-  directTurnClaimIsCurrent, directTurnClaimExists, markDirectTurnDispatching,
-  clearDirectTurnDispatch, cancelDirectTurnDispatch,
-  browserRuntime, browserLive, temporaryBrowserSessions,
-  currentBrowserSession, forgetTemporaryBrowser, browserIntegration, browserEngineSummary,
-  phoneIntegration, connectedAppsIntegration,
-  computerControlRevision, computerControl, controlLeaseIdSchema, controlIntegration,
-} = createTurnIntegrations({
-  lateBound: {
-    broadcast: (payload) => broadcast(payload),
-    cancelTeamSetupResumesForThread: (threadId) => cancelTeamSetupResumesForThread(threadId),
-    inheritedTeamComputer: (bot) => inheritedTeamComputer(bot),
-    browserEngineInstall: () => browserEngineInstall,
-    browserEngineInstallError: () => browserEngineInstallError ?? undefined,
-  },
-  helpers: {
-    postDesktopPrivateMessage,
-  },
-  constants: {
-    PORT,
-    AGENTS_NODE_FLAG,
-    phoneProxyPath,
-  },
+  ASK_BOT_TIMEOUT_MS,
+  DEFAULT_PAGE,
+  DirectTurnSetupCancelled,
+  LOCAL_VM_IDLE_MS,
+  MAX_COMMS_DEPTH,
+  MAX_WORKSPACE_BOTS,
+  activeGroupTurnForBot,
+  activeRoutineRunForThread,
+  activeVpsThreads,
+  agentsIntegration,
+  approvalModeForTurn,
+  askBotAndWait,
+  assertTeamComputerChangeIdle,
+  assertTeamControlCanBeTaken,
+  attachTeamBox,
+  authorizedInternalCapability,
+  autoVmClaims,
+  bindTurnComputer,
+  botComputerControlKey,
+  botComputerControlSnapshot,
+  botHasActiveTurn,
+  botOverview,
+  boxLifecycleBusyBots,
+  broadcast,
+  browserEngineSummary,
+  browserIntegration,
+  browserLive,
+  browserRuntime,
+  bus,
+  cancelDirectTurnDispatch,
+  cancelGroupTurnOperations,
+  cancelTeamSetupResumesForThread,
+  channelTaskBlocked,
+  checkedModelSelection,
+  checkedTaskModelSwitch,
+  checkpointRestoreLeases,
+  claimBotComputerLifecycle,
+  claimBoxInventoryRequest,
+  claimManagedBoxMutation,
+  claimManagedVpsMutation,
+  claimTeamComputerLifecycle,
+  clearCancelledProviderHandshake,
+  clearDirectTurnDispatch,
+  clearInternalTurn,
+  clearUnattended,
+  closeSessionStreams,
+  companyRuntimeReady,
+  computerControl,
+  computerControlRevision,
+  computerPreviewBot,
+  computerPreviewSurface,
+  computerProviderConfigTransitions,
+  connectedAppsIntegration,
+  connectorMessage,
+  connectorThread,
+  controlIntegration,
+  controlLeaseIdSchema,
+  coordinationSystemInstructions,
+  createChannel,
+  createGroupTaskRequestSchema,
+  createSidebarSectionSchema,
+  currentBrowserSession,
+  delegatedFullAccess,
+  delegationWakeBudget,
+  delegationWatch,
+  directCoordinationSettlers,
+  directFollowupSettlers,
+  directFollowupTurns,
+  directTurnClaimExists,
+  directTurnClaimIsCurrent,
+  directTurnGenerationByThread,
+  dispatchTeamSetupResume,
+  drainConnectorResumes,
+  drainDelegationWakes,
+  drainQueuedChannelSends,
+  drainSecretResumes,
+  drainTeamSetupResumes,
+  eventsRoutes,
+  existingPerBotLocalVmCount,
+  finalizeDelegationWatch,
+  followupsReady,
+  forgetTemporaryBrowser,
+  fullAccessForSource,
+  grantDelegatedFullAccess,
+  groupSpeakers,
+  groupWithThread,
+  inheritedTeamComputer,
+  internalCapabilityIsActive,
+  interruptAllDirectThreads,
+  interruptDirectThread,
+  isExternalContextMarker,
+  isUnattended,
+  lastReply,
+  localVmActiveThreads,
+  localVmIdleFor,
+  localVmIdles,
+  localVmInventoryPayload,
+  localVmLeaseFor,
+  localVmLeases,
+  localVmLifecycleBusy,
+  localVmOwnerBusy,
+  localVmPayload,
+  localVmSeen,
+  localVmTargetForBot,
+  localVmThreadTargets,
+  managedBoxOwners,
+  managedDesktop,
+  markDirectTurnDispatching,
+  markInternalTurn,
+  markUnattended,
+  maybeResumeConnectors,
+  messagePage,
+  messageWindow,
+  noteLocalVmSeen,
+  notify,
+  orphanBoxLifecycleBusyIds,
+  outstandingAssignmentsPrompt,
+  pageSize,
+  parksBehindCoordination,
+  peerReviewRequired,
+  pendingCancelledProviderHandshakes,
+  pendingDelegationWakes,
+  pendingTeamSetupResumes,
+  perBotLocalVmCountForModeChange,
+  phoneIntegration,
+  phoneSecrets,
+  previewSystemPrompt,
+  providerOperationConflict,
+  providerTransitionForTurn,
+  providerTransitionMessage,
+  publicBot,
+  publicBotQueuedMessages,
+  publicGroupState,
+  purgeGeneratedImagesForThread,
+  readyLocalVmForTurn,
+  releaseLocalVmThread,
+  releaseTurnResources,
+  resumeSecretCard,
+  retireProviderTurn,
+  roomHandoffProblem,
+  roomHandoffs,
+  roomPostBudgets,
+  runningTurnEngines,
+  runningTurnInstance,
+  secretMessage,
+  selectableComputers,
+  sendSequencer,
+  settleDirectCoordination,
+  settleDirectFollowup,
+  settlingResourceOwners,
+  sharedComputerControl,
+  startGroupTurn,
+  startScreenPoller,
+  stopScreenPoller,
+  storedAvatarExists,
+  teamComputerInUse,
+  teamComputerPrompt,
+  teamComputers,
+  teamComputersPayload,
+  teamSetupResumeGenerations,
+  teammateReportContext,
+  temporaryBrowserSessions,
+  turnCleanup,
+  turnContext,
+  turnInstance,
+  turnProvider,
+  turnSurfacePlan,
+  turnUsage,
+  unattendedDispatchState,
+  updateChannel,
+  vpsPreviewRequests,
+  wakeUndispatchedDelegation,
+  watchdog,
+  wireBot,
+  wireTask,
+} = createEngineWiring({
+  postDesktopPrivateMessage,
+  applyDesktopMutationTokenMessage,
+  onUtilityParentMessage,
+  postUtilityParentMessage,
+  browserCleanup,
+  PORT,
+  sessions,
+  providerAuthSessions,
+  turnTriggers,
+  availableSkills,
+  routines: () => routines,
+  commsBus: () => commsBus,
+  routineSourceOwner: () => routineSourceOwner,
+  routineSourceThread: () => routineSourceThread,
+  stopBotForEmergencyApprovalDowngrade: () => stopBotForEmergencyApprovalDowngrade,
+  stopCompanyInstances: () => stopCompanyInstances,
+  configStatus: () => configStatus,
+  providerInstancesChanging: () => providerInstancesChanging,
+  providerFleet: () => providerFleet,
+  startTurn: () => startTurn,
+  drainQueuedSends: () => drainQueuedSends,
+  retryDelegationsWaitingOn: () => retryDelegationsWaitingOn,
+  drainThreadDelegations: () => drainThreadDelegations,
+  localVmImageBusy: () => localVmImageBusy,
+  localVmModeChangeBusy: () => localVmModeChangeBusy,
+  localVmProvisionBusy: { get: () => localVmProvisionBusy, set: (value) => { localVmProvisionBusy = value; } },
+  roomSetupPending: () => roomSetupPending,
+  resolveReplyTarget: () => resolveReplyTarget,
+  routineWiring: () => routineWiring,
+  phoneSecretSubmissions: () => phoneSecretSubmissions,
+  configForAccess: () => configForAccess,
+  webhooks: () => webhooks,
+  browserEngineInstall: { get: () => browserEngineInstall, set: (value) => { browserEngineInstall = value; } },
+  browserEngineInstallError: { get: () => browserEngineInstallError, set: (value) => { browserEngineInstallError = value; } },
 });
 export { browserEngineSummary };
-
-class DirectTurnSetupCancelled extends Error {}
-const directTurnGenerationByThread = new Map<string, string>();
-// Stop revokes credentials before completion, but the receipt must retain its
-// exact provider-turn owner until that completion or explicit failure
-// cleanup. The direct-followup registries, the delegation watch map and the
-// peer-wake machinery live in ./delegation-watch.ts, wired here at the old
-// declaration site; thunks cover the consts declared further below.
-const {
-  directFollowupTurns, directFollowupSettlers, directCoordinationSettlers,
-  settleDirectCoordination, settleDirectFollowup,
-  delegationWatch, delegationWakeBudget, pendingDelegationWakes,
-  activeRoutineRunForThread, wakeUndispatchedDelegation, drainDelegationWakes,
-  finalizeDelegationWatch, isExternalContextMarker, markTaskContextExternallyUpdated,
-} = createDelegationWatch({
-  lateBound: {
-    roomHandoffs: () => roomHandoffs,
-    routines: () => routines,
-    startTurn: (botId, text, opts) => startTurn(botId, text, opts),
-    commsBus: () => commsBus,
-  },
-  helpers: {
-    retireProviderTurn,
-    isUnattended: (botId, threadId) => isUnattended(botId, threadId),
-    activeGroupTurnForBot,
-  },
-});
-
-
-// ── computer / VM lifecycle ──────────────────────────────────────────────────────────
-// The computer/VM lifecycle wiring -- the createComputerLifecycle and
-// createScreenPollers rebinding, the shared-computer control surface, the
-// turn cleanup with bindTurnComputer and the direct-thread interruptors,
-// the ask_bot waiter, the team-computer store with the send sequencer and
-// the browser-cleanup profile reconciliation -- lives in
-// ./computer-lifecycle-wiring.ts; index.ts wires the factory at the
-// region's original site and rebinds the names below. The names this file
-// declares after the site (roomHandoffs, broadcast, startTurn, the events
-// pipeline's timeout constants, isUnattended, routines and the local-VM
-// busy flags) cross as thunks; followupsReady is reassigned by the listen
-// and shutdown handlers, so it crosses back as a { get, set } accessor.
-const {
-  localVmOwnerBusy, localVmLeases, localVmLifecycleBusy, localVmThreadTargets, localVmActiveThreads,
-  localVmSeen, noteLocalVmSeen, activeVpsThreads, boxLifecycleBusyBots, vpsPreviewRequests,
-  orphanBoxLifecycleBusyIds, computerProviderConfigTransitions,
-  checkpointRestoreLeases, LOCAL_VM_IDLE_MS, LOCAL_VM_DESKTOP_WAIT_MS, localVmIdles,
-  inheritedTeamComputer, teamComputerPrompt, botComputerControlKey, botComputerControlSnapshot,
-  teamComputerInUse, assertTeamControlCanBeTaken, claimTeamComputerLifecycle, assertTeamComputerChangeIdle,
-  teamComputersPayload, attachTeamBox, managedBoxOwners, botHasActiveTurn, providerTransitionMessage,
-  providerOperationConflict, turnSurfacePlan, turnProvider, turnInstance, computerPreviewBot,
-  computerPreviewSurface, selectableComputers, continueComputerSelection, runningTurnEngines,
-  runningTurnInstance, providerTransitionForTurn, claimBoxInventoryRequest, claimManagedBoxMutation,
-  claimBotComputerLifecycle, claimManagedVpsMutation, localVmTargetForBot, localVmLeaseFor, localVmIdleFor,
-  releaseLocalVmThread, localVmInventoryPayload,
-  screenPollers, SCREEN_SETTLE_TIMEOUT_MS, startScreenPoller, pokeScreenPoller, stopScreenPoller, finalScreenFrame,
-  sharedComputerControl, turnCleanup, releaseTurnResources, interruptDirectThread, settlingResourceOwners,
-  autoVmClaims, bindTurnComputer, parksBehindCoordination, unattendedDispatchState, interruptAllDirectThreads,
-  askBotAndWait, teamComputers, sendSequencer, followupsReady,
-} = createComputerLifecycleWiring({
-  helpers: {
-    bus, browserCleanup, activeGroupTurnForBot, controlIntegration, computerControl, computerControlRevision,
-    currentBrowserSession, cancelDirectTurnDispatch, shouldIgnoreProviderEvent,
-    DirectTurnSetupCancelled, directTurnGenerationByThread,
-  },
-  lateBound: {
-    routines: () => routines,
-    localVmImageBusy: () => localVmImageBusy,
-    startTurn: (botId, text, opts) => startTurn(botId, text, opts),
-  roomHandoffs: () => roomHandoffs,
-    broadcast: () => broadcast,
-    ASK_BOT_TIMEOUT_MS: () => ASK_BOT_TIMEOUT_MS,
-    GROUP_GOAL_WAIT_MAX_MS: () => GROUP_GOAL_WAIT_MAX_MS,
-    isUnattended: (botId, threadId) => isUnattended(botId, threadId),
-  },
-});
-
-
-// ── bot wire views ──────────────────────────────────────────────────────
-// The client-facing wire views and the approval-policy predicates live in
-// ./bot-views.ts: wireTask/wireBot/wireTrustedApprovalBot/publicBot with
-// the queued-steer snapshot, the system-prompt preview and overview
-// builders, and the approvalModeForTurn/fullAccessForSource family.
-// index.ts wires createBotViews at the cluster's original site —
-// turnInstance, inheritedTeamComputer and teamComputerPrompt, produced by
-// createComputerLifecycle above, arrive by value; connectorThread,
-// roomHandoffs, routines and webhooks, declared after this site, arrive as
-// thunks. activeCoordinationForThread is module state there, bound to
-// roomHandoffs.activeDirect at its original assignment site below.
-const {
-  wireTask, wireBot, wireTrustedApprovalBot, previewSystemPrompt, botOverview,
-  approvalModeForTurn, fullAccessForSource, peerReviewRequired, delegatedFullAccess,
-  grantDelegatedFullAccess, roomTurnApprovalMode, storedAvatarExists, publicBot,
-  publicBotQueuedMessages,
-} = createBotViews({
-  lateBound: {
-    connectorThread: (botId, threadId) => connectorThread(botId, threadId),
-    roomHandoffs: () => roomHandoffs,
-    routines: () => routines,
-    webhooks: () => webhooks,
-  },
-  helpers: { turnInstance, inheritedTeamComputer, teamComputerPrompt },
-});
-
-// ── group coordination ─────────────────────────────────────────────────
-// The group state cluster -- channel CRUD, the deferred-resume queues,
-// Local VM turn prep, the room/goal turn engine, the room-handoff registry
-// with the store change fold, and the message pages -- lives in
-// ./group-state.ts; index.ts wires the factory at the region's original
-// site and rebinds its names below. The helpers crossed by value from the
-// factories wired above; the lateBound slice reads names this file declares
-// further down (events pipeline, turn dispatch, provider fleet) plus the
-// calendar-room helpers from ./calendar-rooms.ts, all resolved at call time.
-const {
-  groupGoalCoordinatorTurnForEvent, channelTaskBlocked, roomHandoffProblem,
-  coordinationSystemInstructions,
-  createChannel, updateChannel, outstandingAssignmentsPrompt,
-  pendingTeamSetupResumes, teamSetupResumeGenerations, cancelTeamSetupResumesForThread,
-  dispatchTeamSetupResume, drainTeamSetupResumes,
-  connectorThread, connectorMessage, maybeResumeConnectors, drainConnectorResumes,
-  secretMessage, resumeSecretCard, drainSecretResumes,
-  localVmPayload, readyLocalVmForTurn, existingPerBotLocalVmCount, perBotLocalVmCountForModeChange,
-  teammateReportContext, roomPostBudgets, startGroupTurn, drainQueuedChannelSends,
-  roomHandoffs, publicGroupState, groupWithThread,
-  DEFAULT_PAGE, pageSize, messagePage, messageWindow,
-} = createGroupState({
-  helpers: {
-    bus, MAX_COMMS_DEPTH, DirectTurnSetupCancelled,
-    retireProviderTurn, shouldIgnoreProviderEvent, markCancelledProviderHandshake,
-    clearCancelledProviderHandshake, pendingCancelledProviderHandshakes,
-    providerTransitionForTurn, turnInstance, boxLifecycleBusyBots,
-    localVmLeaseFor, localVmIdleFor, localVmTargetForBot, localVmThreadTargets,
-    localVmActiveThreads, localVmOwnerBusy, localVmLifecycleBusy,
-    LOCAL_VM_IDLE_MS, LOCAL_VM_DESKTOP_WAIT_MS, noteLocalVmSeen, releaseLocalVmThread,
-    attachTeamBox, inheritedTeamComputer, teamComputerPrompt,
-    controlIntegration, browserIntegration, phoneIntegration, connectedAppsIntegration, agentsIntegration,
-    runningTurnEngines,
-    beginGroupTurnOperation, finishGroupTurnOperation, finishGroupGoalRun,
-    waitForGroupMemberBot, waitForChatRoomMember, groupProviderHandshakeSettled, activeGroupTurnForBot,
-    releaseTurnResources, interruptDirectThread, startScreenPoller,
-    roomTurnApprovalMode, fullAccessForSource, wireBot, publicBotQueuedMessages,
-    availableSkills, bindTurnComputer, markTaskContextExternallyUpdated,
-  },
-  lateBound: {
-    broadcast: (payload) => broadcast(payload),
-    watchdog: () => watchdog,
-    roomStallCompletions: () => roomStallCompletions,
-    groupSpeakers: () => groupSpeakers,
-    markInternalTurn: (threadId) => markInternalTurn(threadId),
-    isUnattended: (botId, threadId) => isUnattended(botId, threadId),
-    markUnattended: (botId, threadId) => markUnattended(botId, threadId),
-    GROUP_GOAL_WAIT_MAX_MS: () => GROUP_GOAL_WAIT_MAX_MS,
-    GROUP_GOAL_MAX_WAIT_EXHAUSTIONS: () => GROUP_GOAL_MAX_WAIT_EXHAUSTIONS,
-    providerFleet: () => providerFleet,
-    providerInstancesChanging: () => providerInstancesChanging,
-    drainQueuedSends: () => drainQueuedSends(),
-    retryDelegationsWaitingOn: (botId) => retryDelegationsWaitingOn(botId),
-    startTurn: (botId, text, opts) => startTurn(botId, text, opts),
-    followupsReady: () => followupsReady.get(),
-    localVmImageBusy: () => localVmImageBusy,
-    localVmModeChangeBusy: () => localVmModeChangeBusy,
-    setLocalVmProvisionBusy: (value) => { localVmProvisionBusy = value; },
-    roomSetupPending: (group) => roomSetupPending(group),
-    resolveReplyTarget: (threadId, value) => resolveReplyTarget(threadId, value),
-    routines: () => routines,
-    routineWiring: () => routineWiring,
-    phoneSecretSubmissions: () => phoneSecretSubmissions,
-  },
-});
-
-
-// ── SSE fan-out to clients ────────────────────────────────────────────────────────────────────
-// The fan-out wiring, the event fold wiring, and the unattended/internal
-// turn marks live in ./events-pipeline.ts; index.ts wires the factory at
-// the region's original site and rebinds its names below. The turn-dispatch
-// drains arrive as thunks because turn dispatch is wired further down.
-const {
-  eventsRoutes, broadcast, closeSessionStreams, notify, groupSpeakers,
-  lastReply, turnUsage, turnContext, roomStallCompletions, watchdog,
-  ASK_BOT_TIMEOUT_MS, GROUP_GOAL_WAIT_MAX_MS, GROUP_GOAL_MAX_WAIT_EXHAUSTIONS,
-  markUnattended, clearUnattended, isUnattended, markInternalTurn, clearInternalTurn,
-} = createEventsPipeline({
-  routes: {
-    browserLive,
-    sessions,
-    providerAuthSessions,
-    configForAccess: (status, admin) => configForAccess(status as ReturnType<typeof configStatus>, admin),
-  },
-  fanout: { publicBotQueuedMessages },
-  bus,
-  fold: {
-    generatedImagesByTurn, turnTriggers, retiredProviderTurns, groupGoalCoordinatorTurns,
-    directTurnGenerationByThread, directFollowupTurns, settlingResourceOwners,
-  },
-  helpers: {
-    shouldIgnoreProviderEvent,
-    approvalModeForTurn,
-    routineSourceOwner: (run) => routineSourceOwner(run),
-    routineSourceThread: (run) => routineSourceThread(run),
-    generatedImageTurnKey,
-    cancelDirectTurnDispatch,
-    settleDirectCoordination,
-    settleDirectFollowup,
-    finalizeDelegationWatch,
-    activeRoutineRunForThread,
-    runningTurnInstance,
-    releaseTurnResources,
-    releaseLocalVmThread,
-    localVmLeaseFor,
-    localVmIdleFor,
-    hasUnboundDiscardedGroupGoalTurn,
-    groupGoalCoordinatorTurnForEvent,
-    removeGroupGoalCoordinatorTurn,
-    continueComputerSelection,
-    pokeScreenPoller,
-    stopScreenPoller,
-    finalScreenFrame,
-    drainConnectorResumes,
-    drainSecretResumes,
-    drainTeamSetupResumes,
-    drainDelegationWakes,
-  },
-  lateBound: {
-    routines: () => routines,
-    localVmThreadTargets: () => localVmThreadTargets,
-    activeVpsThreads: () => activeVpsThreads,
-    runningTurnEngines: () => runningTurnEngines,
-    pendingDelegationWakes: () => pendingDelegationWakes,
-    commsBus: () => commsBus,
-    screenPollers: () => screenPollers,
-    SCREEN_SETTLE_TIMEOUT_MS: () => SCREEN_SETTLE_TIMEOUT_MS,
-  },
-  turnDispatch: {
-    drainThreadDelegations: () => drainThreadDelegations,
-    retryDelegationsWaitingOn: () => retryDelegationsWaitingOn,
-    drainQueuedSends: () => drainQueuedSends,
-  },
-});
 
 // When the person last wrote into each thread with a turn in flight — but
 // only for turns THEY started. post_to_room's ceiling counts the bot posts
