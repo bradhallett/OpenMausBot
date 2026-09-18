@@ -962,8 +962,11 @@ describe("Store", () => {
     store.deleteThreadRecord = realPendingDelete;
 
     expect(pendingThreadDeletions()[bot.id]).toEqual([bot.threadId, second.threadId]);
-    expect(store.deleteBot(bot.id)).toBe(false);
+    // The retry has no record left, but the durable cleanup entry lets it
+    // finish folder cleanup and report the deletion done.
+    expect(store.deleteBot(bot.id)).toBe(true);
     expect(pendingThreadDeletions()[bot.id]).toBeUndefined();
+    expect(existsSync(join(DATA_DIR, "bots", bot.id))).toBe(false);
     expect(new Store(selection).messagesFor(bot.threadId)).toHaveLength(0);
     expect(new Store(selection).messagesFor(second.threadId)).toHaveLength(0);
   });
@@ -1322,8 +1325,12 @@ describe("Store change stream", () => {
     };
     expect(() => store.deleteGroup(g.id)).toThrow("thread deletion failed");
     store.deleteThreadRecord = realDeleteThreadRecord;
-    expect(store.group(g.id)?.id).toBe(g.id);
-    expect(store.deleteGroup(g.id)).toBe(true);
+    // The group record is durably deleted before transcript cleanup, so a
+    // failed cleanup leaves a tombstone, not a live group; the retry
+    // finishes the cleanup and reports the group as already gone.
+    expect(store.group(g.id)).toBeUndefined();
+    expect(store.deleteGroup(g.id)).toBe(false);
+    expect(store.messagesFor(g.threadId)).toHaveLength(0);
 
     const g3 = store.createGroup("ops-3", [a.id, b.id]);
     const channel = store.createGroupTask(g3.id, "channel", false)!;
@@ -1338,10 +1345,10 @@ describe("Store change stream", () => {
     };
     expect(() => store.deleteGroup(g3.id)).toThrow("second thread deletion failed");
     store.deleteThreadRecord = realTwoPhaseDelete;
-    expect(store.group(g3.id)?.id).toBe(g3.id);
-    expect(store.messagesFor(g3.threadId)).toHaveLength(1);
+    expect(store.group(g3.id)).toBeUndefined();
+    expect(store.messagesFor(g3.threadId)).toHaveLength(0);
     expect(store.messagesFor(channel.threadId)).toHaveLength(1);
-    expect(store.deleteGroup(g3.id)).toBe(true);
+    expect(store.deleteGroup(g3.id)).toBe(false);
     expect(store.messagesFor(g3.threadId)).toHaveLength(0);
     expect(store.messagesFor(channel.threadId)).toHaveLength(0);
     const g2 = store.createGroup("ops-2", [a.id, b.id]);

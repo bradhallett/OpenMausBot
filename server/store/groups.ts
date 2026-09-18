@@ -102,36 +102,31 @@ export function patchGroup(ctx: StoreContext, id: string, patch: Partial<Pick<Gr
 }
 
 export function deleteGroup(ctx: StoreContext, id: string): boolean {
+  flushPendingThreadDeletions(ctx, id);
   const record = ctx.group(id);
   if (!record) return false;
-  const index = ctx.groups.indexOf(record);
-  // Phase 1: snapshot every owned thread before anything is deleted, so a
-  // partway failure can restore the full retryable state.
   const ownedThreads = [...new Set([record.threadId, ...(record.tasks ?? []).map((task) => task.threadId)])];
-  const snapshots = ownedThreads.map((threadId) => ({ threadId, state: ctx.threads.get(threadId) }));
-  // Phase 2: only now unlink transcripts, and never remove the group until
-  // every thread deletion has succeeded.
-  try {
-    for (const { threadId } of snapshots) {
-      ctx.deleteThreadRecord(threadId);
-    }
-  } catch (error) {
-    // Threads whose deletion already ran are restored from the snapshot, so
-    // the group and its full thread list stay retryable.
-    for (const { threadId, state } of snapshots) {
-      if (state) ctx.threads.set(threadId, state);
-    }
-    throw error;
-  }
+  // The tombstone is durable before the group disappears, so a crash or
+  // unlink failure can never orphan transcript files: a retry (or a
+  // restart) finishes cleanup even once the record is gone.
+  stagePendingThreadDeletions(id, ownedThreads);
+  const previousGroups = ctx.groups;
   ctx.groups = ctx.groups.filter((g) => g.id !== id);
+  // groups.json loses the group before any transcript is touched, so a
+  // partway failure leaves a tombstone to finish, not a half-live group.
   try {
     ctx.saveGroups();
   } catch (error) {
-    // The in-memory group is restored so groups.json stays authoritative and a
-    // retry can find it.
-    ctx.groups.splice(index, 0, record);
+    // The in-memory group is restored so groups.json stays authoritative
+    // and a retry can find it.
+    ctx.groups = previousGroups;
+    clearPendingThreadDeletions(id, ownedThreads);
     throw error;
   }
+  for (const threadId of ownedThreads) {
+    ctx.deleteThreadRecord(threadId);
+  }
+  clearPendingThreadDeletions(id, ownedThreads);
   ctx.emit({ type: "group.deleted", groupId: id });
   return true;
 }
@@ -270,6 +265,10 @@ export function deleteGroupTask(ctx: StoreContext, groupId: string, threadId: st
   const record = ctx.group(groupId);
   if (!record || record.dm || !record.tasks || record.tasks.length < 2) return null;
   if (!record.tasks.some((task) => task.threadId === threadId)) return null;
+  const previousTasks = record.tasks;
+  const previousThreadId = record.threadId;
+  const previousPinnedCwd = record.pinnedCwd;
+  const previousPinnedMessageId = record.pinnedMessageId;
   record.tasks = record.tasks.filter((task) => task.threadId !== threadId);
   if (record.threadId === threadId) {
     const next = record.tasks[0]!;
@@ -281,6 +280,12 @@ export function deleteGroupTask(ctx: StoreContext, groupId: string, threadId: st
   try {
     ctx.saveGroups();
   } catch (error) {
+    // The live record goes back to the exact retryable state: groups.json
+    // is still authoritative, so the next attempt re-runs the deletion.
+    record.tasks = previousTasks;
+    record.threadId = previousThreadId;
+    record.pinnedCwd = previousPinnedCwd;
+    record.pinnedMessageId = previousPinnedMessageId;
     clearPendingThreadDeletions(groupId, [threadId]);
     throw error;
   }

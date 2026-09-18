@@ -14,7 +14,10 @@ import type { TeamSetupRequest, TeamSetupResult } from "../../shared/team-setup.
 import type { MausColor } from "../../shared/wire.ts";
 import { sectionKey, UNTITLED_THREAD, type BotRecord } from "./records.ts";
 import type { StoreContext } from "./context.ts";
-import { clearPendingThreadDeletions, flushPendingThreadDeletions, stagePendingThreadDeletions } from "./messages.ts";
+import {
+  clearPendingBotCleanup, clearPendingThreadDeletions, flushPendingThreadDeletions, pendingBotCleanups,
+  stagePendingBotCleanup, stagePendingThreadDeletions,
+} from "./messages.ts";
 
 const COLORS: MausColor[] = [
   "green",
@@ -173,38 +176,10 @@ export function applyTeamSetup(ctx: StoreContext, request: TeamSetupRequest): Te
   return result;
 }
 
-export function deleteBot(ctx: StoreContext, id: string, setupRequest?: TeamSetupRequest): boolean {
-  flushPendingThreadDeletions(ctx, id);
-  const record = ctx.bot(id);
-  if (!record) return false;
-  let nextBots = ctx.bots.filter((b) => b.id !== id);
-  if (setupRequest) {
-    const chief = ctx.bot(setupRequest.botId);
-    if (!chief || chief.id === id || setupRequest.deletion?.botId !== id) throw new Error("The reviewed deletion no longer has a valid owner");
-    const lastTeamSetupReceipt: NonNullable<BotRecord["lastTeamSetupReceipt"]> = { requestId: setupRequest.requestId, result: { state: "applied", newTeams: [], bots: [
-      { id: record.id, name: record.name, action: "deleted" },
-    ] } };
-    nextBots = nextBots.map((candidate) => candidate.id === chief.id ? { ...candidate, lastTeamSetupReceipt } : candidate);
-  }
-  // Persist removal and the review receipt before deleting conversation or
-  // workspace data. A failed save must leave the bot recoverable in place.
-  // The tombstone is durable before the association disappears, so a failed
-  // transcript cleanup can still be retried and never orphans files.
-  const threadIds = [record.threadId, ...(record.tasks ?? []).map((t) => t.threadId)];
-  stagePendingThreadDeletions(id, threadIds);
-  try {
-    ctx.saveBots(nextBots);
-  } catch (error) {
-    clearPendingThreadDeletions(id, threadIds);
-    throw error;
-  }
-  ctx.bots = nextBots;
-  ctx.legacyActivities.delete(id);
-  // every task's transcript goes with the bot, not just the open one
-  for (const threadId of new Set(threadIds)) {
-    ctx.deleteThreadRecord(threadId);
-  }
-  clearPendingThreadDeletions(id, threadIds);
+/** The bot's workspace (files + memory), staged skill/approval state, and
+ * the SOUL.md mirror folder all go with the bot. A failure here leaves the
+ * durable cleanup entry in place so the deletion can be retried. */
+function cleanupBotFolders(id: string): void {
   // the bot's workspace (files + memory) goes with it — same rule as its
   // transcripts: deleting a bot deletes what it knew
   try {
@@ -220,6 +195,53 @@ export function deleteBot(ctx: StoreContext, id: string, setupRequest?: TeamSetu
   } catch {}
   // The bot folder (SOUL.md mirror) is the bot's too.
   removeBotFolder(id);
+}
+
+export function deleteBot(ctx: StoreContext, id: string, setupRequest?: TeamSetupRequest): boolean {
+  flushPendingThreadDeletions(ctx, id);
+  const record = ctx.bot(id);
+  if (!record) {
+    // The record is durably gone, but a durable cleanup entry means an
+    // earlier deletion never finished removing the bot's folders: finish
+    // it, announce the deletion, and report it done.
+    if (!pendingBotCleanups()[id]) return false;
+    cleanupBotFolders(id);
+    clearPendingBotCleanup(id);
+    ctx.emit({ type: "bot.deleted", botId: id });
+    return true;
+  }
+  let nextBots = ctx.bots.filter((b) => b.id !== id);
+  if (setupRequest) {
+    const chief = ctx.bot(setupRequest.botId);
+    if (!chief || chief.id === id || setupRequest.deletion?.botId !== id) throw new Error("The reviewed deletion no longer has a valid owner");
+    const lastTeamSetupReceipt: NonNullable<BotRecord["lastTeamSetupReceipt"]> = { requestId: setupRequest.requestId, result: { state: "applied", newTeams: [], bots: [
+      { id: record.id, name: record.name, action: "deleted" },
+    ] } };
+    nextBots = nextBots.map((candidate) => candidate.id === chief.id ? { ...candidate, lastTeamSetupReceipt } : candidate);
+  }
+  // Persist removal and the review receipt before deleting conversation or
+  // workspace data. A failed save must leave the bot recoverable in place.
+  // Both journals are durable before the association disappears, so failed
+  // transcript or folder cleanup can still be retried and never orphans files.
+  const threadIds = [record.threadId, ...(record.tasks ?? []).map((t) => t.threadId)];
+  stagePendingThreadDeletions(id, threadIds);
+  stagePendingBotCleanup(id);
+  try {
+    ctx.saveBots(nextBots);
+  } catch (error) {
+    clearPendingThreadDeletions(id, threadIds);
+    clearPendingBotCleanup(id);
+    throw error;
+  }
+  ctx.bots = nextBots;
+  ctx.legacyActivities.delete(id);
+  // every task's transcript goes with the bot, not just the open one
+  for (const threadId of new Set(threadIds)) {
+    ctx.deleteThreadRecord(threadId);
+  }
+  clearPendingThreadDeletions(id, threadIds);
+  cleanupBotFolders(id);
+  clearPendingBotCleanup(id);
   ctx.emit({ type: "bot.deleted", botId: id });
   return true;
 }
@@ -347,21 +369,38 @@ export function setChiefOfStaff(ctx: StoreContext, id: string | null, section?: 
   if (id && !selected) return null;
   const targetSection = sectionKey(selected?.section ?? section);
   const changed: BotRecord[] = [];
+  // Compute every change first: a failed save must leave every current Chief
+  // exactly as it was, in memory as on disk. Only after the save succeeds are
+  // the live records mutated, so holders of a record keep seeing the truth.
+  const pending: { record: BotRecord; elected: boolean }[] = [];
   for (const candidate of ctx.bots) {
     if (sectionKey(candidate.section) !== targetSection) continue;
-    const next = candidate.id === id;
-    if (Boolean(candidate.chiefOfStaff) === next && !(next && candidate.hidden)) continue;
-    if (next) {
-      candidate.chiefOfStaff = true;
-      // A section's main contact must stay reachable in the sidebar.
-      candidate.hidden = false;
-    } else {
-      candidate.chiefOfStaff = false;
-      delete candidate.managedSections;
-    }
-    changed.push(candidate);
+    const elected = candidate.id === id;
+    if (Boolean(candidate.chiefOfStaff) === elected && !(elected && candidate.hidden)) continue;
+    pending.push({ record: candidate, elected });
   }
-  if (changed.length) ctx.saveBots();
+  if (pending.length) {
+    const nextBots = ctx.bots.map((candidate) => {
+      const update = pending.find((entry) => entry.record === candidate);
+      if (!update) return candidate;
+      const next: BotRecord = update.elected
+        ? { ...candidate, chiefOfStaff: true, hidden: false }
+        : { ...candidate, chiefOfStaff: false };
+      if (!update.elected) delete next.managedSections;
+      return next;
+    });
+    ctx.saveBots(nextBots);
+    for (const update of pending) {
+      if (update.elected) {
+        update.record.chiefOfStaff = true;
+        update.record.hidden = false;
+      } else {
+        update.record.chiefOfStaff = false;
+        delete update.record.managedSections;
+      }
+      changed.push(update.record);
+    }
+  }
   for (const candidate of changed) ctx.emit({ type: "bot", botId: candidate.id });
   return changed;
 }

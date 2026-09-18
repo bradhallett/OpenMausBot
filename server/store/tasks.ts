@@ -295,7 +295,14 @@ export function deleteTask(ctx: StoreContext, botId: string, threadId: string): 
   const record = ctx.bot(botId);
   if (!record?.tasks) return null;
   if (!record.tasks.some((t) => t.threadId === threadId)) return null;
+  const previousTasks = record.tasks;
+  const previousThreadId = record.threadId;
+  const previousPinnedMessageId = record.pinnedMessageId;
   record.tasks = record.tasks.filter((t) => t.threadId !== threadId);
+  // The tombstone is durable before anything below can save: the
+  // replacement branch persists via createTask, and a crash between that
+  // save and cleanup must never strand the old thread's transcript.
+  stagePendingThreadDeletions(botId, [threadId]);
   const visible = record.tasks.find((task) => !task.routineRunId)
     ?? ctx.createTask(botId, undefined, record.threadId === threadId)!;
   if (record.threadId === threadId || ctx.taskByThread(botId, record.threadId)?.routineRunId) {
@@ -303,10 +310,14 @@ export function deleteTask(ctx: StoreContext, botId: string, threadId: string): 
   }
   record.unread = record.tasks.some((task) => task.unread);
   refreshBotActivity(ctx, record);
-  stagePendingThreadDeletions(botId, [threadId]);
   try {
     ctx.saveBots();
   } catch (error) {
+    // The live record returns to the exact retryable state bots.json still
+    // describes, so the next attempt re-runs the whole deletion.
+    record.tasks = previousTasks;
+    record.threadId = previousThreadId;
+    record.pinnedMessageId = previousPinnedMessageId;
     clearPendingThreadDeletions(botId, [threadId]);
     throw error;
   }

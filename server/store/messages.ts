@@ -284,9 +284,11 @@ export function markTerminalAssistantMessage(ctx: StoreContext, threadId: string
 export function appendMessage(ctx: StoreContext, threadId: string, message: Omit<Message, "id" | "at"> & { at?: number }): Message {
   const t = thread(ctx, threadId);
   const full: Message = { id: newId(), at: Date.now(), parentId: t.activeLeafId, ...redactBotAuthored(message) };
+  // Persist before touching the cache (as patchMessage does): a failed
+  // write must not leave this process on a branch a restart would lose.
+  mdb.appendMessage(threadId, full);
   t.messages.push(full);
   t.activeLeafId = full.id;
-  mdb.appendMessage(threadId, full);
   if (full.kind === "screen") {
     for (const pruned of pruneScreenFrames(t)) {
       mdb.updateMessage(threadId, pruned);
@@ -314,8 +316,8 @@ export function insertMessageAfter(ctx: StoreContext, threadId: string, anchorId
   if (!anchorExists || t.activeLeafId === anchorId) return ctx.appendMessage(threadId, message);
   const full: Message = { id: newId(), at: Date.now(), ...redactBotAuthored(message), parentId: anchorId };
   const children = t.messages.filter((m) => m.parentId === anchorId);
-  t.messages.push(full);
   mdb.appendMessage(threadId, full);
+  t.messages.push(full);
   if (full.kind === "screen") {
     for (const pruned of pruneScreenFrames(t)) {
       mdb.updateMessage(threadId, pruned);
@@ -375,9 +377,9 @@ export function branchMessage(ctx: StoreContext, threadId: string, sourceId: str
     parentId: source.parentId ?? null,
     replyToId: source.replyToId,
   };
+  mdb.appendMessage(threadId, full);
   t.messages.push(full);
   t.activeLeafId = full.id;
-  mdb.appendMessage(threadId, full);
   ctx.emit({ type: "message", threadId, message: full });
   // The message frame alone leaves every client on the OLD branch: a
   // client adopts a new message as its leaf only when it chains onto the
@@ -467,8 +469,12 @@ const PENDING_THREAD_DELETIONS_FILE = join(DATA_DIR, "pending-thread-deletions.j
 export function pendingThreadDeletions(): PendingThreadDeletions {
   try {
     return JSON.parse(readFileSync(PENDING_THREAD_DELETIONS_FILE, "utf8")) as PendingThreadDeletions;
-  } catch {
-    return {};
+  } catch (error) {
+    // A missing journal just means nothing is pending. Any other failure —
+    // a damaged file, an unreadable directory — must surface rather than
+    // masquerade as an empty journal and silently strand deletions.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw error;
   }
 }
 
@@ -498,6 +504,41 @@ export function flushPendingThreadDeletions(ctx: StoreContext, key: string): voi
     ctx.deleteThreadRecord(threadId);
   }
   clearPendingThreadDeletions(key, threadIds);
+}
+
+/** Bot deletions whose record is durably gone but whose workspace,
+ * skill-state, or bot-folder cleanup has not fully succeeded yet. Keyed by
+ * the deleted bot's id; deleteBot clears the entry only after every
+ * folder is really gone, so a crash or removal failure can never orphan a
+ * deleted bot's files. */
+export type PendingBotCleanups = Record<string, true>;
+
+const PENDING_BOT_CLEANUPS_FILE = join(DATA_DIR, "pending-bot-cleanups.json");
+
+export function pendingBotCleanups(): PendingBotCleanups {
+  try {
+    return JSON.parse(readFileSync(PENDING_BOT_CLEANUPS_FILE, "utf8")) as PendingBotCleanups;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw error;
+  }
+}
+
+function savePendingBotCleanups(record: PendingBotCleanups): void {
+  writeFileAtomic(PENDING_BOT_CLEANUPS_FILE, `${JSON.stringify(record, null, 2)}\n`);
+}
+
+export function stagePendingBotCleanup(key: string): void {
+  const record = pendingBotCleanups();
+  record[key] = true;
+  savePendingBotCleanups(record);
+}
+
+export function clearPendingBotCleanup(key: string): void {
+  const record = pendingBotCleanups();
+  if (!record[key]) return;
+  delete record[key];
+  savePendingBotCleanups(record);
 }
 
 /** The first thing the human asked in a thread — a task's natural name. */

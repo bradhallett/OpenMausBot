@@ -143,6 +143,14 @@ export class Store {
       ...this.groups.flatMap((group) => [group.threadId, ...(group.tasks ?? []).map((task) => task.threadId)]),
     ]);
     messageOps.migrateLegacyTranscripts(knownThreads);
+    // Deletion tombstones whose owner is durably gone mean an interrupted
+    // cleanup: finish it before serving anything. An entry whose owner
+    // record still exists was staged before an owner save that never
+    // committed, so its threads are alive and must be left alone.
+    for (const key of Object.keys(messageOps.pendingThreadDeletions())) {
+      if (this.bot(key) || this.group(key)) continue;
+      messageOps.flushPendingThreadDeletions(this.internals, key);
+    }
     this.registeringInitialSections = false;
   }
 
