@@ -222,11 +222,19 @@ export function createRefreshModels<Models extends ModelCatalog>(options: {
   load?: () => Models | undefined | null | Promise<Models | undefined | null>;
 }): DriverModelCatalog<Models> {
   let models = options.initial;
+  // Refreshes can overlap (create-time discovery and the Refresh action); a
+  // slower, older load resolving late must not overwrite a newer catalog.
+  let refreshGeneration = 0;
+  let appliedGeneration = 0;
   const refreshModels = async () => {
     if (!options.load) return;
+    const generation = ++refreshGeneration;
     try {
       const resolved = await options.load();
-      if (resolved && resolved.options.length) models = resolved;
+      if (resolved && resolved.options.length && generation > appliedGeneration) {
+        models = resolved;
+        appliedGeneration = generation;
+      }
     } catch {
       // Keep the last usable catalog when discovery fails.
     }

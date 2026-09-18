@@ -48,7 +48,7 @@ const ROUTINE_SCHEDULE_SCHEMA = {
     at: {
       type: "string",
       description:
-        "Only for type once: future RFC3339 date-time with an explicit timezone offset, for example 2026-09-01T09:00:00+05:30 or 2026-09-01T03:30:00Z.",
+        "Only for type once: future RFC3339 date-time with an explicit timezone offset, for example 2027-03-01T09:00:00+05:30 or 2027-03-01T03:30:00Z.",
     },
     time: {
       type: "string",
@@ -116,7 +116,7 @@ const SHORT_WEEKDAYS = {
 } as const satisfies Record<string, (typeof WEEKDAYS)[number]>;
 
 const SUPPORTED_SCHEDULES =
-  'Supported schedules: {"type":"once","at":"2026-09-01T09:00:00+05:30"} (future RFC3339 with explicit offset), ' +
+  'Supported schedules: {"type":"once","at":"2027-03-01T09:00:00+05:30"} (future RFC3339 with explicit offset), ' +
   '{"type":"weekly","time":"09:00","weekdays":["monday","friday"]}, {"type":"daily","time":"09:00"}, ' +
   '{"type":"interval","every_minutes":15,"weekdays":["monday","friday"],"window_start":"09:00","window_end":"17:00"}, ' +
   'or {"type":"cron","expression":"0 9 1 * *","timeZone":"Asia/Kolkata"} (monthly at 09:00 on day 1; five fields and an explicit IANA timezone).';
@@ -143,6 +143,25 @@ function normalizeScheduleInput(args: Json): NormalizedSchedule {
     }
   }
   if (!jsonRecord(raw)) return { error: `The schedule must be a JSON object. ${SUPPORTED_SCHEDULES}` };
+  // Nested values arrive as JSON strings too: coerce a JSON-string weekdays
+  // or window to the array/record it encodes — daily would otherwise widen a
+  // string weekdays to all seven days and the window check would reject it.
+  if (typeof raw.weekdays === "string") {
+    try {
+      const weekdays = JSON.parse(raw.weekdays);
+      if (Array.isArray(weekdays)) raw.weekdays = weekdays;
+    } catch {
+      // Not JSON: weekday validation below reports it.
+    }
+  }
+  if (typeof raw.window === "string") {
+    try {
+      const parsedWindow = JSON.parse(raw.window);
+      if (jsonRecord(parsedWindow)) raw.window = parsedWindow;
+    } catch {
+      // Not JSON: window validation below reports it.
+    }
+  }
   const type = typeof raw.type === "string" ? raw.type.trim().toLowerCase() : "";
   const fields = type === "once"
     ? ["type", "at"]
@@ -169,7 +188,7 @@ function normalizeScheduleInput(args: Json): NormalizedSchedule {
   }
   if (type === "once") {
     if (typeof raw.at !== "string" || !raw.at.trim()) {
-      return { error: `A once schedule needs "at": a future RFC3339 date-time with an explicit offset, for example 2026-09-01T09:00:00+05:30.` };
+      return { error: `A once schedule needs "at": a future RFC3339 date-time with an explicit offset, for example 2027-03-01T09:00:00+05:30.` };
     }
     return { schedule: { type: "once", at: raw.at.trim() } };
   }

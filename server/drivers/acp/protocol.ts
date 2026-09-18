@@ -135,7 +135,13 @@ export class AcpConnection {
       // callback — separate from child-process and stdin failures.
       this.failAll(new Error(`ACP agent stdout failed: ${error.message}`));
       this.close();
-      this.options.onHostReadError?.(error);
+      try {
+        this.options.onHostReadError?.(error);
+      } catch (observerError) {
+        // the observer is a driver diagnostic; a throw here must not escape
+        // the stream listener and crash the host
+        console.error("ACP onHostReadError observer failed", observerError);
+      }
     });
     options.stdout.on("data", (chunk: string) => {
       try {
@@ -231,7 +237,13 @@ export class AcpConnection {
     this.closed = true;
     this.buffer = "";
     this.failAll(new Error(this.options.closeErrorMessage ?? "The ACP connection was closed."));
-    this.options.onClose?.();
+    try {
+      this.options.onClose?.();
+    } catch (error) {
+      // observers are diagnostics; a throw here must not unwind into the
+      // caller of close() and skip what follows it
+      console.error("ACP onClose observer failed", error);
+    }
   }
 
   /** Fail every pending request and close the connection — one protocol

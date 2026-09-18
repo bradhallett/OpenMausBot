@@ -315,11 +315,23 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         }
         const cwd = turn.cwd ?? turnConfig.workspace ?? homedir();
         const env = childEnv(turnConfig);
-        if (
-          support.requireAuthenticationBeforeSpawn
-          && !skipSubscriptionAuthForLocalInject(turn.model)
-          && !(await support.isAuthenticated(env, turnConfig, instanceId))
-        ) {
+        let authenticated = true;
+        if (support.requireAuthenticationBeforeSpawn && !skipSubscriptionAuthForLocalInject(turn.model)) {
+          try {
+            authenticated = await support.isAuthenticated(env, turnConfig, instanceId);
+          } catch (error) {
+            // A rejection while a teardown canceled the claim still owes the
+            // thread a settled turn; any other rejection is the caller's.
+            if (runtime.claimCanceled(turnId)) {
+              runtime.endTurn(threadId, turnId);
+              emit({ ...base(threadId, turnId), type: "turn.started" });
+              emit({ ...base(threadId, turnId), type: "turn.completed", ok: false, stopReason: "interrupted", cost: null });
+              return { turnId };
+            }
+            throw error;
+          }
+        }
+        if (!authenticated) {
           if (runtime.claimCanceled(turnId)) {
             runtime.endTurn(threadId, turnId);
             emit({ ...base(threadId, turnId), type: "turn.started" });

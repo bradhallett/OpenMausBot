@@ -55,6 +55,9 @@ export function generateClaudeReview(
       stderr = (stderr + chunk).slice(-8_192);
     });
     child.on("error", (error) => finish(error));
+    // An early CLI exit EPIPEs the stdin.end below; without a handler the
+    // stream error would crash the host, so settle the promise instead.
+    child.stdin.on("error", (error) => finish(error));
     child.on("close", (code) => {
       if (code === 0) finish();
       else finish(new Error(stderr.trim() || `Claude review exited ${code}`));

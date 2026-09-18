@@ -133,6 +133,24 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
     const { emit, base } = runtime;
 
     const sendTurn = async (turn: SendTurnInput) => {
+      const { threadId } = turn;
+      const turnId = newId();
+      runtime.claimTurn(threadId, turnId);
+      try {
+        return await runClaimedTurn(turn, threadId, turnId);
+      } catch (error) {
+        // setTurn consumes the claim; a setup path that throws before it
+        // would leave the reservation behind and the thread busy forever.
+        runtime.endTurn(threadId, turnId);
+        throw error;
+      }
+    };
+
+    const runClaimedTurn = async (
+      turn: SendTurnInput,
+      threadId: string,
+      turnId: string,
+    ) => {
       assertCompanyTurnAllowed(config, turn, input.environment);
       // One driver instance serves many threads. Interrupt state belongs to
       // this turn so activity elsewhere cannot cancel or revive its retry.
@@ -142,7 +160,6 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       // Wakes a retry backoff the moment Stop arrives, so the turn settles
       // now rather than after the full wait.
       const stopSignal = new AbortController();
-      const { threadId } = turn;
       // Direct adapter callers predating the per-bot selector retain the
       // instance's legacy fullAuto setting. Harness turns always send an
       // explicit mode, which takes precedence.
@@ -164,8 +181,6 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         "codex_apps",
         "computer-use",
       ]);
-      runtime.assertThreadIdle(threadId);
-      const turnId = newId();
       // a retry relaunches the whole app-server; the backoff is scaled down in
       // tests so a fake's transient failures don't stall real seconds
       const retryScale = Number(process.env.FAKE_CODEX_RETRY_SCALE ?? "1");
@@ -900,9 +915,13 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       }
     };
 
-    void launchAttempt(0).catch(() => {});
+    void launchAttempt(0).catch(() => {
+      // A setup failure before setTurn never registered a Turn; release the
+      // claim so the thread is not stuck busy forever.
+      if (!runtime.turn(threadId)) runtime.endTurn(threadId, turnId);
+    });
     return { turnId };
-  };
+    };
 
   const snapshot = async (): Promise<ProviderSnapshot> =>
     codexSnapshot({
