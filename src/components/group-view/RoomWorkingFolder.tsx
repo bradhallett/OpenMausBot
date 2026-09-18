@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Folder, FolderOpen } from "lucide-react";
-import { api, type Group } from "@/state/store";
+import { api, useStore, type Group } from "@/state/store";
 import { shortPath } from "@/lib/short-path";
 import { t } from "@/lib/i18n";
 import { useDesktopCapabilities } from "../DesktopCapabilities";
@@ -13,6 +13,7 @@ import { useDesktopCapabilities } from "../DesktopCapabilities";
  * rather than through patchGroup: the server validates the path and a
  * rejected folder must not stick in local state. */
 export function RoomWorkingFolder({ group }: { group: Group }) {
+  const { dispatch } = useStore();
   const { capabilities } = useDesktopCapabilities();
   const home = capabilities.host.homeDir;
   const [draft, setDraft] = useState<string | null>(null);
@@ -27,7 +28,8 @@ export function RoomWorkingFolder({ group }: { group: Group }) {
     setSaving(true);
     setError(null);
     try {
-      await api(`/api/groups/${group.id}`, { method: "PATCH", body: JSON.stringify({ cwd }) });
+      const response = await api(`/api/groups/${group.id}`, { method: "PATCH", body: JSON.stringify({ cwd }) });
+      dispatch({ type: "groupPatched", group: response.group });
       setDraft(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -87,7 +89,7 @@ export function RoomWorkingFolder({ group }: { group: Group }) {
           </button>
         </form>
       )}
-      {error && <div className="mt-2 text-[12px] text-danger">{error}</div>}
+      {error && <div role="alert" className="mt-2 text-[12px] text-danger">{error}</div>}
     </div>
   );
 }
@@ -95,12 +97,14 @@ export function RoomWorkingFolder({ group }: { group: Group }) {
 /** The folder this room's turns run in — the pinned folder once a turn ran,
  * else the room folder a first turn would pin. Always present so the desk
  * is settable before any folder exists; quiet (icon only) until then. */
-export function RoomWorkingFolderChip({ group, onToggle }: { group: Group; onToggle: () => void }) {
+export function RoomWorkingFolderChip({ group, folderOpen, onToggle }: { group: Group; folderOpen: boolean; onToggle: () => void }) {
   const folder = group.pinnedCwd === undefined ? group.cwd : (group.pinnedCwd ?? undefined);
   if (!folder) {
     return (
       <button
         onClick={onToggle}
+        aria-label={t("room.folder.chipTitle")}
+        aria-expanded={folderOpen}
         className="rounded-md p-1.5 text-ink-secondary hover:bg-raised hover:text-ink"
         title={t("room.folder.chipTitle")}
       >
@@ -112,6 +116,7 @@ export function RoomWorkingFolderChip({ group, onToggle }: { group: Group; onTog
   return (
     <button
       onClick={onToggle}
+      aria-expanded={folderOpen}
       className="flex max-w-[180px] items-center gap-1.5 rounded-full border border-hairline/40 bg-raised/60 px-2.5 py-1 text-[12.5px] text-ink-secondary hover:bg-raised hover:text-ink"
       title={t("chat.workingFolder", { folder })}
     >

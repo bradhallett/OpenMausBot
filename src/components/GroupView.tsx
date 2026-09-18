@@ -298,7 +298,7 @@ export function GroupView({ group }: { group: Group }) {
             isGroup
           />
           <GroupCallButton group={group} members={members} />
-          {!remoteClient && !setupPending && !group.dm && <RoomWorkingFolderChip group={group} onToggle={() => setFolderOpen((open) => !open)} />}
+          {!remoteClient && !setupPending && !group.dm && <RoomWorkingFolderChip group={group} folderOpen={folderOpen} onToggle={() => setFolderOpen((open) => !open)} />}
           {!remoteClient && !setupPending && !group.dm && <DefaultResponderSelect group={group} members={members} />}
           {group.dm || remoteClient ? (
             memberMauses

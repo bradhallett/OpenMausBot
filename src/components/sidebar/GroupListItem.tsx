@@ -62,15 +62,18 @@ export function GroupListItem({
   group,
   density,
   query = "",
+  menu = null,
   onMenu,
 }: {
   group: Group;
   density: SidebarDensity;
   query?: string;
+  menu?: { groupId: string; x: number; y: number } | null;
   onMenu: (menu: { groupId: string; x: number; y: number }) => void;
 }) {
   const { state, dispatch } = useStore();
   const selected = state.activeView === "chat" && state.selectedId === group.id;
+  const menuOpen = menu?.groupId === group.id;
   const [threadsOpen, setThreadsOpen] = useState(selected || Boolean(query));
   useEffect(() => { if (selected || query) setThreadsOpen(true); }, [selected, query]);
   const expanded = !group.dm && threadsOpen && density !== "icons";
@@ -96,6 +99,7 @@ export function GroupListItem({
         const rect = e.currentTarget.getBoundingClientRect();
         onMenu({ groupId: group.id, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
       }}
+      aria-controls={menuOpen ? `room-menu-${group.id}` : undefined}
       className={cn(
         "relative flex w-full items-center rounded-md text-left outline-none focus-visible:ring-1 focus-visible:ring-accent/60",
         density === "icons" ? "justify-center px-1 py-1.5" : density === "compact" ? "gap-1.5 py-1 pl-6 pr-2" : "gap-2 py-1.5 pl-6 pr-2",

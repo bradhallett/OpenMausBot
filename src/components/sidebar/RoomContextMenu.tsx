@@ -69,6 +69,7 @@ export function RoomContextMenu({
   return createPortal(
     <div
       ref={menuRef}
+      id={`room-menu-${group.id}`}
       data-room-menu
       data-sidebar
       role="menu"

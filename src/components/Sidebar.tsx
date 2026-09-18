@@ -117,6 +117,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
   const remoteClient = window.ogb?.remoteClient?.active === true;
   const { capabilities } = useDesktopCapabilities();
   const importReturnRef = useRef<HTMLButtonElement>(null);
+  const attentionRef = useRef<HTMLButtonElement>(null);
   const sidebarRef = useRef<HTMLElement>(null);
   const [confirm, setConfirm] = useState<{ kind: BotConfirmKind; bot: Bot } | null>(null);
   const cancelConfirm = useCallback(() => setConfirm(null), []);
@@ -203,7 +204,10 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
   useEffect(() => {
     if (!plusOpen) return;
     const closePlusMenu = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setPlusOpen(false);
+      if (event.key === "Escape") {
+        setPlusOpen(false);
+        importReturnRef.current?.focus();
+      }
     };
     window.addEventListener("keydown", closePlusMenu);
     return () => window.removeEventListener("keydown", closePlusMenu);
@@ -212,7 +216,10 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
   useEffect(() => {
     if (!attentionOpen) return;
     const closeAttentionMenu = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setAttentionOpen(false);
+      if (event.key === "Escape") {
+        setAttentionOpen(false);
+        attentionRef.current?.focus();
+      }
     };
     window.addEventListener("keydown", closeAttentionMenu);
     return () => window.removeEventListener("keydown", closeAttentionMenu);
@@ -516,6 +523,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
             )}
           </div>
           <button
+            ref={attentionRef}
             type="button"
             onClick={() => setAttentionOpen((o) => !o)}
             aria-label={t("attention.title")}
@@ -755,6 +763,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
                         group={group}
                         density={density}
                         query={q}
+                        menu={roomMenu}
                         onMenu={setRoomMenu}
                       />
                     ))}
@@ -927,6 +936,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
         <SectionPicker
           current={state.bots.find((b) => b.id === sectionPicker.botId)?.section}
           anchor={sectionPicker}
+          returnFocusRef={sidebarRef}
           onClose={() => setSectionPicker(null)}
           onAssign={(section) => {
             if (!remoteClient) {

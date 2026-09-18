@@ -64,7 +64,6 @@ export function useComputerPanelView({
   useEffect(() => {
     if ((!androidConnected && panelView === "android") || (!browserEnabled && panelView === "browser")) {
       setPanelView("computer");
-      writeComputerPanelView(bot.id, "computer");
     }
   }, [androidConnected, bot.id, browserEnabled, panelView]);
 

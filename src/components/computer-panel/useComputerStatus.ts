@@ -1,5 +1,5 @@
 import { useEffect, useRef, type Dispatch, type SetStateAction } from "react";
-import { api, useStore, type Bot, type InstanceInfo } from "@/state/store";
+import { api, type Bot, type InstanceInfo } from "@/state/store";
 import type { CloudBackend } from "../../../shared/wire";
 import {
   decideBoxErrorPhase,
@@ -73,8 +73,6 @@ export function useComputerStatus(deps: ComputerStatusDeps) {
     capabilitiesReady,
     localAvailable,
     providerSupportsLocal,
-    localSelectable,
-    isLinux,
     vmSupported,
     cloudSupported,
     vpsSupported,
@@ -85,7 +83,6 @@ export function useComputerStatus(deps: ComputerStatusDeps) {
     cloudBackend,
     retry,
     phase,
-    selectedInstance,
     vmReadinessAttempts,
     setPhase,
     setError,
@@ -101,7 +98,6 @@ export function useComputerStatus(deps: ComputerStatusDeps) {
     setResolvedComputerSelection,
     setTeamComputer,
   } = deps;
-  const { state } = useStore();
   // Busy flips pause scheduling, they must not abort an in-flight capture:
   // read the flag through a ref so a turn never re-runs the resolve effect.
   const resolveBusy = useRef(profileBot.busy);
@@ -328,14 +324,10 @@ export function useComputerStatus(deps: ComputerStatusDeps) {
     retry,
     capabilitiesReady,
     localAvailable,
-    localSelectable,
-    isLinux,
     providerSupportsLocal,
-    selectedInstance?.driverKind,
     vmSupported,
     cloudSupported,
     vpsSupported,
-    state.config?.vps?.sshAlias,
     panelView,
     computerSelectionPersisted,
     surfaceReady,

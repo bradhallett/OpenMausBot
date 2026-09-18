@@ -1570,7 +1570,7 @@
   "computer.capturingLocal": "Захоплюємо екран цього комп'ютера…",
   "computer.openSettings": "Відкрити налаштування",
   "computer.openBrowserTab": "Відкрити вкладку Браузер",
-  "computer.teamSharedNote": "Спільні файли та облікові записи з входом. Авто використовує цю скриньку, а не приватний комп'ютер.",
+  "computer.teamSharedNote": "Спільні файли та облікові записи з входом. Авто використовує цей Box, а не приватний комп'ютер.",
   "computer.openTeamMap": "Відкрити Team map",
   "computer.refreshTeamStatus": "Оновити стан спільного комп'ютера",
   "computer.chooseCloudWake": "Оберіть Хмару, щоб розбудити",

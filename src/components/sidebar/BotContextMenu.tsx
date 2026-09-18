@@ -122,6 +122,7 @@ export function BotContextMenu({
   return createPortal(
     <div
       ref={menuRef}
+      id={`bot-menu-${bot.id}`}
       data-bot-menu
       data-sidebar
       role="menu"

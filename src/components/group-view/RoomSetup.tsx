@@ -75,9 +75,7 @@ export function RoomSetup({ group, members }: { group: Group; members: Bot[] }) 
   const responder = (): GroupDefaultResponder => {
     if (behavior === "everyone") return { kind: "everyone" };
     if (behavior === "mentions") return { kind: "mentions" };
-    return members.some((member) => member.id === leadId)
-      ? { kind: "member", botId: leadId }
-      : group.defaultResponder;
+    return selectedLead ? { kind: "member", botId: selectedLead.id } : { kind: "mentions" };
   };
 
   const finish = async (action: "complete" | "skip") => {

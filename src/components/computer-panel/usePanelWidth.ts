@@ -32,7 +32,9 @@ export function usePanelWidth() {
   const onResizeEnd = (event: PointerEvent<HTMLDivElement>) => {
     if (!resizeFrom.current) return;
     resizeFrom.current = null;
-    event.currentTarget.releasePointerCapture(event.pointerId);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
     try {
       localStorage.setItem(PANEL_WIDTH_KEY, String(panelWidth));
     } catch {

@@ -7,8 +7,18 @@ import type { AppState } from "@/state/store";
 export function useRevealedThreadRow(reveal: AppState["revealThread"], currentThreadId: string | null) {
   useEffect(() => {
     if (!reveal || reveal.threadId !== currentThreadId) return;
-    const row = document.querySelector<HTMLElement>(`[data-sidebar-thread-row="${CSS.escape(reveal.threadId)}"]`);
-    row?.scrollIntoView({ block: "nearest" });
+    const findRow = () => document.querySelector<HTMLElement>(`[data-sidebar-thread-row="${CSS.escape(reveal.threadId)}"]`);
+    const row = findRow();
+    if (row) {
+      row.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    // A target inside a collapsed project expands in a later commit, so the
+    // synchronous query can miss its row; look again on the next frame.
+    const frame = requestAnimationFrame(() => {
+      findRow()?.scrollIntoView({ block: "nearest" });
+    });
+    return () => cancelAnimationFrame(frame);
   }, [reveal, currentThreadId]);
 }
 

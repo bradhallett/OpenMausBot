@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type RefObject } from "react";
 import { Check, FolderMinus } from "lucide-react";
 import { useStore } from "@/state/store";
 import { cn } from "@/lib/cn";
@@ -11,12 +11,14 @@ import { t } from "@/lib/i18n";
 export function SectionPicker({
   current,
   anchor,
+  returnFocusRef,
   onClose,
   onAssign,
 }: {
   /** the target's current section; undefined = none */
   current: string | undefined;
   anchor: { x: number; y: number };
+  returnFocusRef?: RefObject<HTMLElement | null>;
   onClose: () => void;
   /** "" clears — the server drops an empty section */
   onAssign: (section: string) => void;
@@ -26,6 +28,7 @@ export function SectionPicker({
   const trimmed = name.trim();
 
   useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const onDown = (e: MouseEvent) => {
       if (!(e.target instanceof Element) || !e.target.closest("[data-section-picker]")) onClose();
     };
@@ -37,8 +40,10 @@ export function SectionPicker({
       window.removeEventListener("mousedown", onDown);
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("blur", onClose);
+      const target = returnFocusRef?.current ?? opener;
+      if (target?.isConnected) target.focus();
     };
-  }, [onClose]);
+  }, [onClose, returnFocusRef]);
 
   // Hidden bots can carry a stale assignment; don't offer it as a context.
   // Channels and bots share one namespace, so Work or Personal can hold both.
@@ -62,6 +67,8 @@ export function SectionPicker({
   return (
     <div
       data-section-picker
+      role="dialog"
+      aria-label={t("sidebar.section.moveToContext")}
       style={{ top, left, maxHeight }}
       className="fixed z-40 max-w-[calc(100vw-16px)] w-[236px] overflow-y-auto rounded-xl border border-hairline/50 bg-menu py-2 shadow-2xl shadow-black/60"
     >
