@@ -55,8 +55,8 @@ export function openNotificationTarget(
   const bot = state.bots.find((candidate) =>
     candidate.threadId === target.threadId || candidate.tasks?.some((task) => task.threadId === target.threadId)
   ) ?? state.bots.find((candidate) => candidate.id === target.botId);
-  dispatch({ type: "select", id: bot?.id ?? target.botId });
   if (!bot) return;
+  dispatch({ type: "select", id: bot.id });
   const known =
     bot.threadId === target.threadId ||
     (bot.tasks ?? []).some((task) => task.threadId === target.threadId);
@@ -96,4 +96,3 @@ export function openThread(
   dispatch({ type: "notice", notice: { kind: "thread-gone", botName: bot?.name ?? null } });
   return false;
 }
-

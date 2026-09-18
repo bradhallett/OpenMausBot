@@ -75,7 +75,10 @@ export function createTaskWriteQueue(options: TaskWriteQueueOptions): TaskWriteQ
     void execution.catch(() => {}); // handled by the write and send paths
     const pending: TaskWriteEntry = { botId, updatesDefault: Boolean(patch.updateBotDefault || previous?.updatesDefault), patch: { ...previous?.patch, ...patch }, promise, execution };
     taskWrites.set(threadId, pending);
-    void pending.promise.then((bot) => {
+   
+    // Settle the lane on execution, not the save chain: the chain swallows
+    // earlier failures, so only a fully successful batch may clear it.
+    void execution.then(([, bot]) => {
       if (taskWrites.get(threadId) !== pending) return;
       taskWrites.delete(threadId);
       if (!disposed && bot) options.onAuthoritative(overlayBot(bot));

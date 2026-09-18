@@ -11,7 +11,12 @@ export function rememberConsumedQueueId(
   consumed: AppState["consumedQueueIds"],
   queueId: string,
 ): AppState["consumedQueueIds"] {
-  const next = { ...consumed, [queueId]: true as const };
+  const next = { ...consumed };
+  // A refreshed receipt moves to the end of the window; keeping its old
+  // insertion position would let overflow eviction drop a live tombstone
+  // that reconciliation re-inserted at its historical spot.
+  delete next[queueId];
+  next[queueId] = true;
   const overflow = Object.keys(next).length - MAX_CONSUMED_QUEUE_IDS;
   if (overflow > 0) {
     for (const id of Object.keys(next).slice(0, overflow)) delete next[id];
