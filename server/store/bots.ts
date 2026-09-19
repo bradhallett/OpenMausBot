@@ -175,13 +175,18 @@ export function applyTeamSetup(ctx: StoreContext, request: TeamSetupRequest): Te
 
 /** Workspace, skill-state and the bot folder go with the bot — shared by
  * the first deletion attempt and by a retry that finds the record already
- * gone. */
-function removeBotArtifacts(id: string): void {
+ * gone. Returns false when any removal failed so the caller can keep the
+ * pending-deletion marker and retry instead of orphaning the files. */
+function removeBotArtifacts(id: string): boolean {
+  let removed = true;
   // the bot's workspace (files + memory) goes with it — same rule as its
   // transcripts: deleting a bot deletes what it knew
   try {
     rmSync(workspaceDir(id), { recursive: true, force: true });
-  } catch {}
+  } catch (error) {
+    removed = false;
+    console.warn(`[bot-folder] could not remove workspace for ${id}: ${(error as Error).message}`);
+  }
   // Generated task-workspaces are project files, not bot memory. Keep
   // them (and user-selected cwd folders) when deleting conversations.
   // Approval state deliberately lives outside the bot-writable workspace.
@@ -189,9 +194,16 @@ function removeBotArtifacts(id: string): void {
   // proposals, manifests, and native-link ownership records with it.
   try {
     rmSync(join(DATA_DIR, "skill-state", id), { recursive: true, force: true });
-  } catch {}
+  } catch (error) {
+    removed = false;
+    console.warn(`[bot-folder] could not remove skill-state for ${id}: ${(error as Error).message}`);
+  }
   // The bot folder (SOUL.md mirror) is the bot's too.
-  removeBotFolder(id);
+  if (!removeBotFolder(id)) {
+    removed = false;
+    console.warn(`[bot-folder] could not remove bot folder for ${id}`);
+  }
+  return removed;
 }
 
 export function deleteBot(ctx: StoreContext, id: string, setupRequest?: TeamSetupRequest): boolean {
@@ -199,10 +211,16 @@ export function deleteBot(ctx: StoreContext, id: string, setupRequest?: TeamSetu
   const record = ctx.bot(id);
   if (!record) {
     // The record is durably gone; a non-empty flush means a prior attempt
-    // died mid-deletion. Finish its cleanup and still notify clients.
+    // died mid-deletion. Finish its cleanup, then notify clients.
     if (resumed.length === 0) return false;
-    removeBotArtifacts(id);
-    ctx.emit({ type: "bot.deleted", botId: id });
+    // The flush above cleared the transcript marker; re-stage it so a
+    // failure in artifact cleanup still leaves a durable retry path
+    // instead of orphaning the remaining files with no owner record.
+    stagePendingThreadDeletions(id, resumed);
+    if (removeBotArtifacts(id)) {
+      clearPendingThreadDeletions(id, resumed);
+      ctx.emit({ type: "bot.deleted", botId: id });
+    }
     return false;
   }
   let nextBots = ctx.bots.filter((b) => b.id !== id);
@@ -232,11 +250,14 @@ export function deleteBot(ctx: StoreContext, id: string, setupRequest?: TeamSetu
   for (const threadId of new Set(threadIds)) {
     ctx.deleteThreadRecord(threadId);
   }
-  // If this throws, the tombstone stays staged: the record is already gone,
-  // so a retry takes the resumed branch above and finishes this cleanup.
-  removeBotArtifacts(id);
-  clearPendingThreadDeletions(id, threadIds);
-  ctx.emit({ type: "bot.deleted", botId: id });
+  // Artifact cleanup is the last fallible step. On failure the tombstone
+  // stays staged: the record is already gone, so a retry takes the resumed
+  // branch above and finishes this cleanup before clients are told the
+  // deletion completed.
+  if (removeBotArtifacts(id)) {
+    clearPendingThreadDeletions(id, threadIds);
+    ctx.emit({ type: "bot.deleted", botId: id });
+  }
   return true;
 }
 
