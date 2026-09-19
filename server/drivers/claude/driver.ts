@@ -9,6 +9,7 @@
 //   - the bot's cloud computer (box.ascii.dev) via server/computer-proxy.ts
 //     — screenshot/exec/open_url, the CUA-on-the-box bridge
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -22,7 +23,7 @@ import type {
   SteerOutcome,
 } from "../../contracts.ts";
 import { newId } from "../../contracts.ts";
-import { describeSpawnFailure, execCli, killCliTree, spawnCli } from "../../procs.ts";
+import { assertSafeCliArgv, describeSpawnFailure, execCli, killCliTree, resolveCli, spawnCli } from "../../procs.ts";
 import { classifyResumeFailure, mayReplay, recoveryPromptFor } from "../../resume-recovery.ts";
 import { classifyError, computeBackoff, interruptibleDelay, RETRY_MAX_ATTEMPTS } from "../retry.ts";
 import { applyClaudeInject, mergeLocalInject } from "../local-inject.ts";
@@ -39,7 +40,14 @@ import {
   inheritsUserConfig,
   readClaudeAuthSettings,
 } from "./env-auth.ts";
-import { parseClaudeCliVersion, claudeCliSupports, claudeCliUpdate, type ClaudeCliVersion } from "./cli-version.ts";
+import {
+  claudeCliSupports,
+  claudeCliSupportsAutocompact,
+  claudeCliUpdate,
+  parseClaudeCliVersion,
+  parseClaudeHelpFlags,
+  type ClaudeCliVersion,
+} from "./cli-version.ts";
 import {
   DRIVER_KIND,
   STATIC_CLAUDE_MODELS,
@@ -68,6 +76,63 @@ import { handleLine } from "./stream-events.ts";
 import { claudeTurnMcpServers } from "./turn-mcp.ts";
 import { generateClaudeReview } from "./generate-review.ts";
 import type { ActiveTurn, Session } from "./session.ts";
+
+// The flags one engine build really accepts, read from its own --help once
+// per binary+version for the life of this process (#1187): the answer is a
+// property of the build, not of the instance or turn asking for it.
+const claudeHelpFlagsCache = new Map<string, Promise<Set<string> | null>>();
+
+/** `claude --help`, parsed. Null when the probe fails or prints nothing
+ * flag-shaped — the version floors then keep governing as before. Probed
+ * with a closed stdin, unlike execCli: a CLI that ignores --help and waits
+ * for a prompt would otherwise hold every first turn until the timeout. */
+const readClaudeHelpFlags = (
+  cli: string,
+  version: ClaudeCliVersion,
+  env: NodeJS.ProcessEnv,
+): Promise<Set<string> | null> => {
+  const key = cli + "\0" + version.join(".");
+  const cached = claudeHelpFlagsCache.get(key);
+  if (cached) return cached;
+  const probe = new Promise<Set<string> | null>((resolve) => {
+    let settled = false;
+    let stdout = "";
+    let child: ReturnType<typeof spawn>;
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (flags: Set<string> | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(flags);
+    };
+    try {
+      const resolved = resolveCli(cli, ["--help"]);
+      assertSafeCliArgv(resolved);
+      child = spawn(resolved.command, resolved.args, {
+        env,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch {
+      resolve(null);
+      return;
+    }
+    timer = setTimeout(() => {
+      child.kill();
+      finish(null);
+    }, 4000);
+    timer.unref?.();
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.on("error", () => finish(null));
+    child.on("close", () => finish(parseClaudeHelpFlags(stdout)));
+  });
+  // a failed probe is cached too: it would fail identically next turn
+  claudeHelpFlagsCache.set(key, probe);
+  return probe;
+};
 
 export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
   driverKind: DRIVER_KIND,
@@ -124,6 +189,12 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       });
 
     const sessions = new Map<string, Session>();
+    // sha256 of the standing identity (persona + SOUL.md) each thread's
+    // current session was launched with (#1346). Kept beside `sessions` rather than on the
+    // Session record: an idle-closed session is later resumed by --resume,
+    // and the CLI replays the same recorded prompt then, so the fingerprint
+    // must outlive the process it describes.
+    const sessionPromptHashes = new Map<string, string | null>();
     const configuredIdleMinimum = Number(process.env.OMB_CLAUDE_SESSION_IDLE_MIN_MS);
     const sessionIdleMinimum = Number.isFinite(configuredIdleMinimum) && configuredIdleMinimum > 0
       ? configuredIdleMinimum
@@ -261,6 +332,32 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           cliVersionChecked = true;
         }
       }
+      // Issue #1346: below the --system-prompt-snapshot floor the CLI
+      // replays the system prompt its session STARTED with — on --resume
+        // as well — so an edited soul never reaches a running thread. When
+        // the standing identity no longer matches what this thread's session
+        // was launched with, the turn below drops the cursor and starts a
+        // fresh session carrying the harness's replay of the conversation
+        // instead. Context sections that change mid-conversation (a pinned
+        // surface, mounted tools) are deliberately NOT this signal: they
+        // ride the spawn contract, and replaying the thread for them would
+        // needlessly destroy native session continuity.
+      const standingPrompt = turn.systemStanding ?? turn.systemStable ?? turn.system ?? null;
+      const promptHash = standingPrompt === null ? null : createHash("sha256").update(standingPrompt).digest("hex");
+      const recordedPromptHash = sessionPromptHashes.get(threadId);
+      const soulReplay = sessionId !== null
+        && turn.refreshSystemPrompt === true
+        && cliVersionChecked
+        && !claudeCliSupports(cliVersion, "--system-prompt-snapshot")
+        && recordedPromptHash !== undefined
+        && recordedPromptHash !== promptHash;
+      // The fresh session a soul replay launches has never seen this thread,
+      // so its first message is the harness's own replay of the conversation
+      // (attached alongside the cursor for exactly such a fresh session),
+      // never the bare turn text.
+      const launchPromptMsg = soulReplay && turn.recoveryText !== undefined
+        ? claudeUserMessage(turn.recoveryText, turn.images)
+        : promptMsg;
       const isolated = !inheritsUserConfig(turnEnvironment);
       if (isolated) {
         // A bot gets the tools and instructions its owner gave it, not
@@ -281,7 +378,15 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         if (claudeCliSupports(cliVersion, "--setting-sources")) args.push("--setting-sources", "project");
       }
       const compactWindow = autoCompactWindow(turnEnvironment);
-      if (compactWindow && claudeCliSupports(cliVersion, "--autocompact")) {
+      // Issue #1187: the autocompact floor diverged from shipped builds,
+      // and an unknown flag is a hard argv error that kills every turn —
+      // so the engine's own --help decides whenever it could be read, and
+      // the floor only governs when it could not.
+      let autocompactSupported = claudeCliSupports(cliVersion, "--autocompact");
+      if (compactWindow && cliVersionChecked && cliVersion !== null) {
+        autocompactSupported = claudeCliSupportsAutocompact(cliVersion, await readClaudeHelpFlags(config.cli, cliVersion, turnEnvironment));
+      }
+      if (compactWindow && autocompactSupported) {
         args.push("--autocompact", compactWindow);
       }
       // An old pair conversation can still carry its first assignment in
@@ -424,6 +529,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         }
         retryState.delete(threadId);
       };
+      // A soul replay deliberately drops the cursor: on --resume the CLI
+      // would replay the stale recorded prompt, so a NEW session — with
+      // the current prompt and the conversation replayed inline — is the
+      // only way the edited soul reaches the model (#1346).
+      const launchSessionId = sessionId !== null && !soulReplay ? sessionId : newSessionId ?? newId();
 
       try {
         // Create the prompt file only for a new process. A compatible live
@@ -506,8 +616,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         if (authSettingsPath) {
           writeFileSync(authSettingsPath, JSON.stringify(authSettings), { mode: 0o600 });
         }
-        if (sessionId) args.push("--resume", sessionId);
-        else args.push("--session-id", newSessionId!);
+        if (sessionId !== null && !soulReplay) args.push("--resume", sessionId);
+        else args.push("--session-id", launchSessionId);
       } catch (error) {
         cleanupUnownedLaunch();
         throw error;
@@ -541,7 +651,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         systemPromptPath,
         argsKey,
         volatile: turn.systemVolatile ?? "",
-        sessionId: sessionId ?? newSessionId,
+        sessionId: launchSessionId,
         sawInit: false,
         nativePermissionMode: null,
         turn: { turnId, input: turn, retryAbort, settled: false, sawStreamDelta: false },
@@ -550,6 +660,14 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         stderr: "",
       };
       sessions.set(threadId, session);
+      // What the CLI just recorded as this thread's prompt: every fresh
+      // launch, and a --resume only on a build that refreshes the recorded
+      // prompt (--system-prompt-snapshot). On older builds the recorded
+      // prompt stays whatever the session started with.
+      if (!sessionId || soulReplay
+        || (turn.refreshSystemPrompt && cliVersionChecked && claudeCliSupports(cliVersion, "--system-prompt-snapshot"))) {
+        sessionPromptHashes.set(threadId, promptHash);
+      }
 
       // settles the TURN, not the process: the CLI stays for the next
       // message until it has been quiet for SESSION_IDLE_MS
@@ -818,7 +936,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       // prompt over stdin as a stream-json message — never argv (ARG_MAX).
       // stdin stays OPEN: that is what keeps the session alive for a
       // mid-turn steer or the next turn; closeSession() ends it.
-      if (!(await writeUser(session, threadId, promptMsg))) {
+      if (!(await writeUser(session, threadId, launchPromptMsg))) {
         settle(false, "stdin_write_failed");
         closeSession(threadId, "stdin write failed");
       }

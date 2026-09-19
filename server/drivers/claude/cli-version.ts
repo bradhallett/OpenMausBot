@@ -11,7 +11,11 @@ import type { ProviderSnapshot } from "../../contracts.ts";
  * Verified against the published binaries, not the changelog (which never
  * records `--autocompact`): `--strict-mcp-config` is present in 1.0.60 and
  * absent from 1.0.0; `--setting-sources` first appears in 1.0.122 (1.0.120
- * lacks it); `--autocompact` first appears in 2.1.122 (2.1.121 lacks it). */
+ * lacks it); `--autocompact` first appears in 2.1.122 (2.1.121 lacks it).
+ * Shipped builds have since diverged from that autocompact floor in both
+ * directions, so the driver feature-detects the flag from the CLI's own
+ * --help output and only falls back to the floor when help is missing or
+ * unparseable (issue #1187: an unknown flag is a hard argv error). */
 export const CLAUDE_FLAG_FLOORS = {
   "--strict-mcp-config": [1, 0, 60],
   "--setting-sources": [1, 0, 122],
@@ -35,6 +39,30 @@ export function parseClaudeCliVersion(stdout: string | null | undefined): Claude
   const match = /(\d+)\.(\d+)\.(\d+)/.exec(stdout ?? "");
   if (!match) return null;
   return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+/** The flag names a CLI's `--help` output advertises. Null when the output
+ * is missing or shows nothing flag-shaped: anything that did not come from
+ * a real help page must not be mistaken for a feature probe, and the caller
+ * keeps governing by the version floors. */
+export function parseClaudeHelpFlags(stdout: string | null | undefined): Set<string> | null {
+  const flags = new Set(
+    (stdout ?? "")
+      .split(/\s+/)
+      .map((token) => token.replace(/^[<([]*/, "").replace(/[=,].*$/, "").replace(/[.,:;)\]]+$/, ""))
+      .filter((token) => /^--[A-Za-z0-9][A-Za-z0-9-]*$/.test(token)),
+  );
+  return flags.size > 0 ? flags : null;
+}
+
+/** Whether this build accepts `--autocompact`: its own --help decides when
+ * the probe could be read, and the 2.1.122 floor otherwise (#1187). */
+export function claudeCliSupportsAutocompact(
+  version: ClaudeCliVersion | null,
+  helpFlags: Set<string> | null | undefined,
+): boolean {
+  if (helpFlags) return helpFlags.has("--autocompact");
+  return claudeCliSupports(version, "--autocompact");
 }
 
 function versionAtLeast(installed: ClaudeCliVersion, floor: ClaudeCliVersion): boolean {

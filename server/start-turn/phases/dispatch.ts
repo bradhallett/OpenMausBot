@@ -243,6 +243,7 @@ export async function dispatchProviderTurn({
     transcript,
     system: prompt.text,
     systemStable: prompt.stable,
+    systemStanding: prompt.standing,
     systemVolatile: prompt.volatile,
     integrations,
     mcpFromUserConfig: claudeUserMcpEnabled(cfg),
