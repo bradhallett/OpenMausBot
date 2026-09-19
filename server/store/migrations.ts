@@ -286,7 +286,7 @@ export function migrateBotTaskBackfill(bots: BotRecord[], deps: MigrationDeps): 
         changed = true;
       }
       if (task.unread === undefined) {
-        task.unread = task === active && b.unread;
+        task.unread = task === active && b.unread === true;
         changed = true;
       }
       if (task === active) {
