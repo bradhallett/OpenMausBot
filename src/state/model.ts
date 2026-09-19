@@ -360,6 +360,8 @@ export interface Bot {
   awaitingThreadSnapshot?: boolean;
   /** leaf of the visible conversation branch (see visibleMessages) */
   activeLeafId?: string | null;
+  /** When the server created this bot; the wire always sends it. */
+  createdAt?: number;
 }
 
 export interface BotProject {
