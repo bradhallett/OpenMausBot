@@ -23,7 +23,7 @@ import { json as sendJson, readBody } from "../http.ts";
 import { readMessageText, recallMessages, recentMessages } from "../message-db.ts";
 import { buildNotification, blockedTarget, type Notification } from "../notify.ts";
 import { requestPeerApproval, type ApprovalBus } from "../peer-approval.ts";
-import { canAccessTeam, canReachPeer, peerAllowed, peerStatus, peerStatusWords, reachablePeers, resolveTeammate } from "../peer-roster.ts";
+import { canAccessTeam, canReachPeer, peerAllowed, peerStatus, peerStatusWords, reachablePeers, resolveTeammate, PEER_ACCESS_HELP} from "../peer-roster.ts";
 import { withPeerProvenance } from "../peer-provenance.ts";
 import { claimRecallCrossings, recallCrossingLabel } from "../recall-disclosure.ts";
 import { parseSince } from "../recent-work.ts";
@@ -580,7 +580,7 @@ export function createInternalRoutes(options: InternalRoutesOptions) {
               return json(res, 404, { error: "no bot with that id — call list_bots and copy the exact id from the result" });
             }
             if (!canReachPeer(from, target)) {
-              return json(res, 403, { error: "that bot belongs to a different section" });
+              return json(res, 403, { error: `that bot belongs to a different section or is unavailable. ${PEER_ACCESS_HELP}` });
             }
             forBot = { botId: target.id, name: target.name };
           }
@@ -917,13 +917,13 @@ export function createInternalRoutes(options: InternalRoutesOptions) {
         // hard refusal — every peer turn has an accountable sender.
         const from = internalSender;
         if (!canAccessTeam(from, target.section) || target.hidden) {
-          return json(res, 403, { error: "that bot belongs to a different section" });
+          return json(res, 403, { error: `that bot belongs to a different section or is unavailable. ${PEER_ACCESS_HELP}` });
         }
         // The sender's allow-list, when it has one. Checked here rather than
         // trusted from the roster: the tool call carries a bot id, and an id
         // the model held from an earlier turn must not outlive the grant.
         if (!peerAllowed(from, target.id)) {
-          return json(res, 403, { error: "that bot is not on this bot's allowed peers — call list_bots for the ones you can reach" });
+          return json(res, 403, { error: `that bot is not on this bot's allowed peers. ${PEER_ACCESS_HELP}` });
         }
         const fromThreadId = internalCapability.threadId;
         // Rooms are conversations too. The task-only lookup here refused every
@@ -1183,10 +1183,10 @@ export function createInternalRoutes(options: InternalRoutesOptions) {
         const target = store.bot(toBotId);
         if (!target) return json(res, 404, { error: "no such bot" });
         if (!canAccessTeam(from, target.section) || target.hidden) {
-          return json(res, 403, { error: "that bot belongs to a different section" });
+          return json(res, 403, { error: `that bot belongs to a different section or is unavailable. ${PEER_ACCESS_HELP}` });
         }
         if (!peerAllowed(from, target.id)) {
-          return json(res, 403, { error: "that bot is not on this bot's allowed peers — call list_bots for the ones you can reach" });
+          return json(res, 403, { error: `that bot is not on this bot's allowed peers. ${PEER_ACCESS_HELP}` });
         }
         const fromThreadId = internalCapability.threadId;
         if (!connectorThread(from.id, fromThreadId)) {
@@ -1568,10 +1568,10 @@ export function createInternalRoutes(options: InternalRoutesOptions) {
           return json(res, 200, { error: "thread chains are limited to one hop — open the thread on yourself, or do this one here" });
         }
         if (!canAccessTeam(from, target.section) || target.hidden) {
-          return json(res, 403, { error: "that bot belongs to a different section" });
+          return json(res, 403, { error: `that bot belongs to a different section or is unavailable. ${PEER_ACCESS_HELP}` });
         }
         if (!peerAllowed(from, target.id)) {
-          return json(res, 403, { error: "that bot is not on this bot's allowed peers — call list_bots for the ones you can reach" });
+          return json(res, 403, { error: `that bot is not on this bot's allowed peers. ${PEER_ACCESS_HELP}` });
         }
         const task = store.createTask(target.id, title, false, projectId, { botId: from.id, name: from.name, at: Date.now() });
         if (!task) return json(res, 500, { error: "couldn't create that thread" });
