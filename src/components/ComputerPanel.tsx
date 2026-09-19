@@ -48,6 +48,8 @@ export function ComputerPanel({
   const { padClass } = useCaptionChrome();
   const {
     panelWidth,
+    separatorRef,
+    separatorWidth,
     panelMinWidth,
     panelMaxWidth,
     onResizeStart,
@@ -277,7 +279,8 @@ export function ComputerPanel({
         onOpenBotSettings={openBotSettings}
         onSelectBrowser={selectBrowserView}
         onClose={closePanel}
-        panelWidth={panelWidth}
+        separatorRef={separatorRef}
+        separatorWidth={separatorWidth}
         panelMinWidth={panelMinWidth}
         panelMaxWidth={panelMaxWidth}
         onResizeStart={onResizeStart}

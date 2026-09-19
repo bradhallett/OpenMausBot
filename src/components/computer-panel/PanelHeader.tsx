@@ -1,5 +1,5 @@
 import { CalendarClock, Globe, Monitor, Settings, Smartphone, X } from "lucide-react";
-import type { KeyboardEvent, PointerEvent } from "react";
+import type { KeyboardEvent, PointerEvent, RefObject } from "react";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import { effectivePlace, isComputerPlace } from "@/lib/place";
@@ -10,7 +10,8 @@ import type { ComputerPanelView } from "@/lib/computer-panel-view";
  * dot. */
 export function PanelHeader({
   padClass,
-  panelWidth,
+  separatorRef,
+  separatorWidth,
   panelMinWidth,
   panelMaxWidth,
   panelView,
@@ -28,7 +29,8 @@ export function PanelHeader({
   onResizeKeyDown,
 }: {
   padClass: string | undefined;
-  panelWidth: number;
+  separatorRef: RefObject<HTMLDivElement | null>;
+  separatorWidth: number | null;
   panelMinWidth: number;
   panelMaxWidth: number;
   panelView: ComputerPanelView;
@@ -48,19 +50,20 @@ export function PanelHeader({
   return (
     <>
       <div
+        ref={separatorRef}
         role="separator"
         aria-orientation="vertical"
         aria-label={t("computer.resizeAria")}
         aria-valuemin={panelMinWidth}
         aria-valuemax={panelMaxWidth}
-        aria-valuenow={panelWidth}
+        aria-valuenow={separatorWidth ?? undefined}
         tabIndex={0}
         onKeyDown={onResizeKeyDown}
         onPointerDown={onResizeStart}
         onPointerMove={onResizeMove}
         onPointerUp={onResizeEnd}
         onPointerCancel={onResizeEnd}
-        className="absolute inset-y-0 left-0 z-10 w-1.5 cursor-col-resize hover:bg-accent/40"
+        className="absolute inset-y-0 left-0 z-10 w-1.5 cursor-col-resize hover:bg-accent/40 focus-visible:bg-accent/60"
       />
       {/* Header */}
       <div className={cn("flex items-center justify-between px-4 py-3", padClass)}>
