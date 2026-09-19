@@ -141,6 +141,16 @@ export function instanceConfigs(cfg: AppConfig): InstanceConfigMap {
       if (!Object.hasOwn(map, id)) map[id] = { ...entry };
     }
   }
+  // A configured Box runs every cloud and team-Box surface on the boxAgent
+  // "Computer" engine: the turn runner, the Computer panel's engine gate,
+  // and selectableComputers all look that runner up in the fleet. A custom
+  // map that omits it would leave Box configured while every cloud surface
+  // reports unusable and cloud turns fail with a configure-Box hint, so
+  // materialize the runner exactly when Box is configured (boxConfigured's
+  // own check) and no entry rides the driver.
+  if (configured && cfg.box?.token && !Object.values(map).some((entry) => entry.driver === "boxAgent")) {
+    map.computer = { driver: "boxAgent" };
+  }
   for (const [id, sourceEntry] of Object.entries(map)) {
     // instanceConfigs() builds a transient runtime map. Never mutate the
     // caller's persisted entries while injecting workspace defaults: doing so

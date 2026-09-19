@@ -730,6 +730,28 @@ describe("credential env narrowing", () => {
     };
     expect(instanceConfigs(cfg).computer.environment).toEqual({ MY_FLAG: "1", BOX_TOKEN: "SECRET-BOX" });
   });
+
+  it("materializes the Computer runner for a custom fleet whenever Box is configured", () => {
+    // Cloud and team-Box surfaces all ride the boxAgent runner from the
+    // fleet, so an explicit map that omits it must not strand a configured
+    // Box: the runner appears with its credential, a differently named
+    // boxAgent entry stands in for it, and no Box token forces nothing.
+    const cfg: AppConfig = {
+      box: { token: "fixture-box" },
+      instances: { claude: { driver: "claudeAgent" } },
+    };
+    const instances = instanceConfigs(cfg);
+    expect(instances.computer).toEqual({ driver: "boxAgent", environment: { BOX_TOKEN: "fixture-box" } });
+
+    const named = instanceConfigs({
+      ...cfg,
+      instances: { claude: { driver: "claudeAgent" }, myBox: { driver: "boxAgent" } },
+    });
+    expect(named.computer).toBeUndefined();
+    expect(named.myBox.environment).toEqual({ BOX_TOKEN: "fixture-box" });
+
+    expect(instanceConfigs({ instances: { claude: { driver: "claudeAgent" } } }).computer).toBeUndefined();
+  });
 });
 
 describe("legacy feature flag migration", () => {
