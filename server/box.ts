@@ -60,6 +60,14 @@ export function isolatedRemoteCommand(command: string): string {
 
 // overridable so tests can point at a stub instead of the live provider
 const BOX_API = process.env.OMB_BOX_API || "https://ascii.dev/api/box/v1";
+/** Desktop viewer URLs may only point at the Box service's own domain (or an explicitly allowlisted host) so a hostile API response cannot send the viewer to an attacker's site. */
+const BOX_API_HOST = new URL(BOX_API).hostname.toLowerCase();
+const EXTRA_DESKTOP_HOSTS = new Set(
+  (process.env.OMB_BOX_DESKTOP_HOSTS ?? "")
+    .split(",")
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean),
+);
 const READY = new Set(["idle", "ready", "running"]);
 const SLEEPING = new Set(["archived", "archiving", "stopped", "stopping"]);
 const DEFAULT_BOX_TTL_SECONDS = 8 * 60 * 60;
@@ -460,6 +468,10 @@ function validDesktopUrl(value: unknown): string | null {
   }
   if (parsed.username || parsed.password) return null;
   if (parsed.protocol !== "https:") return null;
+  const host = parsed.hostname.toLowerCase();
+  if (host !== BOX_API_HOST && !host.endsWith("." + BOX_API_HOST) && !EXTRA_DESKTOP_HOSTS.has(host)) {
+    return null;
+  }
   return value;
 }
 
