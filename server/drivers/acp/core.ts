@@ -28,6 +28,7 @@
 import { homedir } from "node:os";
 import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { createHash } from "node:crypto";
 
 import { PROVIDER_CREDENTIAL_ENV, WORKSPACE_CREDENTIAL_ENV } from "../../config.ts";
 import { decodeInjectId } from "../local-inject.ts";
@@ -1089,8 +1090,17 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         // the wire — and the harness mints fresh integration bearer tokens
         // every turn, so they must not respawn the process; a change instead
         // re-establishes the session below (see sessionKey).
+        // The env the spawned child actually receives is part of the
+        // contract too, and arrives hashed as envFingerprint for the same
+        // reason.
         const spawnArgs = support.spawnArgs(turnConfig, cliTurn);
-        const contractKey = JSON.stringify([launch.command, launch.args ?? [], spawnArgs, cwd, turnConfig.fullAuto === true]);
+        const spawnEnv = launch.env ?? env;
+        // Env is part of the spawn contract: a turn that changes auth env
+        // (FACTORY_API_KEY placeholder, a fresh login file) must not keep
+        // riding a child spawned under the old env. Hash it so secrets
+        // never sit in the key itself.
+        const envFingerprint = createHash("sha256").update(JSON.stringify(spawnEnv)).digest("hex").slice(0, 16);
+        const contractKey = JSON.stringify([launch.command, launch.args ?? [], spawnArgs, cwd, turnConfig.fullAuto === true, envFingerprint]);
         const sessionKey = JSON.stringify(mcpServers);
 
         const pooled = sessions.get(threadId);
@@ -1107,7 +1117,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             if (pooled.dead) sessions.delete(threadId);
             else closeSession(threadId, "contract");
           }
-          session = openSession(threadId, launch, [...(launch.args ?? []), ...spawnArgs], launch.env ?? env, cwd, contractKey);
+          session = openSession(threadId, launch, [...(launch.args ?? []), ...spawnArgs], spawnEnv, cwd, contractKey);
           sessions.set(threadId, session);
         }
         // `session` rebinds mid-turn: when the establishment retry below
@@ -1293,7 +1303,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
                 // session/new on the replacement child.
                 session.current = null;
                 closeSession(threadId, "reestablish");
-                session = openSession(threadId, launch, [...(launch.args ?? []), ...spawnArgs], launch.env ?? env, cwd, contractKey);
+                session = openSession(threadId, launch, [...(launch.args ?? []), ...spawnArgs], spawnEnv, cwd, contractKey);
                 sessions.set(threadId, session);
                 session.current = current;
                 runtimeAcceptsImages = await handshake();
