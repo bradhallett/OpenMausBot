@@ -106,6 +106,7 @@ import {
   perBotLocalVmTarget,
   SHARED_LOCAL_VM_TARGET,
   setupCommands,
+  type ContainerComputerStatus,
   type LocalVmTarget,
   type Runtime,
 } from "./container-computer.ts";
