@@ -1309,7 +1309,6 @@ const {
   lateBound: {
     broadcast: (payload) => broadcast(payload),
     getLocalVmProvisionBusy: () => localVmProvisionBusy,
-    getLocalVmProvisionBusy: () => localVmProvisionBusy,
     setLocalVmProvisionBusy: (value) => { localVmProvisionBusy = value; },
   },
   lifecycle: {
