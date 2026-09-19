@@ -443,7 +443,10 @@ export async function launchVerificationServer(
     OMB_AGENT_BROWSER_PATH: browser.binaryPath,
     AGENT_BROWSER_EXECUTABLE_PATH: browser.executablePath,
   });
-  if (boxFixtureApi) childEnv.OMB_BOX_API = boxFixtureApi;
+  if (boxFixtureApi) {
+    childEnv.OMB_BOX_API = boxFixtureApi;
+    childEnv.OMB_BOX_DESKTOP_HOSTS = "desktop.invalid";
+  }
   const child = spawn(process.execPath, ["--experimental-strip-types", join(ROOT, "server", "index.ts")], {
     cwd: ROOT,
     env: childEnv,
