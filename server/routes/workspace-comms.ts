@@ -54,8 +54,9 @@ export function createWorkspaceCommsRoutes(deps: {
       if (auth.kind !== "loopback") { json(res, 403, { error: "Local desktop only" }); return true; }
       const body = await readBody(req, 1024);
       if (!sharedComputersEnabled(cfg)) { json(res, 404, { error: `no route: ${method} ${path}` }); return true; }
-      if (!z.string().uuid().safeParse(body?.id).success || !["acquire", "release"].includes(body?.action)) { json(res, 400, { error: "Invalid computer lease" }); return true; }
+      if (!z.string().uuid().safeParse(body?.id).success || !["acquire", "release", "renew"].includes(body?.action)) { json(res, 400, { error: "Invalid computer lease" }); return true; }
       if (body.action === "release") sharedComputerControl.release(body.id);
+      else if (body.action === "renew") sharedComputerControl.renew(body.id);
       else sharedComputerControl.acquire(body.id);
       json(res, 200, { ok: true });
       return true;
