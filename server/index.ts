@@ -4066,7 +4066,7 @@ async function cloudRoutineReadiness(): Promise<{ ready: boolean; reason?: strin
   if (!box.boxConfigured(cfg)) {
     return {
       ready: false,
-      reason: "Cloud VM needs a working Box API key in App Settings before this routine can run.",
+      reason: `The Box-hosted agent needs a working Box API key. For the bot’s existing model and configured computer, including a self-hosted VPS, set run_on="maus" instead. Do not request a Box key unless the user actually wants the Box-hosted agent.`,
     };
   }
   const instance = registry.instances().find((candidate) => candidate.driverKind === "boxAgent");
