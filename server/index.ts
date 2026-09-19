@@ -1240,6 +1240,7 @@ const {
 } = createLocalVmTurnPrep({
   lateBound: {
     broadcast: (payload) => broadcast(payload),
+    localVmProvisionBusy: () => localVmProvisionBusy,
     setLocalVmProvisionBusy: (value) => { localVmProvisionBusy = value; },
   },
   lifecycle: {
@@ -3733,8 +3734,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (auth.kind !== "loopback") return json(res, 403, { error: "Local desktop only" });
       const body = await readBody(req, 1024);
       if (!sharedComputersEnabled(cfg)) return json(res, 404, { error: `no route: ${method} ${path}` });
-      if (!z.string().uuid().safeParse(body?.id).success || !["acquire", "release"].includes(body?.action)) return json(res, 400, { error: "Invalid computer lease" });
+      if (!z.string().uuid().safeParse(body?.id).success || !["acquire", "release", "renew"].includes(body?.action)) return json(res, 400, { error: "Invalid computer lease" });
       if (body.action === "release") sharedComputerControl.release(body.id);
+      else if (body.action === "renew") sharedComputerControl.renew(body.id);
       else sharedComputerControl.acquire(body.id);
       return json(res, 200, { ok: true });
     }
@@ -5293,7 +5295,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         const release = m[2] === "sleep" ? claimTeamComputerLifecycle(teamComputer) : claimBotComputerLifecycle(key);
         try {
           if (m[2] === "join") return json(res, 200, await box.joinReadyBox(cfg, key));
-          if (m[2] === "screenshot") return json(res, 200, await box.screenshotBox(cfg, key));
+          if (m[2] === "screenshot") {
+            res.setHeader("cache-control", "private, no-store");
+            return json(res, 200, await box.screenshotBox(cfg, key));
+          }
           return json(res, 200, await box.sleepBox(cfg, key));
         } finally { release(); }
       }
@@ -5306,6 +5311,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             });
             vpsPreviewRequests.set(botId, preview);
           }
+          res.setHeader("cache-control", "private, no-store");
           return json(res, 200, await preview);
         }
         // Opening the existing SSH viewer can coexist with a capture. Start,
@@ -5370,6 +5376,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           case "exec":
             return json(res, 200, await computerBackend.action(cfg, botId, "exec", { command: boxCommand ?? "" }));
           case "screenshot":
+            res.setHeader("cache-control", "private, no-store");
             return json(res, 200, await computerBackend.screenshot(cfg, botId));
         }
       } finally {
