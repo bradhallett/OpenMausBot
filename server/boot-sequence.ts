@@ -26,6 +26,7 @@ import { DATA_DIR, localVmMode, threadEventLogRetentionDays } from "./config.ts"
 import { sweepThreadEventLogs, type ThreadLogRetentionCandidate } from "./thread-retention.ts";
 import { flushUsageLedger } from "./usage-ledger.ts";
 import { chatFollowups, closeMessageDb, settleChatFollowups } from "./message-db.ts";
+import { isContextMessage, recordHanded } from "./delta-context.ts";
 import { discardDelegations, pendingThreads } from "./delegations.ts";
 import { restoreSteeredMessages } from "./steer-queue.ts";
 import { restoreChannelMessages } from "./channel-queue.ts";
@@ -256,12 +257,16 @@ export async function runBootSequence(deps: BootSequenceDeps): Promise<void> {
     if (!owned) { settleChatFollowups([row.id], "cancelled"); continue; }
     settleChatFollowups([row.id], "interrupted");
     const messages = store.messagesFor(row.threadId);
-    if (!messages.some((message) => message.queueId === row.id && message.role === "user")) {
-      store.appendMessage(row.threadId, {
-        role: "user", kind: "text", text: row.payload.text, replyToId: row.payload.replyToId,
-        sendId: row.payload.sendId, queueId: row.id,
-        ...(row.kind === "channel" ? { channelMode: row.payload.mode, via: row.payload.via } : {}),
-      });
+    const recovered = messages.find((message) => message.queueId === row.id && message.role === "user") ?? store.appendMessage(row.threadId, {
+      role: "user", kind: "text", text: row.payload.text, replyToId: row.payload.replyToId,
+      sendId: row.payload.sendId, queueId: row.id,
+      ...(row.kind === "channel" ? { channelMode: row.payload.mode, via: row.payload.via } : {}),
+    });
+    // Nor as a message a resumed session has not seen: count it as handed.
+    const recoveredTask = row.kind === "bot" ? store.taskByThread(row.ownerId, row.threadId) : undefined;
+    const order = store.activePath(row.threadId).filter(isContextMessage).map((m) => m.id);
+    for (const [instanceId, state] of Object.entries(recoveredTask?.handedMessages ?? {})) {
+      if (state.session !== undefined) store.setHandedMessages(row.ownerId, row.threadId, instanceId, recordHanded(state, order, [recovered.id]));
     }
     if (!messages.some((message) => message.queueId === row.id && message.kind === "activity")) {
       store.appendMessage(row.threadId, {

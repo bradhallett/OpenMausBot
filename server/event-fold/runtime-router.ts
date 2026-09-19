@@ -6,6 +6,7 @@
 // assembles the ctx below from the fold's closure state and deps and passes
 // the returned callback straight to bus.subscribe.
 import { saveImage } from "../attachments.ts";
+import { handoffs } from "../delta-handoffs.ts";
 import type { RuntimeEvent } from "../contracts.ts";
 import type { EventFoldDeps } from "../event-fold.ts";
 import { decodeGeneratedImage } from "../generated-image.ts";
@@ -127,6 +128,7 @@ export function runtimeEventRouter({
       pushMessage({ role: "bot", kind: "text", text: coordinatorVisibleText, turnId: completedTurnId });
       lastReply.set(event.threadId, coordinatorVisibleText);
     }
+    if (bot) handoffs.onEvent(event);
     switch (event.type) {
       case "session.started":
         if (bot && event.sessionId && event.providerInstanceId) {

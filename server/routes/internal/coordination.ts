@@ -5,7 +5,7 @@ import type { ServerResponse } from "node:http";
 import { z } from "zod";
 import { fitsOnOneLine } from "../../bot-profile.ts";
 import { requestPeerApproval } from "../../peer-approval.ts";
-import { reachablePeers } from "../../peer-roster.ts";
+import { reachablePeers, resolveTeammate } from "../../peer-roster.ts";
 import { queuedThreadPosition } from "../../steer-queue.ts";
 import type { InternalRoutesOptions } from "../internal.ts";
 import type { InternalRequestCtx } from "./types.ts";
@@ -58,7 +58,19 @@ export async function roomTargetsOrCoordinateBots(ctx: CoordinationCtx, res: Ser
       const groupId = parsed.data.groupId ?? source?.id;
       const destination = groupId ? store.group(groupId) : undefined;
       if (groupId && !destination) return json(res, 404, { error: "No such room; use list_room_targets." });
-      const targets = parsed.data.botIds.map(botId => ({ groupId: destination?.id,
+      // A slot may carry a teammate's name instead of its id — the
+      // roster shows both, list_bots shows both, and a Chief reading its
+      // prompt reaches for the name. A unique reachable name resolves;
+      // anything else is refused with the id or name the caller sent
+      // and the way to the real ids (peer-roster.ts).
+      const botIds: string[] = [];
+      for (const raw of parsed.data.botIds) {
+        const resolved = resolveTeammate(store.bots, internalSender, raw);
+        if ("error" in resolved) return json(res, 403, { error: resolved.error });
+        botIds.push(resolved.id);
+      }
+      if (new Set(botIds).size !== botIds.length) return json(res, 400, { error: "bot_ids name the same teammate twice — send each teammate once" });
+      const targets = botIds.map(botId => ({ groupId: destination?.id,
         threadId: destination ? destination.id === source?.id ? address.threadId : destination.threadId : store.bot(botId)?.threadId ?? "", botId,
       }));
       for (const target of targets) {
@@ -142,4 +154,3 @@ export async function roomTargetsOrCoordinateBots(ctx: CoordinationCtx, res: Ser
     // body did.
     return false;
 }
-

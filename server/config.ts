@@ -8,6 +8,9 @@
 export {
   DEFAULT_LOCAL_VM_MAX_INSTANCES,
   DEFAULT_LOCAL_VM_MODE,
+  DEFAULT_ROOM_HANDOFF_HARD_CAP_MINUTES,
+  DEFAULT_ROOM_HANDOFF_LIFETIME_MINUTES,
+  DEFAULT_ROOM_HANDOFF_MIN_RUNWAY_MINUTES,
   DEFAULT_MAX_CONCURRENT_BOT_THREADS,
   DEFAULT_ROOM_TURN_TIMEOUT_MINUTES,
   MAX_CONCURRENT_BOT_THREADS,
@@ -18,6 +21,7 @@ export {
   MIN_ROOM_TURN_TIMEOUT_MINUTES,
   MIN_THREAD_EVENT_LOG_BYTES,
   isValidSshAlias,
+  isValidCdpTarget,
   parseConfigPatch,
   parseStoredConfig,
 } from "./config/schema.ts";
@@ -25,12 +29,15 @@ export type { AppConfig, BrowserProfile, ConfigPatch } from "./config/schema.ts"
 export {
   FLEET_NEUTRAL_KEYS,
   builtInBrowserEnabled,
+  browserEngineAttachCdpUrl,
   claudeUserMcpEnabled,
+  llmThreadTitlesEnabled,
   localVmMaxInstances,
   localVmMode,
   maxConcurrentBotThreads,
   normalizeVpsConfig,
   providerReloadKeys,
+  roomHandoffLimits,
   roomTurnTimeoutMinutes,
   sharedComputersEnabled,
   showToolCallsEnabled,
@@ -39,6 +46,7 @@ export {
   threadEventLogRetentionDays,
   vpsSshAlias,
 } from "./config/accessors.ts";
+export type { RoomHandoffLimitsMs } from "./config/accessors.ts";
 export {
   browserProfilePartitionId,
   browserProfilePartitionTarget,

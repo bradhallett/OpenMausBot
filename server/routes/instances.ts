@@ -19,10 +19,12 @@ import {
   instanceSettingsSchema,
   newClaudeAccount,
 } from "../claude-accounts.ts";
-import { persistableInstanceConfigs, withInstanceCli } from "../config.ts";
+import { persistableInstanceConfigs, saveConfig, withInstanceCli } from "../config.ts";
 import { findCliCandidates, resetPathCache } from "../env-path.ts";
 import { updateClaudeCli } from "../claude-update.ts";
 import { BUILT_IN_DRIVERS } from "../drivers/builtIn.ts";
+import { providerIconPatchSchema, withInstanceIcon } from "../provider-icon.ts";
+import { providerIconError } from "../../shared/provider-icon.ts";
 import { cliProbeEnvironment, testCliBinary, type createConfigViews } from "../config-views.ts";
 import type { createProviderFleet } from "../provider-fleet.ts";
 import type { createGroupTurnOperations } from "../group-turn-operations.ts";
@@ -38,14 +40,16 @@ export function createInstanceRoutes(deps: {
   providerAuthSessions: ProviderAuthSessions;
   sessions: SessionRegistry;
   describeInstances: ReturnType<typeof createConfigViews>["describeInstances"];
+  configStatus: ReturnType<typeof createConfigViews>["configStatus"];
   persistProviderInstance: ReturnType<typeof createProviderFleet>["persistProviderInstance"];
   providerInstancesChanging: ReturnType<typeof createProviderFleet>["providerInstancesChanging"];
   activeGroupTurnForBot: ReturnType<typeof createGroupTurnOperations>["activeGroupTurnForBot"];
+  broadcast(payload: Record<string, unknown>): void;
 }) {
   return async (req: IncomingMessage, res: ServerResponse, rctx: RouteContext): Promise<boolean> => {
     const { method, path, url, auth } = rctx;
     const {
-      providerConfigBusy, providerAuthSessions, sessions, describeInstances,
+      providerConfigBusy, providerAuthSessions, sessions, describeInstances, configStatus, broadcast,
       persistProviderInstance, providerInstancesChanging, activeGroupTurnForBot,
     } = deps;
     // ── provider instances (model picker) ──
@@ -270,6 +274,44 @@ export function createInstanceRoutes(deps: {
     // ── per-instance settings (CLI/account or API tool support) ──
     // PATCH /api/instances/:id {cli: "/path/to/cli" | ""} — "" reverts to the
     // driver default. Only this idle instance is replaced; siblings keep running.
+    const instanceIconPatch = /^\/api\/instances\/([\w.-]+)\/icon$/.exec(path);
+    if (method === "PATCH" && instanceIconPatch) {
+      if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+        json(res, 415, { error: "content-type must be application/json" });
+        return true;
+      }
+      const parsed = providerIconPatchSchema.safeParse(await readBody(req, 192 * 1024));
+      if (!parsed.success) {
+        const detail = parsed.error.issues[0]?.message;
+        json(res, 400, { error: detail && detail !== "Invalid input" ? detail : "Choose a built-in icon or upload a PNG, JPEG, or WebP image up to 128 KB." });
+        return true;
+      }
+      if (parsed.data.icon) {
+        const invalid = providerIconError(parsed.data.icon);
+        if (invalid) {
+          json(res, 400, { error: invalid });
+          return true;
+        }
+      }
+      if (providerConfigBusy.get()) {
+        json(res, 409, { error: "provider settings are already being updated" });
+        return true;
+      }
+      providerConfigBusy.set(true);
+      try {
+        const changed = withInstanceIcon(cfg, instanceIconPatch[1], parsed.data.icon);
+        if (!changed.ok) {
+          json(res, 404, { error: `unknown instance "${instanceIconPatch[1]}"` });
+          return true;
+        }
+        saveConfig({ instances: changed.instances }, { replaceInstances: true });
+        cfg.instances = changed.instances;
+        broadcast({ kind: "config", ...configStatus() });
+        json(res, 200, { instances: await describeInstances() });
+        return true;
+      } finally { providerConfigBusy.set(false); }
+    }
+
     const instancePatch = /^\/api\/instances\/([\w.-]+)$/.exec(path);
     if (method === "PATCH" && instancePatch) {
       // same non-simple-request gate as the local-VM lifecycle routes

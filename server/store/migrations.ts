@@ -303,9 +303,10 @@ export function migrateBotTaskBackfill(bots: BotRecord[], deps: MigrationDeps): 
         delete task.approvalMode;
         changed = true;
       }
-      if (task.busy !== undefined || task.activity !== undefined) changed = true;
+      if (task.busy !== undefined || task.activity !== undefined || task.turnStartedAt !== undefined) changed = true;
       task.busy = false;
       task.activity = "idle";
+      task.turnStartedAt = undefined;
     }
     mirrorActiveTask(b, active);
     b.unread = b.tasks.some((task) => task.unread);
@@ -322,6 +323,7 @@ export function migrateGroupSessionState(groups: GroupRecord[]): boolean {
   let changed = false;
   for (const g of groups) {
     g.busyBotId = null;
+    delete g.turnStartedAt;
     const normalized = normalizeGroupDefaultResponder(g.defaultResponder, g.memberIds, Boolean(g.dm));
     if (JSON.stringify(normalized) !== JSON.stringify(g.defaultResponder)) changed = true;
     g.defaultResponder = normalized;

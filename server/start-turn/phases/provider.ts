@@ -2,6 +2,8 @@
 import { assertModelVariantSupported } from "../../member-turn.ts";
 import { extractTurnImages } from "../../turn-images.ts";
 import { type BotRecord, type Store } from "../../store.ts";
+import { llmThreadTitlesEnabled, type AppConfig } from "../../config.ts";
+import { generateThreadTitle } from "../../thread-titles.ts";
 import type { StartTurnOptions } from "../../start-turn.ts";
 import type { Deps } from "./shared.ts";
 
@@ -12,6 +14,7 @@ export function resolveTurnProvider({
   opts,
   bot,
   threadId,
+  cfg,
   store,
   turnSurfacePlan,
   turnProvider,
@@ -25,6 +28,7 @@ export function resolveTurnProvider({
   opts: StartTurnOptions | undefined;
   bot: BotRecord;
   threadId: string;
+  cfg: AppConfig;
   store: Store;
   turnSurfacePlan: Deps["admission"]["turnSurfacePlan"];
   turnProvider: Deps["admission"]["turnProvider"];
@@ -60,7 +64,22 @@ export function resolveTurnProvider({
   else clearInternalTurn(threadId);
   // a task takes its name from the first thing you asked it to do
   if (resolvedImages.text.trim() && !opts?.cardContinuation) {
-    store.titleTaskFromFirstMessage(bot.id, resolvedImages.text, threadId);
+    const titled = store.titleTaskFromFirstMessage(bot.id, resolvedImages.text, threadId);
+    // The snippet is only the fallback name. A cheap one-shot may trade it
+    // for a title a person would have typed, but never on a peer-opened
+    // row: adoption recognises those by the exact title their assignment
+    // gave them (openingRequestTitle), and a generated one would break the
+    // comparison it renames under. Everywhere else, the swap happens only
+    // while the row still carries the snippet — a rename by the person or
+    // by adoption has already broken that equality by then.
+    const snippet = titled?.title;
+    if (titled && snippet && !titled.openedBy?.botId && llmThreadTitlesEnabled(cfg) && instance.generateText) {
+      void generateThreadTitle(instance, resolvedImages.text)
+        .then((title) => {
+          if (title) store.retitleTask(bot.id, threadId, snippet, title);
+        })
+        .catch(() => undefined);
+    }
   }
 
   console.error(`[omb-turn] bot=${botId} text=${JSON.stringify(resolvedImages.text.slice(0, 70))} images=${turnImages.length} depth=${commsDepth} card=${Boolean(opts?.cardContinuation)}`);
@@ -85,4 +104,3 @@ export function resolveTurnProvider({
   }
   return { plan, instance, providerText, turnImages, commsDepth, instanceId, model, effort, variant };
 }
-

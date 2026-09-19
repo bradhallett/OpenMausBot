@@ -10,6 +10,7 @@ import { registry } from "./runtime.ts";
 import { createPeerAgentComms } from "./peer-agent-comms.ts";
 import { createTurnIntegrations } from "./turn-integrations.ts";
 import { createDelegationWatch } from "./delegation-watch.ts";
+import { setIncidentReportHost } from "./incident-report.ts";
 import { createComputerLifecycleWiring } from "./computer-lifecycle-wiring.ts";
 import { createBotViews } from "./bot-views.ts";
 import { createGroupState } from "./group-state.ts";
@@ -263,12 +264,29 @@ const {
     routines: () => deps.routines(),
     startTurn: (botId, text, opts) => deps.startTurn()(botId, text, opts),
     commsBus: () => deps.commsBus(),
+    turnInstance: (botId, runOn, threadId) => turnInstance(botId, runOn, threadId),
   },
   helpers: {
     retireProviderTurn,
     isUnattended: (botId, threadId) => isUnattended(botId, threadId),
     activeGroupTurnForBot,
   },
+});
+
+
+// ── incidents: a broken run reaches the Chief of Staff ──────────────────
+// The delivery path lives in ./incident-report.ts and the policy in
+// ./incidents.ts; the failure sites — dispatch settlement, the stall
+// watchdog, turn completion, the routine wiring — import reportIncident
+// directly. Bind its host here, after the delegation watch exists;
+// roomHandoffs, notify and startTurn are declared further below, so they
+// cross as thunks like every other factory above.
+setIncidentReportHost({
+  delegationWatch,
+  roomHandoffs: () => roomHandoffs,
+  notify: (notification) => notify(notification),
+  activeGroupTurnForBot,
+  startTurn: (botId, text, opts) => deps.startTurn()(botId, text, opts),
 });
 
 
@@ -633,6 +651,7 @@ const {
   settlingResourceOwners,
   sharedComputerControl,
   startGroupTurn,
+  screenPollers,
   startScreenPoller,
   stopScreenPoller,
   storedAvatarExists,

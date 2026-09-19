@@ -16,6 +16,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { json, readBody, type RouteContext } from "./http.ts";
+import { handoffs } from "../delta-handoffs.ts";
 import type { createEventsRoutes } from "./events.ts";
 import { approvalModeFor, supportsApprovalMode } from "../../shared/approval-mode.ts";
 import { registry, store } from "../runtime.ts";
@@ -282,6 +283,7 @@ export function createBotTasksRoutes(deps: {
       cancelTeamSetupResumesForThread(m[2]);
       const updated = store.deleteTask(m[1], m[2]);
       if (!updated) { json(res, 404, { error: "no such task" }); return true; }
+      handoffs.forget(m[2]);
       settleDirectFollowup(directTurnGenerationByThread.get(m[2]));
       rejectDeletedThreadSkillStages(stagedSkillCleanups);
       const fresh = botWithThread(updated);

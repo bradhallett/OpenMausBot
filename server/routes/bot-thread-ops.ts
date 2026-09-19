@@ -25,7 +25,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { json, readBody, type RouteContext } from "./http.ts";
 import { createRequirePinnedClientThread } from "./messages.ts";
-import type { RequestAuth } from "../request-auth.ts";
+import { messageSender, type RequestAuth } from "../request-auth.ts";
 import { assertWithinBudget } from "../spend.ts";
 import { cancelledChatFollowup } from "../message-db.ts";
 import { promptWithReply } from "../replies.ts";
@@ -48,6 +48,7 @@ import { extractTurnImages } from "../turn-images.ts";
 import { computerSelectionTurns, revokeInternalCapabilitiesForThread } from "../internal-capabilities.ts";
 import { answerRequest, closeOpenApprovals, requestBehavior } from "../turn-fold.ts";
 import { cfg, registry, store } from "../runtime.ts";
+import { handoffs } from "../delta-handoffs.ts";
 import { DATA_DIR } from "../config.ts";
 import {
   botForThread,
@@ -92,6 +93,7 @@ export function createBotThreadOpsRoutes(deps: {
     text: string,
     replyTo?: Message,
     sendId?: string,
+    sender?: { name: string },
   ) => Promise<{ ok: boolean; queued?: boolean; queueId?: string; threadId: string; reason?: "capacity" | undefined; message?: unknown }>;
   phoneSecretSubmissions: PhoneSecretSubmissionRegistry;
   startTurn: StartTurn["startTurn"];
@@ -234,6 +236,7 @@ export function createBotThreadOpsRoutes(deps: {
             // message intact for the next ordinary turn, where central image
             // admission can hand it to the provider natively.
             const carriesImages = extractTurnImages(text).images.length > 0;
+            const steerTarget = handoffs.current(threadId);
             if (!carriesImages && !computerSelectionTurns.get(threadId)?.selected && instance?.adapter.capabilities.queueing && instance.adapter.steer) {
               steered = await instance.adapter
                 .steer(threadId, promptWithReply(text, replyTo, cfg.profile?.name?.trim() || "User"))
@@ -278,11 +281,14 @@ export function createBotThreadOpsRoutes(deps: {
                 replyToId: replyTo?.id,
                 sendId,
                 steered: true,
+                sender: messageSender(auth),
               });
+              // Offered to the next turn again unless the person stops this one.
+              handoffs.steered(threadId, steerTarget, instance?.instanceId, message.id);
               return { ok: true as const, steered: true as const, threadId, message };
             }
             if (!current.busy) {
-              return startOrQueueDirectMessage(bot.id, threadId, text, replyTo, sendId);
+              return startOrQueueDirectMessage(bot.id, threadId, text, replyTo, sendId, messageSender(auth));
             }
             const queued = queueSteeredMessage(current.id, threadId, text, {
               replyToId: replyTo?.id,
@@ -291,7 +297,7 @@ export function createBotThreadOpsRoutes(deps: {
             });
             return { ok: true as const, queued: true as const, queueId: queued.id, threadId };
           }
-          return startOrQueueDirectMessage(bot.id, threadId, text, replyTo, sendId);
+          return startOrQueueDirectMessage(bot.id, threadId, text, replyTo, sendId, messageSender(auth));
         },
       );
       try {
@@ -346,6 +352,7 @@ export function createBotThreadOpsRoutes(deps: {
       const currentAtStart = store.projectBotForTask(bot.id, bot.threadId);
       const instance = currentAtStart?.busy ? runningTurnInstance(currentAtStart, bot.threadId) : undefined;
       const prompt = held.items.map((item) => item.prompt).join("\n\n");
+      const steerTarget = handoffs.current(bot.threadId);
       let steered: SteerOutcome = "refused";
       if (currentAtStart?.busy && instance?.adapter.capabilities.queueing && instance.adapter.steer) {
         steered = await instance.adapter
@@ -375,6 +382,8 @@ export function createBotThreadOpsRoutes(deps: {
           peerAsk: item.peerAsk,
           steered: true,
         }));
+        // Offered to the next turn again unless the person stops this one.
+        for (const message of messages) handoffs.steered(bot.threadId, steerTarget, instance?.instanceId, message.id);
         const queueIds = held.items.map((item) => item.messageId);
         settleHeldSteeredQueue(held);
         json(res, 200, { ok: true, steered: true, threadId: bot.threadId, messages, queueIds });
@@ -612,7 +621,10 @@ export function createBotThreadOpsRoutes(deps: {
       if (typeof expectedThreadId === "string" && store.taskByThread(bot.id, expectedThreadId)) {
         const routine = routines()!.activeBotRunForBot(bot.id);
         if (routine?.threadId === expectedThreadId) await routines()!.cancelRun(routine.id);
-        else await interruptDirectThread(bot.id, expectedThreadId);
+        else {
+          handoffs.stoppedByPerson(expectedThreadId);
+          await interruptDirectThread(bot.id, expectedThreadId);
+        }
         json(res, 200, { ok: true });
         return true;
       }
@@ -656,6 +668,7 @@ export function createBotThreadOpsRoutes(deps: {
         json(res, 409, { error: "the bot switched tasks before it could be interrupted" });
         return true;
       }
+      handoffs.stoppedByPerson(expectedThreadId ?? bot.threadId);
       await interruptDirectThread(bot.id, expectedThreadId ?? bot.threadId);
       json(res, 200, { ok: true });
       return true;

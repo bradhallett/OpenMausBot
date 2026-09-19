@@ -151,16 +151,34 @@ export function useComputerPreview({
     if (panelView !== "computer" || phase !== "vm" || !computerStatusCurrent || viewerOpen || !pageVisible) return;
     const controller = new AbortController();
     let inFlight = false;
+    let lastAttemptAt = -Infinity;
+    let retryDelay: number | null = null;
+    let initialAttempt = true;
     const shoot = async () => {
       if (inFlight || controller.signal.aborted) return;
+      if (Date.now() - lastAttemptAt < (retryDelay ?? (bot.busy ? 3000 : 30_000))) return;
       inFlight = true;
+      retryDelay = null;
       try {
         const { image } = await api(threadPath("local-computer/screenshot"), { method: "POST", signal: controller.signal });
-        if (!controller.signal.aborted && typeof image === "string") setVmFrame(image);
+        if (!controller.signal.aborted && typeof image === "string") {
+          setVmFrame(image);
+          setPreviewError(null);
+        }
       } catch (e) {
-        if (!controller.signal.aborted) setError(e instanceof Error ? e.message : String(e));
+        // The first miss leaves the pane with nothing to show, so it stays a
+        // panel error. Later transient misses are the preview's own retry
+        // business — they keep the last frame, back off, and never rewrite
+        // the panel banner every tick.
+        if (!controller.signal.aborted) {
+          retryDelay = 5000;
+          if (initialAttempt) setError(e instanceof Error ? e.message : String(e));
+          else setPreviewError(e instanceof Error ? e : new LocalizedPanelError("computer.err.screenUnavailable"));
+        }
       } finally {
         inFlight = false;
+        initialAttempt = false;
+        lastAttemptAt = Date.now();
       }
     };
     void shoot();
@@ -169,7 +187,7 @@ export function useComputerPreview({
       controller.abort();
       window.clearInterval(timer);
     };
-  }, [panelView, phase, computerStatusCurrent, threadPath, viewerOpen, pageVisible, bot.busy, setError, setVmFrame]);
+  }, [panelView, phase, computerStatusCurrent, threadPath, viewerOpen, pageVisible, bot.busy, setError, setPreviewError, setVmFrame]);
 
   // local preview: frames from the Electron main process. The FIRST capture
   // attempt is what makes macOS show the Screen Recording prompt (there is

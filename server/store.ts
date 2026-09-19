@@ -21,6 +21,7 @@ import type { ModelSelection } from "./contracts.ts";
 import type { BotProfilePatch } from "./bot-profile.ts";
 import type { TeamSetupRequest, TeamSetupResult } from "../shared/team-setup.ts";
 import type { GroupGoalRunCardData } from "../shared/group-goal-run.ts";
+import type { HandedState } from "./delta-context.ts";
 import type {
   BotActivity, GroupDefaultResponder, GroupTask as GroupTaskRecord, TaskClosedBy,
   TaskOpenedBy, TaskUsage, BotProject as BotProjectRecord,
@@ -148,13 +149,13 @@ export class Store {
     this.rememberSections([...this.bots, ...bots].map((bot) => bot.section));
     writeFileAtomic(BOTS_FILE, JSON.stringify(bots.map(({ busy: _busy, activity: _activity, ...bot }) => ({
       ...bot,
-      tasks: bot.tasks?.map(({ busy: _taskBusy, activity: _taskActivity, ...task }) => task),
+      tasks: bot.tasks?.map(({ busy: _taskBusy, activity: _taskActivity, turnStartedAt: _taskTurnStarted, ...task }) => task),
     })), null, 2));
   }
 
   private saveGroups() {
     this.rememberSections(this.groups.map((group) => group.section));
-    writeFileAtomic(GROUPS_FILE, JSON.stringify(this.groups.map(({ busyBotId: _busyBotId, ...g }) => g), null, 2));
+    writeFileAtomic(GROUPS_FILE, JSON.stringify(this.groups.map(({ busyBotId: _busyBotId, turnStartedAt: _turnStartedAt, ...g }) => g), null, 2));
   }
 
   get sections(): string[] { return readSections(); }
@@ -291,6 +292,12 @@ export class Store {
 
   titleGroupTaskFromFirstMessage(groupId: string, text: string, threadId?: string) {
     return groupOps.titleGroupTaskFromFirstMessage(this.internals, groupId, text, threadId);
+  }
+
+  /** Swap a machine-made first-message channel title for a generated one,
+   * once; see store/groups.ts for the snippet-equality contract. */
+  retitleGroupTask(groupId: string, threadId: string, machineTitle: string, title: string): GroupTaskRecord | null {
+    return groupOps.retitleGroupTask(this.internals, groupId, threadId, machineTitle, title);
   }
 
   deleteGroupTask(groupId: string, threadId: string): GroupRecord | null {
@@ -476,6 +483,16 @@ export class Store {
     return taskOps.markTaskDispatched(this.internals, botId, threadId, instanceId);
   }
 
+  setHandedMessages(botId: string, threadId: string, instanceId: string, state: HandedState) {
+    const task = this.taskByThread(botId, threadId);
+    if (!task || JSON.stringify(task.handedMessages?.[instanceId]) === JSON.stringify(state)) return;
+    // Other instances keep a record only while it still describes their session.
+    const live = Object.entries(task.handedMessages ?? {})
+      .filter(([id, record]) => id !== instanceId && record.session !== undefined && record.session === task.resumeCursors[id]);
+    task.handedMessages = { ...Object.fromEntries(live), [instanceId]: state };
+    this.saveBots();
+  }
+
   /** Bank one settled turn onto its task. Called once per turn.completed;
    * the running per-driver token indicator is deliberately not used here
    * because its meaning differs by driver. */
@@ -591,6 +608,12 @@ export class Store {
   /** Name a task after its first message, once. */
   titleTaskFromFirstMessage(botId: string, text: string, threadId?: string) {
     return taskOps.titleTaskFromFirstMessage(this.internals, botId, text, threadId);
+  }
+
+  /** Swap a machine-made first-message title for a generated one, once;
+   * see store/tasks.ts for the snippet-equality contract. */
+  retitleTask(botId: string, threadId: string, machineTitle: string, title: string): TaskRecord | null {
+    return taskOps.retitleTask(this.internals, botId, threadId, machineTitle, title);
   }
 
   /** Delete a task and its transcript, retaining generated project files.

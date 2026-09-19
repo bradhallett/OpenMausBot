@@ -1,8 +1,10 @@
 // User-message binding and context/session assembly phases for the
 // direct-turn engine (server/start-turn.ts).
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { skillAuthoringEnabled, type AppConfig } from "../../config.ts";
+import { sectionContextSystemPrompt } from "../../section-context.ts";
+import { handedStateUsable, isContextMessage, renderUnseen, sessionStart, unseenMessages, withUnseenMessages, type ContextMessage } from "../../delta-context.ts";
 import { buildRecoveryText, buildTurnContext, engineIsFresh, peerMessageText } from "../../turn-context.ts";
 import { promptWithReply, transcriptText } from "../../replies.ts";
 import { expandLearnTurnText } from "../../skill-learn.ts";
@@ -51,6 +53,7 @@ export function bindUserMessage({
           replyToId: opts?.replyTo?.id,
           sendId: opts?.sendId,
           peerAsk: opts?.peerAsk,
+          sender: opts?.sender,
         });
   }
   // A card continuation neither starts nor ends the person's ask: it
@@ -77,6 +80,8 @@ export function assembleTurnContext({
   threadId,
   instance,
   instanceId,
+  model,
+  effort,
   commsDepth,
   providerText,
   userMessage,
@@ -93,6 +98,8 @@ export function assembleTurnContext({
   threadId: string;
   instance: ProviderInstance;
   instanceId: string;
+  model: string | undefined;
+  effort: string | undefined;
   commsDepth: number;
   providerText: string;
   userMessage: Message;
@@ -120,15 +127,18 @@ export function assembleTurnContext({
   // Resolve its quote from full storage, while the replay itself remains
   // strictly limited to the selected branch below.
   const messagesById = new Map(store.messagesFor(threadId).map((message) => [message.id, message]));
-  const transcript = activeMessages
-    .filter((m) => ((m.kind === "text" && m.text) || m.roomRequest?.phase === "result") && !skipTranscript.has(m.id))
-    .slice(-40)
-    .map((m) => ({
-      role: m.role === "user" ? ("user" as const) : ("assistant" as const),
-      text: m.roomRequest?.phase === "result" ? teammateReportContext(m.roomRequest.id, bot.id)
-        : m.role !== "user" && m.from ? peerMessageText(m.from.name, transcriptText(m, messagesById, cfg.profile?.name?.trim() || "User"))
-        : transcriptText(m, messagesById, cfg.profile?.name?.trim() || "User"),
-    }));
+  const context: ContextMessage[] = activeMessages.filter(isContextMessage).map((m) => ({
+    id: m.id,
+    role: m.role === "user" ? ("user" as const) : ("assistant" as const),
+    text: m.roomRequest?.phase === "result" ? teammateReportContext(m.roomRequest.id, bot.id)
+      : m.role !== "user" && m.from ? peerMessageText(m.from.name, transcriptText(m, messagesById, cfg.profile?.name?.trim() || "User"))
+      : transcriptText(m, messagesById, cfg.profile?.name?.trim() || "User"),
+    keep: m.roomRequest?.phase === "result" || (m.role !== "user" && Boolean(m.from)),
+    ...(m.steered ? { steered: true } : {}),
+  }));
+  const contextOrder = context.map((m) => m.id);
+  const replayable = context.filter((m) => !skipTranscript.has(m.id));
+  const transcript = replayable.slice(-40).map((m) => ({ role: m.role, text: m.text }));
 
   // After a rewind (edit / branch switch) the provider's native session
   // still contains the abandoned branch: start a fresh session instead of
@@ -149,6 +159,29 @@ export function assembleTurnContext({
     !rewound &&
     !externalContextMarker &&
     engineIsFresh({ instanceId, lastInstanceId: task.lastInstanceId, resumeCursors: task.resumeCursors, transcript });
+  // An engine that records what its session was handed resumes it with only
+  // the context messages outside that record. A record of another session
+  // (the one it replaced) or one that no longer lines up with the branch is
+  // not trusted: the session is rebuilt by the same replay as any other.
+  const strictResume = instance.adapter.capabilities.strictResume === true;
+  const cursor = task.resumeCursors[instanceId];
+  const handed = strictResume && !rewound && !fresh && !externalContextMarker && cursor !== undefined
+    ? task.handedMessages?.[instanceId] : undefined;
+  const unseen = handed && handedStateUsable(handed, cursor, contextOrder) ? unseenMessages(replayable, contextOrder, handed) : undefined;
+  // A teammate’s result or reply: without records this turn would replay.
+  const externalUpdate = Boolean(opts?.coordination?.resumed || unseen?.some((m) => m.keep));
+  // What a resumed session keeps from its launch: the standing instructions
+  // (tools, servers and — for Claude — the model are passed on every launch),
+  // plus whatever this engine can only set when a session starts. Codex’s
+  // thread/resume sends no model selection, and an effort it is not sent stays
+  // at the thread’s last value, so both belong to the session there. An
+  // external update that finds any of it changed since the session started
+  // gets the fresh session and replay it always got, rather than a resume.
+  const persistentConfig = [bot.name, bot.title, bot.description, sectionContextSystemPrompt(bot.section),
+    ...(instance.driverKind === "codex" ? [model, effort ?? null] : [])];
+  const sessionConfig = (soul: string | undefined) =>
+    createHash("sha256").update(JSON.stringify([...persistentConfig, soul])).digest("hex").slice(0, 16);
+  const plannedConfig = sessionConfig(bot.soul);
   // Agent-tool gate shared by skill authoring, the /setup turn-text rewrite,
   // the setup prompt block, and the peer-comms integration below: a driver
   // that never mounts agent tools (or a turn already at the comms-depth cap)
@@ -162,27 +195,54 @@ export function assembleTurnContext({
   // which also depends on the bot's soul/description — is decided below,
   // from the same bot snapshot the prompt's soul is built from.
   const setupText = agentsMounted ? expandSetupTurnText(providerText) : providerText;
-  const { turnText, resume } = buildTurnContext({
-    text: promptWithReply(
-      skillAuthoring ? expandLearnTurnText(setupText) : setupText,
-      opts?.replyTo,
-      cfg.profile?.name?.trim() || "User",
-    ),
-    transcript,
-    rewound,
-    fresh,
-    externallyUpdated: Boolean(externalContextMarker),
-    replaysNatively: instance.driverKind === "grok",
-  });
-  // Snapshot the cursor alongside the context decision. An external result
-  // can arrive during async computer/setup work and clear the task cursor;
-  // this already-built turn must either keep its old session or replay on the
-  // following turn, never start a blank session with no transcript.
-  const resumeCursor = resume ? task.resumeCursors[instanceId] : undefined;
-  // A cursor the provider no longer honours must not brick the thread: the
-  // driver may fall back to ONE fresh session, and this is what it sends
-  // there, so the new session is not blank (server/resume-recovery.ts).
-  const recoveryText = resumeCursor !== undefined ? buildRecoveryText({ text: turnText, transcript }) : undefined;
+  const userTurnText = promptWithReply(
+    skillAuthoring ? expandLearnTurnText(setupText) : setupText,
+    opts?.replyTo,
+    cfg.profile?.name?.trim() || "User",
+  );
+  // Decided again at dispatch when setup outlasted a soul edit (config).
+  const decideContext = (config: string) => {
+    const handedStale = Boolean(handed && (!unseen || (externalUpdate && handed.config !== config)));
+    const { block: unseenBlock, placed } = unseen && !handedStale ? renderUnseen(unseen) : { block: "", placed: [] };
+    const { turnText: contextTurnText, resume } = buildTurnContext({
+      text: userTurnText,
+      transcript,
+      rewound,
+      fresh,
+      externallyUpdated: Boolean(externalContextMarker) || handedStale,
+      replaysNatively: instance.driverKind === "grok",
+    });
+    // Snapshot the cursor alongside the context decision. An external result
+    // can arrive during async computer/setup work and clear the task cursor;
+    // this already-built turn must either keep its old session or replay on the
+    // following turn, never start a blank session with no transcript.
+    const resumeCursor = resume ? task.resumeCursors[instanceId] : undefined;
+    // A cursor the provider no longer honours must not brick the thread: the
+    // driver may fall back to ONE fresh session, and this is what it sends
+    // there, so the new session is not blank (server/resume-recovery.ts). A
+    // turn carrying an external update gets the replay it would have had.
+    const recoveryIsReplay = resumeCursor !== undefined && externalUpdate && transcript.length > 0;
+    const recoveryText = resumeCursor === undefined ? undefined : recoveryIsReplay
+      ? buildTurnContext({ text: userTurnText, transcript, rewound: false, fresh: false, externallyUpdated: true, replaysNatively: false }).turnText
+      : buildRecoveryText({ text: userTurnText, transcript });
+    // What this turn puts in front of the provider, for each session it can end
+    // up in (server/delta-context.ts). buildTurnContext prepends a replay only
+    // when it replays, so a changed text means the transcript was sent.
+    const carried = [...skipTranscript];
+    const windowIds = replayable.slice(-40).map((m) => m.id);
+    return {
+      turnText: withUnseenMessages(unseenBlock, contextTurnText),
+      resumeCursor, recoveryText, recoveryIsReplay,
+      handoff: strictResume ? {
+        botId: bot.id, instanceId, config, resumeCursor: typeof resumeCursor === "string" ? resumeCursor : undefined,
+        started: sessionStart(contextOrder, contextTurnText !== userTurnText ? windowIds : [], carried),
+        recovery: sessionStart(contextOrder, recoveryText !== undefined ? windowIds : [], carried),
+        resumed: sessionStart(contextOrder, [], [...placed, ...carried]),
+        placed, carried, own: [userMessage.id, ...(opts?.excludeMessageIds ?? [])],
+      } : undefined,
+    };
+  };
+  const dispatchContext = decideContext(plannedConfig);
 
   const persona = [
     `You are ${bot.name}, a personal bot in OpenMausBot.`,
@@ -198,6 +258,5 @@ export function assembleTurnContext({
     const drift = checkSoulDrift(bot.id, bot.soul ?? "", bot.soulHash ?? "");
     if (drift.drift !== Boolean(bot.soulDrift)) store.patchBot(bot.id, { soulDrift: drift.drift });
   }
-  return { transcript, rewound, externalContextMarker, agentsMounted, skillAuthoring, turnText, resumeCursor, recoveryText, persona };
+  return { transcript, rewound, externalContextMarker, agentsMounted, skillAuthoring, dispatchContext, decideContext, plannedConfig, sessionConfig, strictResume, persona };
 }
-

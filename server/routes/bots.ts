@@ -34,7 +34,7 @@ import {
 import { groupIsWorking, groupTurnOperations } from "../group-coordination.ts";
 import { revokeInternalCapabilitiesForThread } from "../internal-capabilities.ts";
 import { closeOpenApprovals } from "../turn-fold.ts";
-import { clientGroupPatchViolation, requestSource } from "../request-auth.ts";
+import { clientGroupPatchViolation, messageSender, requestSource } from "../request-auth.ts";
 import type { RequestAuth } from "../request-auth.ts";
 import { DATA_DIR } from "../config.ts";
 import type { SteerOutcome } from "../contracts.ts";
@@ -490,7 +490,7 @@ export function createBotRoutes(deps: {
             });
             return { ok: true as const, queued: true as const, queueId: queued.id, threadId };
           }
-          const message = startGroupTurn(current.id, text, replyTo, sendId, channelMode, undefined, { via });
+          const message = startGroupTurn(current.id, text, replyTo, sendId, channelMode, undefined, { via, sender: messageSender(auth) });
           return { ok: true as const, threadId, message };
         },
       );

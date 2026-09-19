@@ -56,8 +56,9 @@ function serializeRoomContext(
       // a bot's name is quoted on the speaker line, so it gets one line; a
       // user line that came through the API says so, since the reader would
       // otherwise take it for the person typing
+      const person = m.sender?.name ?? userName;
       const speaker = m.role === "user"
-        ? m.via === "api" ? `${userName} (sent through the local API, not typed)` : userName
+        ? m.via === "api" ? `${person} (sent through the local API, not typed)` : person
         : m.from ? peerName(m.from.name) : "Bot";
       const line = `${speaker}: ${transcriptText(rendered, messagesById, userName)}`;
       // A room reply is the room talking. A post_to_room message is another

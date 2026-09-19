@@ -234,19 +234,20 @@ export function createConfigViews(deps: ConfigViewsDeps) {
   async function describeInstances() {
     const configs = instanceConfigs(cfg);
     return (await registry.describe()).map((instance) => {
+      const entry = configs[instance.instanceId];
+      const described = entry?.icon ? { ...instance, icon: entry.icon } : instance;
       if (managedDesktop.owns(instance.instanceId)) return {
-        ...instance, readOnly: true, managed: managedDesktop.info(instance.instanceId),
+        ...described, readOnly: true, managed: managedDesktop.info(instance.instanceId),
         install: undefined, authentication: undefined, cli: undefined, cliCandidates: [],
       };
-      const entry = configs[instance.instanceId];
-      if (entry?.driver !== "claudeAgent") return instance;
+      if (entry?.driver !== "claudeAgent") return described;
       try {
         const claudeAccount = claudeAccountInfo(instance.instanceId, entry, instance.cli ?? instance.cliDefault ?? "claude");
-        return { ...instance, claudeAccount, install: { ...instance.install, signInCommand: claudeAccount.signInCommand } };
+        return { ...described, claudeAccount, install: { ...instance.install, signInCommand: claudeAccount.signInCommand } };
       } catch {
         // A malformed saved config remains a repairable shadow, never takes
         // the model picker down or offers a login for the wrong directory.
-        return { ...instance, install: { ...instance.install, signInCommand: undefined } };
+        return { ...described, install: { ...instance.install, signInCommand: undefined } };
       }
     });
   }

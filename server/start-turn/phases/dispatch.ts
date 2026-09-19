@@ -13,13 +13,26 @@ import {
   revokeInternalCapabilityGeneration,
 } from "../../internal-capabilities.ts";
 import { redactSecretsInText } from "../../redact.ts";
+import { handoffs } from "../../delta-handoffs.ts";
+import type { Handoff } from "../../delta-context.ts";
 import { buildNotification } from "../../notify.ts";
+import { reportIncident } from "../../incident-report.ts";
 import { surfaceOfComputerKind, type SurfacePlan } from "../../surface.ts";
 import type { TurnOwner } from "../../turn-resources.ts";
 import type { ProviderInstance } from "../../contracts.ts";
 import type { TeamComputerRecord } from "../../team-computers.ts";
 import type { StartTurnOptions } from "../../start-turn.ts";
 import type { CaptureFn, ComputerKind, Deps, SendTurnInput, Task, TurnIntegrations } from "./shared.ts";
+
+/** The context decision a turn dispatches under: the text it sends, the
+ * session it resumes, and the handoff a strict-resume engine records. */
+export type TurnDispatchContext = {
+  turnText: SendTurnInput["text"];
+  resumeCursor: SendTurnInput["resumeCursor"];
+  recoveryText: string | undefined;
+  recoveryIsReplay: boolean;
+  handoff: Handoff | undefined;
+};
 
 /** Dispatch preparation: browser mint, surface recording and the cancellation/handshake gates. */
 export async function prepareTurnDispatch({
@@ -134,14 +147,16 @@ export async function dispatchProviderTurn({
   threadId,
   instance,
   instanceId,
-  turnText,
   turnImages,
   commsDepth,
   model,
   effort,
   variant,
-  resumeCursor,
-  recoveryText,
+  plannedContext,
+  decideContext,
+  sessionConfig,
+  strictResume,
+  liveBot,
   transcript,
   prompt,
   integrations,
@@ -181,14 +196,16 @@ export async function dispatchProviderTurn({
   threadId: string;
   instance: ProviderInstance;
   instanceId: string;
-  turnText: SendTurnInput["text"];
   turnImages: SendTurnInput["images"];
   commsDepth: number;
   model: SendTurnInput["model"];
   effort: SendTurnInput["effort"];
   variant: SendTurnInput["variant"];
-  resumeCursor: SendTurnInput["resumeCursor"];
-  recoveryText: string | undefined;
+  plannedContext: TurnDispatchContext;
+  decideContext: (config: string) => TurnDispatchContext;
+  sessionConfig: (soul: string | undefined) => string;
+  strictResume: boolean;
+  liveBot: BotRecord | undefined;
   transcript: SendTurnInput["transcript"];
   prompt: ReturnType<typeof buildSystemPrompt>;
   integrations: TurnIntegrations;
@@ -225,10 +242,18 @@ export async function dispatchProviderTurn({
   startScreenPoller: Deps["cleanup"]["startScreenPoller"];
 }) {
   runningTurnEngines.set(threadId, instance);
+  // The prompt carries the soul as saved now. If it changed during setup,
+  // decide again from what is actually sent.
+  const dispatchedConfig = sessionConfig(liveBot?.soul ?? bot.soul);
+  const plannedConfig = sessionConfig(bot.soul);
+  const dispatchContext = strictResume && dispatchedConfig !== plannedConfig
+    ? decideContext(dispatchedConfig) : plannedContext;
+  // Before sendTurn: an adapter may emit the whole turn before it resolves.
+  handoffs.dispatching(threadId, dispatchClaimId, dispatchContext.handoff);
   const dispatch = await guardTurnDispatch(instance.adapter.sendTurn({
     threadId,
     botId: bot.id,
-    text: turnText,
+    text: dispatchContext.turnText,
     refreshSystemPrompt: true,
     images: turnImages,
     approvalMode: approvalModeForTurn(bot, commsDepth > 0),
@@ -238,8 +263,9 @@ export async function dispatchProviderTurn({
     // a rewound thread never resumes the abandoned branch's session
     // the active task's own session — another task's cursor would
     // resume the wrong conversation and defeat the context bubble
-    resumeCursor,
-    ...(recoveryText !== undefined ? { recoveryText } : {}),
+    resumeCursor: dispatchContext.resumeCursor,
+    ...(dispatchContext.recoveryText !== undefined ? { recoveryText: dispatchContext.recoveryText } : {}),
+    ...(dispatchContext.recoveryIsReplay ? { recoveryIsReplay: true } : {}),
     transcript,
     system: prompt.text,
     systemStable: prompt.stable,
@@ -256,6 +282,7 @@ export async function dispatchProviderTurn({
     throw new DirectTurnSetupCancelled("turn stopped during provider setup");
   }
   bindInternalCapabilityToProviderTurn(threadId, dispatchClaimId, dispatch.value.turnId);
+  handoffs.bindTurn(threadId, dispatchClaimId, dispatch.value.turnId);
   if (directFollowupSettlers.has(dispatchClaimId) && dispatch.value.turnId &&
     !directFollowupTurns.bind(threadId, dispatchClaimId, dispatch.value.turnId)) {
     // This exact queued turn completed before its dispatch ACK arrived.
@@ -355,6 +382,7 @@ export function settleDispatchFailure({
   releaseLocalVmThread: Deps["cleanup"]["releaseLocalVmThread"];
   activeVpsThreads: Deps["computers"]["activeVpsThreads"];
 }) {
+  handoffs.abandon(threadId, dispatchClaimId);
   if (computerSelectionTurns.get(threadId)?.generation === dispatchClaimId) computerSelectionTurns.delete(threadId);
   settleDirectFollowup(dispatchClaimId);
   clearCancelledProviderHandshake(threadId, `direct:${dispatchClaimId}`);
@@ -406,6 +434,7 @@ export function settleDispatchFailure({
     notify(
       buildNotification("turn-failed", bot, threadId, redactSecretsInText(message), { avatarUrl: bot.avatarUrl }),
     );
+    reportIncident({ kind: "could-not-start", bot, threadId, detail: message });
   }
   store.setTaskActivity(bot.id, threadId, "idle");
   directTurnBots.delete(threadId);

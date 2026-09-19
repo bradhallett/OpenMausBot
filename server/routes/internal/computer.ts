@@ -117,6 +117,8 @@ export async function sharedComputersSubmit(ctx: ComputerCtx, res: ServerRespons
 }
 
 // ── computer control: proxies read the hold, bots plead for help ──
+const LAZY_VM_CLAIM_GRACE_MS = 5_000;
+
 export async function computerControlRoute(ctx: ComputerCtx, res: ServerResponse, url: URL, method: string): Promise<boolean> {
   const {
     store, computerControl, botComputerControlSnapshot, turnComputerResources, autoVmClaims,
@@ -127,20 +129,49 @@ export async function computerControlRoute(ctx: ComputerCtx, res: ServerResponse
     if (!bot) return json(res, 404, { error: "no such bot" });
     if (method === "GET") {
       const snapshot = botComputerControlSnapshot(botId, internalCapability.teamComputerId);
-      const computer = turnComputerResources.get(internalCapability.threadId);
-      const lazyClaim = autoVmClaims.get(internalCapability.threadId);
-      if (!snapshot.held && !computer && lazyClaim && lazyClaim.owner.generation === internalCapability.generation) {
+      const slot = autoVmClaims.get(internalCapability.threadId);
+      const lazyClaim = slot && slot.owner.generation === internalCapability.generation ? slot : undefined;
+      if (!snapshot.held && lazyClaim?.lazy && !lazyClaim.begin) {
         // First screen tools/call on a lazily-attached Auto VM (issue
-        // #1361): fire the exclusive claim — once — and answer with the
-        // same contention text a dispatched claim produces until it
-        // lands. No-op today: dispatch claims eagerly, so a live VM
-        // capability always has its computer entry already.
+        // #1361): fire the exclusive claim — once — and give it a moment
+        // to land. A free, ready VM claims in the time of one container
+        // inspect, so this call then proceeds with an honest answer;
+        // only a claim still queued behind another holder answers held
+        // below, and then the contention text is true. Keyed on the
+        // slot, never on the thread's turn-computer entry: a bind this
+        // turn abandoned earlier (a VPS that turned out to be asleep)
+        // must not hide the unclaimed VM and let the call through.
         startAutoVmClaim(autoVmClaims, internalCapability.threadId, internalCapability.generation);
+        await Promise.race([
+          lazyClaim.begin ?? Promise.resolve(),
+          new Promise<void>((resolve) => setTimeout(resolve, LAZY_VM_CLAIM_GRACE_MS)),
+        ]);
+      }
+      if (!snapshot.held && lazyClaim?.failed === true) {
+        // A rejected lazy claim (gate finding F1, issue #1361): the
+        // computer MCP mounted at dispatch is still live, and the claim
+        // may even have left a turn-computer entry behind (it can reject
+        // after bindTurnComputer succeeded — lease lost to a person,
+        // lifecycle busy, boot failure). Either way this turn owns no
+        // usable VM, so keep refusing every screen call for the rest of
+        // the generation; the bridge must never forward one onto a VM
+        // this turn never claimed. Turn settle GC clears the slot. Say
+        // why, and say not to retry: the contention text would send the
+        // model into a screenshot loop against a claim that cannot land.
+        return json(res, 200, {
+          held: true, helpOpen: false,
+          blockedReason: `This turn could not claim ${lazyClaim.label ?? "this computer"}${lazyClaim.failure ? ` (${lazyClaim.failure})` : ""}. This call was not performed. Do not retry computer work in this turn; tell the person what you could not do.`,
+        });
+      }
+      if (!snapshot.held && lazyClaim?.lazy && lazyClaim.begin && !lazyClaim.claimed) {
+        // The claim fired and is still waiting on the exclusive bind:
+        // another turn genuinely holds this desktop right now.
         return json(res, 200, {
           held: true, helpOpen: false,
           blockedReason: "Another thread is using this computer. This call was not performed. Pause computer work until that thread finishes, then take a fresh screenshot before acting.",
         });
       }
+      const computer = turnComputerResources.get(internalCapability.threadId);
       if (!snapshot.held && computer && computer.owner.generation === internalCapability.generation &&
           !claimTurnResource(computer.owner, computer.resource)) {
         return json(res, 200, {

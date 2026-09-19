@@ -12,6 +12,7 @@ import type { EventFoldDeps } from "../event-fold.ts";
 import { computerSelectionTurns } from "../internal-capabilities.ts";
 import { modelContextWindow } from "../model-context-window.ts";
 import { buildNotification } from "../notify.ts";
+import { reportIncident } from "../incident-report.ts";
 import type { RoutineRun } from "../routines.ts";
 import { registry, store } from "../runtime.ts";
 import { noteSpend } from "../spend.ts";
@@ -65,6 +66,7 @@ interface TurnCompletionCtx {
   SCREEN_SETTLE_TIMEOUT_MS: EventFoldDeps["lateBound"]["SCREEN_SETTLE_TIMEOUT_MS"];
   groupSpeakers: EventFoldDeps["fold"]["groupSpeakers"];
   finalizeDelegationWatch: EventFoldDeps["helpers"]["finalizeDelegationWatch"];
+  routines: EventFoldDeps["lateBound"]["routines"];
 }
 
 export interface TurnCompletionHandlers {
@@ -83,6 +85,7 @@ export function turnCompletionHandlers({
   drainDelegationWakes, routineSourceThread, routineSourceOwner, notify,
   screenPollers, settlingResourceOwners, finalScreenFrame,
   SCREEN_SETTLE_TIMEOUT_MS, groupSpeakers, finalizeDelegationWatch,
+  routines,
 }: TurnCompletionCtx): TurnCompletionHandlers {
   return {
     turnRetrying({ event, pushMessage }: { event: TurnRetryingEvent; pushMessage: PushMessage }) {
@@ -150,6 +153,12 @@ export function turnCompletionHandlers({
       if (completedTurnId) store.markTerminalAssistantMessage(event.threadId, completedTurnId);
       const reply = lastReply.get(event.threadId) ?? "";
       lastReply.delete(event.threadId);
+      // A run that broke — not one the person stopped, and not a routine's,
+      // which reports through its own failure path — is the Chief's to see.
+      if (!event.ok && event.stopReason !== "interrupted" && !routines()?.runForThread(event.threadId)) {
+        const broken = bot ?? (speaker ? store.bot(speaker.botId) : undefined);
+        if (broken) reportIncident({ kind: "failed", bot: broken, threadId: event.threadId, detail: event.stopReason?.trim() || "the run ended without a result" });
+      }
       const lastReported = turnUsage.get(event.threadId);
       turnUsage.delete(event.threadId);
       turnContext.delete(event.threadId);

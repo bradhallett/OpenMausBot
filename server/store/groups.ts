@@ -5,7 +5,7 @@ import { newId } from "../contracts.ts";
 import type { GroupGoalRunCardData } from "../../shared/group-goal-run.ts";
 import type { GroupDefaultResponder, GroupTask as GroupTaskRecord } from "../../shared/wire.ts";
 import {
-  normalizeGroupDefaultResponder, titleFromMessage, UNTITLED_TASK,
+  normalizeGroupDefaultResponder, threadTitleFrom, titleFromMessage, UNTITLED_TASK,
   type GroupRecord,
 } from "./records.ts";
 import type { StoreContext } from "./context.ts";
@@ -75,7 +75,17 @@ export function patchGroup(ctx: StoreContext, id: string, patch: Partial<Pick<Gr
   if (Object.prototype.hasOwnProperty.call(patch, "section")) {
     ctx.rememberSections([patch.section]);
   }
+  const previousBusyBotId = record.busyBotId;
   Object.assign(record, patch);
+  // The group's elapsed readout counts the busy member's turn from the
+  // claim time — the group-side twin of a task's turnStartedAt. Derived,
+  // never patched directly: stamp it on every transition into a busy
+  // speaker and clear it when the group goes idle, so each member's turn
+  // counts from its own start.
+  if (Object.prototype.hasOwnProperty.call(patch, "busyBotId")) {
+    if (patch.busyBotId && patch.busyBotId !== previousBusyBotId) record.turnStartedAt = Date.now();
+    else if (!patch.busyBotId) delete record.turnStartedAt;
+  }
   if (!record.dm && Object.prototype.hasOwnProperty.call(patch, "pinnedMessageId")) {
     const active = ctx.activeGroupTask(id);
     if (active) active.pinnedMessageId = patch.pinnedMessageId;
@@ -209,12 +219,26 @@ export function renameGroupTask(ctx: StoreContext, groupId: string, threadId: st
   return task;
 }
 
-export function titleGroupTaskFromFirstMessage(ctx: StoreContext, groupId: string, text: string, threadId?: string) {
+/** Name a channel task after its first message, once. Returns the task
+ * it named so a caller can later replace exactly that machine-made
+ * title. */
+export function titleGroupTaskFromFirstMessage(ctx: StoreContext, groupId: string, text: string, threadId?: string): GroupTaskRecord | null {
   const task = threadId ? ctx.groupTaskByThread(groupId, threadId) : ctx.activeGroupTask(groupId);
-  if (!task || task.title !== UNTITLED_TASK) return;
+  if (!task || task.titleFromFirstMessage || task.title !== UNTITLED_TASK) return null;
   task.title = titleFromMessage(text);
+  task.titleFromFirstMessage = true;
   ctx.saveGroups();
   ctx.emit({ type: "group", groupId });
+  return task;
+}
+
+/** Swap a machine-made first-message channel title for a generated one,
+ * once, on the same snippet-equality contract as bot tasks: any rename
+ * by the person breaks that equality first and always wins. */
+export function retitleGroupTask(ctx: StoreContext, groupId: string, threadId: string, machineTitle: string, title: string): GroupTaskRecord | null {
+  const task = ctx.groupTaskByThread(groupId, threadId);
+  if (!task || task.title !== machineTitle) return null;
+  return renameGroupTask(ctx, groupId, threadId, threadTitleFrom(title));
 }
 
 export function deleteGroupTask(ctx: StoreContext, groupId: string, threadId: string): GroupRecord | null {

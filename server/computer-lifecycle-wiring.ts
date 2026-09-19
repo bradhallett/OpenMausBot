@@ -18,6 +18,13 @@ import { SendSequencer } from "./send-idempotency.ts";
 import { createComputerLifecycle } from "./computer-lifecycle.ts";
 import { createScreenPollers } from "./screen-pollers.ts";
 import { createTurnCleanup } from "./turn-cleanup.ts";
+import {
+  computerFreeText,
+  computerStillBusyText,
+  computerWaitingText,
+  computerWaitEndedText,
+  type ComputerHolder,
+} from "./computer-wait.ts";
 import { store, teamComputerTurns, ENVIRONMENT_ID } from "./runtime.ts";
 import { DATA_DIR } from "./config.ts";
 import {
@@ -169,6 +176,9 @@ async function bindTurnComputer(owner: TurnOwner, resource: string, exclusive = 
   const active = () => activeInternalGenerationByThread.get(owner.threadId) === owner.generation &&
     turnResourceOwners.get(owner.threadId)?.generation === owner.generation;
   let waitingMessage: Message | undefined;
+  // Who holds the desktop, as the chip and the give-up error name them: a
+  // bot running a titled thread, or a room. Read once, when the wait begins.
+  let holder: ComputerHolder | undefined;
   const deadline = Date.now() + GROUP_GOAL_WAIT_MAX_MS();
   try {
     while (true) {
@@ -178,20 +188,22 @@ async function bindTurnComputer(owner: TurnOwner, resource: string, exclusive = 
         const blocker = turnResources.blocker(resource, owner);
         const holderBot = blocker && store.botByThread(blocker.threadId);
         const holderTask = holderBot && blocker && store.taskByThread(holderBot.id, blocker.threadId);
-        const holder = holderBot ? `${holderBot.name}${holderTask?.title ? ` / ${holderTask.title}` : ""}`
-          : blocker && store.groupByThread(blocker.threadId)?.name;
+        const holderRoom = !holderBot && blocker ? store.groupByThread(blocker.threadId) : null;
+        holder = holderBot
+          ? { name: holderBot.name, ...(holderTask?.title ? { task: holderTask.title } : {}) }
+          : holderRoom ? { name: holderRoom.name } : undefined;
         waitingMessage = store.appendMessage(owner.threadId, {
           role: "bot", kind: "activity",
-          tool: { name: `Waiting for computer${holder ? ` — ${holder} is using it` : ""}; will continue automatically` },
+          tool: { name: computerWaitingText(holder) },
           ...(holderBot && holderTask ? { threadRef: { botId: holderBot.id, threadId: holderTask.threadId, title: holderTask.title } } : {}),
         });
       }
-      if (Date.now() >= deadline) throw new Error("Computer is still busy. Stop the turn using it, then retry.");
+      if (Date.now() >= deadline) throw new Error(computerStillBusyText(holder, GROUP_GOAL_WAIT_MAX_MS()));
       await new Promise<void>(resolve => setTimeout(resolve, 100));
     }
   } finally {
     if (waitingMessage) store.patchMessage(owner.threadId, waitingMessage.id, {
-      tool: { name: active() && turnResources.owns(resource, owner) ? "Computer available — continuing" : "Computer wait ended", ok: true },
+      tool: { name: active() && turnResources.owns(resource, owner) ? computerFreeText() : computerWaitEndedText(), ok: true },
     });
   }
   turnResourceOwners.set(owner.threadId, owner);

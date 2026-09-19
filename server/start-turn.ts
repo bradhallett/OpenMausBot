@@ -32,6 +32,7 @@ import type { SurfacePlan } from "./surface.ts";
 import { admitDirectTurn, claimDirectTurn } from "./start-turn/phases/admission.ts";
 import { assembleTurnContext, bindUserMessage } from "./start-turn/phases/context.ts";
 import { assembleTurnIntegrations } from "./start-turn/phases/integrations.ts";
+import { handoffs } from "./delta-handoffs.ts";
 import { buildCoordinationPrompts, buildTurnSystemPrompt } from "./start-turn/phases/prompts.ts";
 import { resolveTurnProvider } from "./start-turn/phases/provider.ts";
 import { dispatchProviderTurn, prepareTurnDispatch, settleDispatchFailure } from "./start-turn/phases/dispatch.ts";
@@ -102,6 +103,8 @@ export interface StartTurnDeps {
     autoVmClaims: AutoVmClaimTable;
     releaseLocalVmThread(threadId: string): void;
     startScreenPoller(botId: string, threadId: string, captures: { computer?: ScreenCapture; browser?: ScreenCapture }, options?: { screenIsTheWork?: boolean }): void;
+    stopScreenPoller(botId: string, threadId?: string): void;
+    screenPollers: ReadonlyMap<string, { touched: boolean }>;
   };
   turnMarks: {
     markUnattended(botId: string, threadId: string): void;
@@ -165,6 +168,8 @@ export interface StartTurnDeps {
 export type StartTurnOptions = {
   commsDepth?: number;
   userMessage?: Message;
+  /** The person who sent this, when not the desktop owner. */
+  sender?: { name: string };
   /** Admission must succeed before editing the active transcript branch. */
   editedMessageId?: string;
   /** Extra transcript ids to omit (every drained queued line, not just the last). */
@@ -218,7 +223,7 @@ export function createStartTurn(deps: StartTurnDeps) {
       turnUsage, turnContext, personAskAt, retryDelegationsWaitingOn,
       drains: { drainQueuedSends, drainConnectorResumes, drainSecretResumes, drainTeamSetupResumes, drainDelegationWakes },
     },
-    cleanup: { releaseTurnResources, settlingResourceOwners, autoVmClaims, releaseLocalVmThread, startScreenPoller },
+    cleanup: { releaseTurnResources, settlingResourceOwners, autoVmClaims, releaseLocalVmThread, startScreenPoller, stopScreenPoller, screenPollers },
     turnMarks: { markUnattended, clearUnattended, markInternalTurn, clearInternalTurn, delegationWakeBudget },
     routines: { routines, activeRoutineRunForThread },
     localVm: {
@@ -267,6 +272,7 @@ export function createStartTurn(deps: StartTurnDeps) {
         opts,
         bot,
         threadId,
+        cfg,
         store,
         turnSurfacePlan,
         turnProvider,
@@ -278,7 +284,7 @@ export function createStartTurn(deps: StartTurnDeps) {
     const userMessage = bindUserMessage({ text, opts, bot, task, threadId, commsDepth, store, personAskAt });
     const {
       transcript, rewound, externalContextMarker, agentsMounted, skillAuthoring,
-      turnText, resumeCursor, recoveryText, persona,
+      dispatchContext, decideContext, sessionConfig, strictResume, persona,
     } = assembleTurnContext({
       opts,
       bot,
@@ -286,6 +292,8 @@ export function createStartTurn(deps: StartTurnDeps) {
       threadId,
       instance,
       instanceId,
+      model,
+      effort,
       commsDepth,
       providerText,
       userMessage,
@@ -313,6 +321,7 @@ export function createStartTurn(deps: StartTurnDeps) {
       turnContext,
       inheritedTeamComputer,
     });
+    if (dispatchContext.handoff) handoffs.begin(threadId, dispatchClaimId, dispatchContext.handoff);
 
     void (async () => {
       try {
@@ -338,6 +347,9 @@ export function createStartTurn(deps: StartTurnDeps) {
           bindTurnComputer,
           attachTeamBox,
           controlIntegration,
+          stopScreenPoller,
+          screenPollers,
+          startScreenPoller,
           activeVpsThreads,
           inheritedTeamComputer,
           autoVmClaims,
@@ -442,14 +454,16 @@ export function createStartTurn(deps: StartTurnDeps) {
           threadId,
           instance,
           instanceId,
-          turnText,
           turnImages,
           commsDepth,
           model,
           effort,
           variant,
-          resumeCursor,
-          recoveryText,
+          plannedContext: dispatchContext,
+          decideContext,
+          sessionConfig,
+          strictResume,
+          liveBot: liveBot ?? undefined,
           transcript,
           prompt,
           integrations,

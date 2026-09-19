@@ -4,6 +4,7 @@
 import { z } from "zod";
 import { normalizeImageGenerationUrl, type ImageGenerationConfig } from "../../shared/image-generation.ts";
 import { EFFORT_LEVELS } from "../../shared/wire.ts";
+import { PROVIDER_ICON_PRESETS, providerIconError } from "../../shared/provider-icon.ts";
 import { isModelVariant, type InstanceConfigMap, type ModelSelection } from "../contracts.ts";
 import { schemaIssue, type JsonValue } from "../schema.ts";
 
@@ -17,6 +18,9 @@ const BROWSER_PROFILE_ID = /^[a-z0-9_-]{1,40}$/;
 export const DEFAULT_ROOM_TURN_TIMEOUT_MINUTES = 5;
 export const MIN_ROOM_TURN_TIMEOUT_MINUTES = 1;
 export const MAX_ROOM_TURN_TIMEOUT_MINUTES = 1_440;
+export const DEFAULT_ROOM_HANDOFF_LIFETIME_MINUTES = 30;
+export const DEFAULT_ROOM_HANDOFF_MIN_RUNWAY_MINUTES = 10;
+export const DEFAULT_ROOM_HANDOFF_HARD_CAP_MINUTES = 240;
 export const DEFAULT_MAX_CONCURRENT_BOT_THREADS = 3;
 export const MAX_CONCURRENT_BOT_THREADS = 10;
 /** Bounds for threads.eventLogMaxBytes: the floor keeps the kept tail large
@@ -33,6 +37,19 @@ export function isValidSshAlias(value: unknown): value is string {
   return typeof value === "string" && SSH_ALIAS.test(value);
 }
 
+const CDP_PORT = /^[0-9]{1,5}$/;
+const CDP_URL = /^(https?|wss?):\/\/\S+$/i;
+/** A bare TCP port (agent-browser's `--cdp <port>` shorthand) or an
+ * http(s)/ws(s) URL to a Chrome DevTools Protocol endpoint. */
+export function isValidCdpTarget(value: unknown): value is string {
+  if (typeof value !== "string" || value === "") return false;
+  if (CDP_PORT.test(value)) {
+    const port = Number(value);
+    return port >= 1 && port <= 65535;
+  }
+  return CDP_URL.test(value);
+}
+
 const vpsConfigSchema = z.object({
   sshAlias: z.string().refine((value) => value === "" || isValidSshAlias(value), {
     message: "must be a simple SSH config alias",
@@ -44,6 +61,29 @@ const roomConfigSchema = z.object({
     .int()
     .min(MIN_ROOM_TURN_TIMEOUT_MINUTES)
     .max(MAX_ROOM_TURN_TIMEOUT_MINUTES),
+  /** Room handoff tree lifetime. Active execution pauses this clock; the
+   * hard cap is wall-clock and bounds trees that never stop executing. */
+  handoffLifetimeMinutes: z.number().int().min(1).max(MAX_ROOM_TURN_TIMEOUT_MINUTES).optional(),
+  handoffMinRunwayMinutes: z.number().int().min(1).max(MAX_ROOM_TURN_TIMEOUT_MINUTES).optional(),
+  handoffHardCapMinutes: z.number().int().min(1).max(7 * MAX_ROOM_TURN_TIMEOUT_MINUTES).optional(),
+}).refine(
+  (rooms) =>
+    (rooms.handoffMinRunwayMinutes ?? DEFAULT_ROOM_HANDOFF_MIN_RUNWAY_MINUTES) <=
+      (rooms.handoffLifetimeMinutes ?? DEFAULT_ROOM_HANDOFF_LIFETIME_MINUTES) &&
+    (rooms.handoffLifetimeMinutes ?? DEFAULT_ROOM_HANDOFF_LIFETIME_MINUTES) <=
+      (rooms.handoffHardCapMinutes ?? DEFAULT_ROOM_HANDOFF_HARD_CAP_MINUTES),
+  { message: "rooms handoff bounds must satisfy handoffMinRunwayMinutes <= handoffLifetimeMinutes <= handoffHardCapMinutes" },
+);
+
+/** Attach a bot's browser to a Chrome the operator already has running,
+ * instead of agent-browser spawning its own (#1396). Deliberately a
+ * server-owned config field, not an env-var passthrough: the ambient
+ * process environment must never redirect a bot's browser
+ * (server/browser-live.test.ts pins this guarantee down). */
+const browserEngineConfigSchema = z.object({
+  attachCdpUrl: z.string().trim().max(2048).refine((value) => value === "" || isValidCdpTarget(value), {
+    message: "browserEngine.attachCdpUrl must be a CDP port (1-65535) or an http(s)/ws(s) URL",
+  }).optional(),
 });
 const localVmConfigSchema = z.object({
   mode: z.enum(["shared", "per-bot"]).optional(),
@@ -113,6 +153,10 @@ const featureConfigSchema = z.object({
    * machine's own Claude Code setup (Plugins → MCP servers switch). Off by
    * default: each extra tool costs tokens on every model call. */
   claudeUserMcp: z.boolean().optional(),
+  /** LLM-generated titles for new bot threads. Off until explicitly
+   * enabled; a one-shot that fails or answers junk leaves the first-message
+   * snippet in place — see llmThreadTitlesEnabled. */
+  llmThreadTitles: z.boolean().optional(),
 });
 /** First-run progress. Kept in the workspace config rather than a browser so
  * it survives cleared site data and is shared by every paired client. Hint
@@ -132,6 +176,11 @@ export const instanceConfigSchema = z.object({
   accentColor: optionalText,
   environment: z.record(z.string(), z.string()).optional(),
   enabled: z.boolean().optional(),
+  icon: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("preset"), preset: z.enum(PROVIDER_ICON_PRESETS) }).strict(),
+    z.object({ kind: z.literal("custom"), dataUrl: z.string() }).strict()
+      .refine((icon) => providerIconError(icon) === null, { message: "Invalid provider icon" }),
+  ]).optional(),
   config: z.json().optional(),
 });
 const instanceConfigMapSchema = z.record(z.string(), instanceConfigSchema);
@@ -239,6 +288,8 @@ export const appConfigSchema = z.object({
    * system language. Unknown tags degrade to English in the renderer. */
   language: optionalText,
   rooms: roomConfigSchema.optional(),
+  /** CDP attach target for a bot's browser; see browserEngineConfigSchema. */
+  browserEngine: browserEngineConfigSchema.optional(),
   threads: z.object({
     maxConcurrentPerBot: z.number().int().min(1).max(MAX_CONCURRENT_BOT_THREADS),
     /** Cap each per-thread events/ and native/ NDJSON log at this many
@@ -290,13 +341,17 @@ export interface AppConfig {
   tts?: { key?: string; fishKey?: string; voice?: string; provider?: "elevenlabs" | "fish" | "system" | "chatterbox"; baseUrl?: string; model?: string };
   imageGen?: ImageGenerationConfig;
   profile?: { name?: string; email?: string };
-  rooms?: { turnTimeoutMinutes: number };
+  rooms?: { turnTimeoutMinutes: number; handoffLifetimeMinutes?: number; handoffMinRunwayMinutes?: number; handoffHardCapMinutes?: number };
   threads?: { maxConcurrentPerBot: number; eventLogMaxBytes?: number; eventLogRetentionDays?: number };
   /** Shared preserves the historical singleton. Per-bot gives every bot a
    * separate container, durable workspace, viewer and lease. */
   localVm?: { mode?: "shared" | "per-bot"; maxInstances?: number };
   /** Opt-in product experiments. Every flag defaults to disabled. */
-  features?: { skillAuthoring?: boolean; showToolCalls?: boolean; browser?: boolean; sharedComputers?: boolean; claudeUserMcp?: boolean };
+  features?: { skillAuthoring?: boolean; showToolCalls?: boolean; browser?: boolean; sharedComputers?: boolean; claudeUserMcp?: boolean; llmThreadTitles?: boolean };
+  /** CDP target of a Chrome the operator already has running (a bare port,
+   * e.g. "9333", or an http(s)/ws(s) URL). When set, a bot's browser
+   * attaches to it instead of agent-browser spawning its own (#1396). */
+  browserEngine?: { attachCdpUrl?: string };
   /** First-run progress; see onboardingConfigSchema. */
   onboarding?: { completedAt?: string; version?: number; reelSeen?: boolean; hintsSeen?: string[] };
   /** Named browser sessions any bot can be pointed at. */

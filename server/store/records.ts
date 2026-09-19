@@ -6,6 +6,7 @@ import type {
   BotActivity, GroupDefaultResponder, WireBot, WireGroup,
   WireMessage, WireTask,
 } from "../../shared/wire.ts";
+import type { HandedState } from "../delta-context.ts";
 import type { TeamSetupResult } from "../../shared/team-setup.ts";
 
 /** One transcript line, serialized as stored — the shared wire shape. */
@@ -38,12 +39,15 @@ export interface TaskRecord extends WireTask {
    * say whether an engine's session is current, so this is what decides an
    * inline replay. Absent on tasks from before the field existed. */
   lastInstanceId?: string;
+  /** per instance: the stored messages that instance's current native
+   * session has been handed on this task (server/delta-context.ts) */
+  handedMessages?: Record<string, HandedState>;
 }
 
 /** TaskRecord fields no client may see. Everything else must be on WireTask:
  * the exactness assertion below fails to compile when either side drifts,
  * so a new server field forces a decision — wire-visible or private here. */
-export type TaskWirePrivateKeys = "resumeCursors" | "lastInstanceId";
+export type TaskWirePrivateKeys = "resumeCursors" | "lastInstanceId" | "handedMessages";
 export type TaskWireProjection = Pick<TaskRecord, Exclude<keyof TaskRecord, TaskWirePrivateKeys>>;
 type AssertExact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
 type AssertSameKeys<A, B> = [keyof A] extends [keyof B] ? ([keyof B] extends [keyof A] ? true : never) : never;
@@ -55,7 +59,7 @@ export const taskWireProjectionIsExact: TaskWireProjectionIsExact = true;
 /** The typed wire projection for one task. Pairs with the assertion above:
  * returning WireTask means an undeclared server field cannot ride silently. */
 export function toWireTask(task: TaskRecord): WireTask {
-  const { resumeCursors: _resumeCursors, lastInstanceId: _lastInstanceId, ...wire } = task;
+  const { resumeCursors: _resumeCursors, lastInstanceId: _lastInstanceId, handedMessages: _handedMessages, ...wire } = task;
   return wire;
 }
 
@@ -104,6 +108,28 @@ export function threadTitleFrom(title?: string): string {
 export function titleFromMessage(text: string): string {
   const line = text.trim().split("\n")[0]!.trim();
   return line.length > 48 ? `${line.slice(0, 47)}…` : line || UNTITLED_TASK;
+}
+
+/** One usable line out of a model's title reply: the first line, no
+ * surrounding quotes, code fences, or markdown decoration, no trailing
+ * period, single spaces — or null when what came back is empty, too long
+ * to be a title, or otherwise not a plain name. The caller keeps its
+ * fallback then. */
+export function titleFromLlm(raw: string): string | null {
+  const line = raw
+    .trim()
+    .split("\n")[0]!
+    .replace(/^[#*\-\u2022]+/, "")
+    .replace(/^["'\u201C\u201D\u2018\u2019\u0060]+/, "")
+    .replace(/["'\u201C\u201D\u2018\u2019\u0060]+$/, "")
+    // decoration the quotes were hiding: "## Deploy app" keeps its
+    // markers through the strips above, which never reach past a quote
+    .replace(/^[#*\-\u2022]+/, "")
+    .replace(/[#*]+$/, "")
+    .replace(/[.\u3002]+$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return line.length >= 1 && line.length <= 48 ? line : null;
 }
 
 /** A bot record. Extends the shared wire shape; the extras below are

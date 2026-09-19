@@ -36,6 +36,20 @@ export const handlers = {
   },
   propose_team_setup: (args: Json, ctx: ToolContext) => teamProposal(false, args, ctx),
   propose_bot_deletion: (args: Json, ctx: ToolContext) => teamProposal(true, args, ctx),
+  async retry_thread(args: Json, ctx: ToolContext): Promise<ToolOutcome> {
+    const botId = String(args.bot_id ?? "").trim();
+    const threadId = String(args.thread_id ?? "").trim();
+    const note = typeof args.note === "string" ? args.note.trim() : "";
+    if (!botId || !threadId) {
+      return { text: "retry_thread needs bot_id and thread_id — both are in the incident report.", isError: true };
+    }
+    const r = await ctx.api("/api/internal/retry-thread", {
+      method: "POST",
+      body: JSON.stringify({ fromBotId: ctx.botId, fromThreadId: ctx.threadId, toBotId: botId, toThreadId: threadId, ...(note ? { note } : {}) }),
+    });
+    if (r.error) return { text: `Couldn't retry that thread: ${String(r.error)}`, isError: true };
+    return { text: typeof r.message === "string" ? r.message : "The thread is running again. Its result stays in that thread; you are not woken for it — check it later with session_search or list_threads if you need to." };
+  },
 } satisfies Record<string, ToolHandler>;
 
 /** Both Chief-of-Staff proposals answer with the same review-card shape. */

@@ -189,8 +189,8 @@ export function createMessageRoutes(deps: {
     }
 
     // Download one local file only when this exact stored message grants it:
-    // a bot must render a Markdown link to it, while a user message must carry
-    // the exact standalone attachment tag written by the composer. The bot
+    // a bot must render a Markdown link or carry a generated-image attachment,
+    // while a user message must carry the standalone composer tag. The bot
     // branch derives conversation/workspace roots; the user branch is limited
     // to OpenMausBot's private attachment directory. This is deliberately not
     // a general path reader.
@@ -216,7 +216,7 @@ export function createMessageRoutes(deps: {
         json(res, 404, { error: "no such message" });
         return true;
       }
-      if (message.kind !== "text" || !message.text) {
+      if (message.kind !== "text") {
         json(res, 403, { error: "that message does not share this file" });
         return true;
       }
@@ -228,23 +228,29 @@ export function createMessageRoutes(deps: {
       }
       const href = method === "POST"
         ? (typeof body.path === "string" ? body.path : "")
-        : messageImageTargetAt(message.text, Number(rawReference));
+        : messageImageTargetAt(message.text ?? "", Number(rawReference));
       if (!href) {
         json(res, 400, { error: "path is required" });
         return true;
       }
 
+      // Generated image paths are durable capabilities on this exact message.
+      // They do not grant access to arbitrary workspace files or Markdown refs.
+      const generatedImage = method === "POST" && message.role === "bot" &&
+        message.attachments?.some((attachment) => attachment.kind === "image" && attachment.path === href) === true;
       let roots: string[];
       let downloadName: string | undefined;
-      if (message.role === "user") {
-        downloadName = messageAttachmentName(message.text, href) ?? undefined;
+      if (generatedImage) {
+        roots = [ATTACHMENTS_DIR];
+      } else if (message.role === "user") {
+        downloadName = messageAttachmentName(message.text ?? "", href) ?? undefined;
         if (!downloadName) {
           json(res, 403, { error: "that message does not share this file" });
           return true;
         }
         roots = [ATTACHMENTS_DIR];
       } else {
-        if (!messageReferencesFile(message.text, href)) {
+        if (!messageReferencesFile(message.text ?? "", href)) {
           json(res, 403, { error: "that bot message does not link to this file" });
           return true;
         }
@@ -276,7 +282,7 @@ export function createMessageRoutes(deps: {
       }
 
       const file = await openMessageFile(href, roots);
-      if (streamsMessageImage && !file.mime.startsWith("image/")) {
+      if ((streamsMessageImage || generatedImage) && !file.mime.startsWith("image/")) {
         await file.handle.close();
         json(res, 415, { error: "only images can be previewed here" });
         return true;

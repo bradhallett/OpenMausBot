@@ -6,7 +6,9 @@
 // at the old commsBus declaration site and rebinds commsBus and routines
 // from its result, so initialization order is unchanged.
 import type { CommsBus } from "./comms-visibility.ts";
+import { handoffs } from "./delta-handoffs.ts";
 import { _loadPending, discardDelegations, pendingThreads } from "./delegations.ts";
+import { reportIncident } from "./incident-report.ts";
 import { revokeInternalCapabilitiesForThread } from "./internal-capabilities.ts";
 import { buildNotification, type Notification } from "./notify.ts";
 import { redactSecretsInText } from "./redact.ts";
@@ -242,6 +244,7 @@ const routines = new RoutineManager({
     const task = store.taskByThread(botId, threadId);
     if (task && !task.busy && !task.routineRunId && store.messagesFor(threadId).length === 0) {
       store.deleteTask(botId, threadId);
+      handoffs.forget(threadId);
     }
   },
   startTurn: (botId, threadId, prompt, runOn, triggerSource, onDispatchError) =>
@@ -281,6 +284,7 @@ const routines = new RoutineManager({
     const detail = run.error ? `${run.routineName}: ${run.error}` : run.routineName;
     const notificationBot = routineSourceOwner(run)?.bot ?? bot;
     notify(buildNotification("routine-failed", notificationBot, routineSourceThread(run) ?? run.threadId ?? bot.threadId, detail));
+    reportIncident({ kind: "routine-failed", bot, threadId: run.threadId ?? bot.threadId, detail });
   },
   onRunDeferred: (run) => {
     const bot = store.bot(run.botId);

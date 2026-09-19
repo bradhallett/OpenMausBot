@@ -25,6 +25,7 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 
@@ -188,6 +189,8 @@ data class Message(
     val hasImage: Boolean? = null,
     val png: String? = null,
     val mime: String? = null,
+    /** Agent-generated images on text replies, including late message patches. */
+    val attachments: List<MessageImageAttachment>? = null,
     /**
      * A user line the engine took INTO the turn that was already running,
      * rather than one that started a turn of its own.
@@ -285,6 +288,9 @@ data class BotTask(
     val modelSelection: ModelSelection? = null,
     val activity: String? = null,
     val busy: Boolean? = null,
+    /** This thread's own turn is done and a dispatched teammate has not
+     * settled yet (#1223): a wait, never work. Newer harnesses only. */
+    val waitingOnTeammate: Boolean? = null,
     val unread: Boolean? = null,
     val approvalMode: String? = null,
     val autoApprove: Boolean? = null,
@@ -336,6 +342,8 @@ data class Bot(
     val avatarCrop: AvatarCrop? = null,
     val busy: Boolean? = null,
     val activity: String? = null,
+    /** A dispatched teammate has not settled; the bot waits, it does not work. */
+    val waitingOnTeammate: Boolean? = null,
     val pinned: Boolean? = null,
     val hidden: Boolean? = null,
     /** Desktop sidebar section. Missing or blank means the built-in Bots area. */
@@ -372,6 +380,7 @@ fun Bot.forTask(requestedThreadId: String): Bot? {
         modelSelection = task.modelSelection ?: modelSelection,
         busy = task.busy ?: if (selected) busy else false,
         activity = task.activity ?: if (selected) activity else null,
+        waitingOnTeammate = task.waitingOnTeammate ?: if (selected) waitingOnTeammate else null,
         unread = task.unread ?: if (selected) unread else false,
         approvalMode = task.approvalMode ?: task.autoApprove?.let { if (it) "auto" else "ask" } ?: approvalMode,
         autoApprove = task.autoApprove ?: autoApprove,
@@ -423,7 +432,16 @@ data class Room(
 )
 
 @Serializable(with = FleetSerializer::class)
-data class Fleet(val bots: List<Bot>, val groups: List<Room>)
+data class Fleet(
+    val bots: List<Bot>,
+    val groups: List<Room>,
+    /**
+     * Held sends for every bot thread, the same snapshot the bot.queued
+     * frames carry. Older computers omit it; a missing or unreadable field
+     * reads as absent, never as an empty queue.
+     */
+    val botQueuedMessages: Map<String, List<QueuedSend>>? = null,
+)
 
 object FleetSerializer : KSerializer<Fleet> {
     override val descriptor: SerialDescriptor = buildClassSerialDescriptor("Fleet")
@@ -444,6 +462,15 @@ object FleetSerializer : KSerializer<Fleet> {
         return Fleet(
             bots = lossyArray("bots") { input.json.decodeFromJsonElement(Bot.serializer(), it) },
             groups = lossyArray("groups") { input.json.decodeFromJsonElement(Room.serializer(), it) },
+            // One malformed entry must not cost the whole fleet: the roster
+            // is worth more than the queue note beside it.
+            botQueuedMessages = runCatching {
+                objectValue["botQueuedMessages"]?.jsonObject?.mapValues { (_, entries) ->
+                    entries.jsonArray.mapNotNull { element ->
+                        runCatching { element.jsonObject.queuedSendOrNull() }.getOrNull()
+                    }
+                }
+            }.getOrNull(),
         )
     }
 
@@ -453,6 +480,13 @@ object FleetSerializer : KSerializer<Fleet> {
         output.encodeJsonElement(buildJsonObject {
             put("bots", JsonArray(value.bots.map { output.json.encodeToJsonElement(Bot.serializer(), it) }))
             put("groups", JsonArray(value.groups.map { output.json.encodeToJsonElement(Room.serializer(), it) }))
+            value.botQueuedMessages?.let { queues ->
+                put("botQueuedMessages", buildJsonObject {
+                    queues.forEach { (threadId, sends) ->
+                        put(threadId, JsonArray(sends.map { it.toJsonObject() }))
+                    }
+                })
+            }
         })
     }
 }
@@ -1160,4 +1194,12 @@ data class BotOverview(
     val reaches: List<String> = emptyList(),
     val wont: List<String> = emptyList(),
     val recent: List<BotOverviewRecent> = emptyList(),
+)
+
+/** Unknown attachment kinds remain decodable and are not rendered. */
+@Serializable
+data class MessageImageAttachment(
+    val kind: String,
+    val path: String? = null,
+    val mime: String? = null,
 )

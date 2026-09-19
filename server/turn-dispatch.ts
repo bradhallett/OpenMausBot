@@ -77,7 +77,7 @@ export function createTurnDispatch(deps: TurnDispatchDeps) {
     clearDirectTurnDispatch, pendingCancelledProviderHandshakes, clearCancelledProviderHandshake,
     retireProviderTurn, runningTurnEngines, DirectTurnSetupCancelled,
   } = dispatch;
-  const { releaseTurnResources, settlingResourceOwners, autoVmClaims, releaseLocalVmThread, startScreenPoller } = cleanup;
+  const { releaseTurnResources, settlingResourceOwners, autoVmClaims, releaseLocalVmThread, startScreenPoller, stopScreenPoller, screenPollers } = cleanup;
   const { markUnattended, clearUnattended, markInternalTurn, clearInternalTurn, delegationWakeBudget } = turnMarks;
   const {
     localVmTargetForBot, localVmLeaseFor, localVmIdleFor, localVmThreadTargets, localVmActiveThreads,
@@ -177,7 +177,7 @@ function drainQueuedSends() {
 
 /** Keep a person's words off the transcript until a direct-thread slot is
  * available. Reuse the existing cancellable, idempotent composer queue. */
-async function startOrQueueDirectMessage(botId: string, threadId: string, text: string, replyTo?: Message, sendId?: string) {
+async function startOrQueueDirectMessage(botId: string, threadId: string, text: string, replyTo?: Message, sendId?: string, sender?: { name: string }) {
   const capacity = botAtThreadCapacity(botId);
   if (capacity || threadBusy(botId, threadId) || parksBehindCoordination(botId, threadId)) {
     const reason = capacity ? "capacity" as const : undefined;
@@ -189,7 +189,7 @@ async function startOrQueueDirectMessage(botId: string, threadId: string, text: 
     });
     return { ok: true as const, queued: true as const, queueId: queued.id, threadId, reason };
   }
-  const message = await startTurn(botId, text, { threadId, replyTo, sendId });
+  const message = await startTurn(botId, text, { threadId, replyTo, sendId, sender });
   return { ok: true as const, threadId, message };
 }
 
@@ -304,6 +304,8 @@ const { startTurn } = createStartTurn({
     autoVmClaims,
     releaseLocalVmThread,
     startScreenPoller,
+    stopScreenPoller,
+    screenPollers,
   },
   turnMarks: {
     markUnattended,

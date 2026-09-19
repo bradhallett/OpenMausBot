@@ -63,6 +63,7 @@ export interface WorkflowWiringDeps {
   releaseLocalVmThread: EngineWiring["releaseLocalVmThread"];
   startScreenPoller: EngineWiring["startScreenPoller"];
   stopScreenPoller: EngineWiring["stopScreenPoller"];
+  screenPollers: EngineWiring["screenPollers"];
   markUnattended: EngineWiring["markUnattended"];
   clearUnattended: EngineWiring["clearUnattended"];
   markInternalTurn: EngineWiring["markInternalTurn"];
@@ -210,6 +211,8 @@ const {
       autoVmClaims: deps.autoVmClaims,
       releaseLocalVmThread: deps.releaseLocalVmThread,
       startScreenPoller: deps.startScreenPoller,
+      stopScreenPoller: deps.stopScreenPoller,
+      screenPollers: deps.screenPollers,
     },
     turnMarks: {
       markUnattended: deps.markUnattended,

@@ -6,7 +6,7 @@ import type { ServerResponse } from "node:http";
 import { getOrCreateChannel, mirrorActivity, mirrorExchange, mirrorReply } from "../../comms-visibility.ts";
 import { newId } from "../../contracts.ts";
 import { queueDelegation } from "../../delegations.ts";
-import { canAccessTeam, canReachPeer, peerAllowed } from "../../peer-roster.ts";
+import { PEER_ACCESS_HELP, canAccessTeam, canReachPeer, peerAllowed, resolveTeammate } from "../../peer-roster.ts";
 import { withPeerProvenance } from "../../peer-provenance.ts";
 import { requestPeerApproval } from "../../peer-approval.ts";
 import type { InternalRoutesOptions } from "../internal.ts";
@@ -34,7 +34,7 @@ export async function askBot(ctx: AskBotCtx, res: ServerResponse): Promise<boole
   } = ctx;
     const body = await readInternalBody();
     const fromBotId = internalSender.id;
-    const toBotId = String(body.toBotId ?? "");
+    const toBotRef = String(body.toBotId ?? "");
     const message = String(body.message ?? "").trim();
     if (
       body.depth !== undefined &&
@@ -43,9 +43,15 @@ export async function askBot(ctx: AskBotCtx, res: ServerResponse): Promise<boole
       return json(res, 403, { error: "the recursion depth does not match this turn" });
     }
     const depth = internalCapability.depth;
-    if (!toBotId || !message) return json(res, 400, { error: "toBotId and message required" });
-    if (toBotId === fromBotId) return json(res, 400, { error: "a bot cannot message itself" });
+    if (!toBotRef || !message) return json(res, 400, { error: "toBotId and message required" });
+    if (toBotRef === fromBotId) return json(res, 400, { error: "a bot cannot message itself" });
     if (depth >= MAX_COMMS_DEPTH) return json(res, 200, { error: "message chains are limited to one hop" });
+    // A unique reachable teammate name is accepted where an id is
+    // expected; see resolveTeammate for why.
+    const resolvedTo = resolveTeammate(store.bots, internalSender, toBotRef);
+    if ("error" in resolvedTo) return json(res, 404, { error: `no such bot: ${resolvedTo.error}` });
+    if (resolvedTo.id === fromBotId) return json(res, 400, { error: "a bot cannot message itself" });
+    const toBotId = resolvedTo.id;
     const target = store.bot(toBotId);
     if (!target) return json(res, 404, { error: "no such bot" });
     // An unknown sender used to fall through: no mirroring AND no
@@ -54,13 +60,13 @@ export async function askBot(ctx: AskBotCtx, res: ServerResponse): Promise<boole
     // hard refusal — every peer turn has an accountable sender.
     const from = internalSender;
     if (!canAccessTeam(from, target.section) || target.hidden) {
-      return json(res, 403, { error: "that bot belongs to a different section" });
+      return json(res, 403, { error: `that bot belongs to a different section or is unavailable. ${PEER_ACCESS_HELP}` });
     }
     // The sender's allow-list, when it has one. Checked here rather than
     // trusted from the roster: the tool call carries a bot id, and an id
     // the model held from an earlier turn must not outlive the grant.
     if (!peerAllowed(from, target.id)) {
-      return json(res, 403, { error: "that bot is not on this bot's allowed peers — call list_bots for the ones you can reach" });
+      return json(res, 403, { error: `that bot is not on this bot's allowed peers. ${PEER_ACCESS_HELP}` });
     }
     const fromThreadId = internalCapability.threadId;
     // Rooms are conversations too. The task-only lookup here refused every
@@ -201,4 +207,3 @@ export async function askBot(ctx: AskBotCtx, res: ServerResponse): Promise<boole
     mirrorReply(commsBus, currentTarget, reply, channel);
     return json(res, 200, { botName: currentTarget.name, text: reply });
 }
-

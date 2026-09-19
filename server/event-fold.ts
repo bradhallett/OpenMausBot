@@ -15,6 +15,7 @@ import type { CommsBus } from "./comms-visibility.ts";
 import type { LocalVmTarget } from "./container-computer.ts";
 import type { RuntimeEvent } from "./contracts.ts";
 import { discardDelegations } from "./delegations.ts";
+import { reportIncident } from "./incident-report.ts";
 import { approvalCardHandlers } from "./event-fold/approval-cards.ts";
 import { runtimeEventRouter } from "./event-fold/runtime-router.ts";
 import { turnCompletionHandlers } from "./event-fold/turn-completion.ts";
@@ -214,6 +215,10 @@ export function createEventFold(deps: EventFoldDeps) {
         kind: "activity",
         tool: { name: `error: no activity for ${minutes} minutes — the turn was stopped`, ok: false },
       });
+      // a routine's stall reports through its own failure path
+      if (bot && routineRun?.target !== "bot") {
+        reportIncident({ kind: "stalled", bot, threadId: turn.threadId, detail: `no activity for ${minutes} minutes — the turn was stopped` });
+      }
       settleDirectFollowup(stalledGeneration);
       finalizeDelegationWatch(turn.threadId, false, "", "Delegated turn stalled and was stopped");
       turnUsage.delete(turn.threadId);
@@ -312,6 +317,7 @@ export function createEventFold(deps: EventFoldDeps) {
         routineSourceThread, routineSourceOwner, notify, screenPollers,
         settlingResourceOwners, finalScreenFrame, SCREEN_SETTLE_TIMEOUT_MS,
         groupSpeakers, finalizeDelegationWatch,
+        routines,
       }),
     }));
 

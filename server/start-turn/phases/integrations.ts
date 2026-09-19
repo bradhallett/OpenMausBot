@@ -23,7 +23,7 @@ import {
   type Runtime,
 } from "../../container-computer.ts";
 import { workspaceResource, type TurnOwner } from "../../turn-resources.ts";
-import { claimTurnResource } from "../../turn-admission.ts";
+import { claimTurnResource, threadBusy, turnComputerResources, turnResources } from "../../turn-admission.ts";
 import { computerSelectionTurns } from "../../internal-capabilities.ts";
 import { type BotRecord, type Store } from "../../store.ts";
 import type { SurfacePlan } from "../../surface.ts";
@@ -51,6 +51,9 @@ export async function assembleTurnIntegrations({
   bindTurnComputer,
   attachTeamBox,
   controlIntegration,
+  stopScreenPoller,
+  screenPollers,
+  startScreenPoller,
   activeVpsThreads,
   inheritedTeamComputer,
   autoVmClaims,
@@ -85,6 +88,12 @@ export async function assembleTurnIntegrations({
   bindTurnComputer: Deps["computers"]["bindTurnComputer"];
   attachTeamBox: Deps["computers"]["attachTeamBox"];
   controlIntegration: Deps["computers"]["controlIntegration"];
+  /** Restart helpers for a lazily claimed desktop's poller: the claim
+   * fires after dispatch already started a poller with a null computer
+   * capture, so the poller must be restarted with the live one. */
+  stopScreenPoller: (botId: string, threadId?: string) => void;
+  screenPollers: ReadonlyMap<string, { touched: boolean }>;
+  startScreenPoller: Deps["cleanup"]["startScreenPoller"];
   activeVpsThreads: Deps["computers"]["activeVpsThreads"];
   inheritedTeamComputer: Deps["prompts"]["inheritedTeamComputer"];
   autoVmClaims: Deps["cleanup"]["autoVmClaims"];
@@ -195,6 +204,7 @@ export async function assembleTurnIntegrations({
   }
   const wants = plan.computer;
   let previewCapture: (() => Promise<{ png: string; format: string }>) | null = null;
+  let browserCapture: (() => Promise<{ png: string; format: string }>) | null = null;
   let computerKind: "box" | "vps" | "vm" | "local" | null = null;
   let autoVpsProblem: string | null = null;
   /** The lease generation stamped by this turn's most recent Local VM
@@ -207,9 +217,12 @@ export async function assembleTurnIntegrations({
    * attach path, shared by dispatch (eager today) and the first-screen-
    * call gate (issue #1361). Idempotent per turn: the resource claim and
    * the lease both re-assert the same owner, so a re-entrant call from
-   * the gate no-ops once dispatch has already claimed. */
-  const claimAutoLocalVm = async (claimThreadId: string): Promise<{ target: LocalVmTarget; runtime: Runtime }> => {
-    const localVmTarget = localVmTargetForBot(bot.id);
+   * the gate no-ops once dispatch has already claimed. A lazy attach pins
+   * the target it mounted the tools against: the claim must lease that
+   * desktop, not whatever localVmTargetForBot resolves to by the time
+   * the first screen call arrives. */
+  const claimAutoLocalVm = async (claimThreadId: string, pinnedTarget?: LocalVmTarget): Promise<{ target: LocalVmTarget; runtime: Runtime }> => {
+    const localVmTarget = pinnedTarget ?? localVmTargetForBot(bot.id);
     await bindTurnComputer(resourceOwner, `computer:vm:${localVmTarget.key}`, true);
     if (localVmImageBusy() || localVmModeChangeBusy() || localVmLifecycleBusy.has(localVmTarget.key)) {
       throw new Error("this Local VM is being started, stopped, or replaced — wait for setup to finish");
@@ -228,9 +241,40 @@ export async function assembleTurnIntegrations({
     localVmThreadTargets.set(claimThreadId, localVmTarget);
     localVmActiveThreads.set(localVmTarget.key, claimThreadId);
     localVmIdleFor(localVmTarget).touch();
-    const localVm = await readyLocalVmForTurn(bot.id, localVmTarget);
+    // The lease is held from here. An eager attach that fails below
+    // fails the turn and settle releases it; a lazy claim's rejection is
+    // swallowed into the slot's failed flag and the turn carries on, so
+    // without this the exclusive lease would sit held for the rest of a
+    // turn that never got the VM — the very serialisation #1361 removes.
+    const dropLease = () => {
+      localVmLeaseFor(localVmTarget).release(claimThreadId);
+      if (localVmActiveThreads.get(localVmTarget.key) === claimThreadId) localVmActiveThreads.delete(localVmTarget.key);
+      localVmThreadTargets.delete(claimThreadId);
+      // bindTurnComputer above also took the turn-level resource; a
+      // later turn's exclusive bind queues behind it just the same.
+      const resource = `computer:vm:${localVmTarget.key}`;
+      turnResources.releaseOne(resource, resourceOwner);
+      if (turnComputerResources.get(resourceOwner.threadId)?.resource === resource) turnComputerResources.delete(resourceOwner.threadId);
+    };
+    let localVm: Awaited<ReturnType<typeof readyLocalVmForTurn>>;
+    try {
+      localVm = await readyLocalVmForTurn(bot.id, localVmTarget);
+    } catch (error) {
+      dropLease();
+      throw error;
+    }
     if (!localVm.ready || !localVm.runtime) {
+      dropLease();
       throw new Error(`${localVm.problem ?? "the Local VM is not ready"} (App Settings → Computers)`);
+    }
+    // The readiness walk can wait minutes for the desktop, and the group
+    // path re-validates its lease afterwards; the direct path needs the
+    // same guard so a turn never attaches MCP to a desktop another turn
+    // now owns.
+    const owner = localVmLeaseFor(localVmTarget).current(localVmOwnerBusy);
+    if (owner?.threadId !== claimThreadId || owner.botId !== bot.id) {
+      dropLease();
+      throw new Error("the Local VM lease expired while preparing the turn");
     }
     // Same contract as the Box and VPS branches below: without this the
     // poller never starts, so the Local VM publishes no `screen` events
@@ -268,6 +312,7 @@ export async function assembleTurnIntegrations({
       throw new Error("this model engine cannot use the Local VM — choose Claude or an ACP engine, or select another computer destination");
     }
     const localVmTarget = localVmTargetForBot(bot.id);
+    let lazyReadyVm: { runtime: Runtime } | null = null;
     if (!strict) {
       // Nothing this process has ever seen for this target, and nobody is
       // relying on an unattended run: do not pay for a runtime probe.
@@ -275,8 +320,50 @@ export async function assembleTurnIntegrations({
       const seen = await containerComputerStatus(undefined, undefined, localVmTarget).catch(() => null);
       if (!seen || !autoLocalVmAttachable(seen)) return false;
       if (localVmImageBusy() || localVmModeChangeBusy() || localVmLifecycleBusy.has(localVmTarget.key)) return false;
+      if (seen.ready && seen.runtime) lazyReadyVm = { runtime: seen.runtime };
     }
     try {
+      if (lazyReadyVm) {
+        // Lazy exclusivity (issue #1361): a VM that is ready right now
+        // mounts without claiming — screen-less Auto turns never touch
+        // the lease, and the first screen tools/call fires the claim
+        // through the computer-control gate. A VM that must be created
+        // or recreated first keeps the eager claim below: the bridge
+        // child needs the container to exist, and readyLocalVmForTurn
+        // is what boots it.
+        integrations.localComputer = containerComputerMcp(
+          lazyReadyVm.runtime,
+          controlIntegration(bot.id, threadId, dispatchClaimId),
+          localVmTarget,
+        );
+        autoVmClaims.set(threadId, {
+          owner: resourceOwner,
+          lazy: true,
+          label: "the Local VM",
+          claim: async () => {
+            await claimAutoLocalVm(threadId, localVmTarget);
+            // The dispatch-site poller start saw a null previewCapture
+            // (this lazy mount runs before any claim exists), so this
+            // turn would publish no live `screen` events and settle no
+            // final computer frame. Restart the poller with the now-live
+            // computer capture, keeping any browser capture and whether
+            // this turn already touched its screen. Same still-running
+            // guard as dispatch: a poller started after its own
+            // turn.completed would never be torn down.
+            if (previewCapture && threadBusy(bot.id, threadId)) {
+              const touched = screenPollers.get(threadId)?.touched ?? instance.driverKind === "boxAgent";
+              stopScreenPoller(bot.id, threadId);
+              startScreenPoller(
+                bot.id,
+                threadId,
+                { computer: previewCapture, ...(browserCapture ? { browser: browserCapture } : {}) },
+                { screenIsTheWork: touched },
+              );
+            }
+          },
+        });
+        return true;
+      }
       const claimed = await claimAutoLocalVm(threadId);
       integrations.localComputer = containerComputerMcp(
         claimed.runtime,
@@ -332,9 +419,15 @@ export async function assembleTurnIntegrations({
     if (unsupported && wants === "cloud") throw new Error(unsupported);
     if (unsupported && wants === undefined) autoVpsProblem = unsupported;
     if (!unsupported) {
-      // The remote lifecycle and container are shared by this bot. Keep
-      // its explicit computer turns serialized; ordinary threads still run.
-      await bindTurnComputer(resourceOwner, `computer:vps:${vpsSshAlias(cfg)}:${bot.id}`, true);
+      // The VPS "computer" is the desktop inside this bot's managed
+      // container, and only screen work needs that desktop to itself.
+      // So the lease is claimed on the first computer call, through the
+      // computer-control gate (the Local VM's seam, #1361), never at
+      // mount: a bot's turns that never touch the computer tools run
+      // side by side instead of queueing behind each other at setup.
+      // Container lifecycle (provision, start) is serialized by the
+      // runner's per-container lock, not by this turn.
+      const vpsResource = `computer:vps:${vpsSshAlias(cfg)}:${bot.id}`;
       activeVpsThreads.set(bot.id, threadId);
       let remote;
       remote = vps.vpsStartsForTurn({ wants, autoStartVps: bot.autoStartVps, automationSource: opts?.automationSource })
@@ -349,7 +442,30 @@ export async function assembleTurnIntegrations({
           env: { ...vpsMcp.env, OMB_CONTROL_URL: vpsControl.url, OMB_CONTROL_TOKEN: vpsControl.token },
         };
         computerKind = "vps";
-        previewCapture = () => computerBackend.screenshot(targetCfg, bot.id);
+        // Live frames only once this turn holds the desktop: a poller on
+        // a desktop another turn is driving would publish that turn's
+        // screen as this one's. The claim restarts the poller with the
+        // capture, the way the Local VM's lazy claim does.
+        const vpsCapture = () => computerBackend.screenshot(targetCfg, bot.id);
+        autoVmClaims.set(threadId, {
+          owner: resourceOwner,
+          lazy: true,
+          label: "the VPS computer",
+          claim: async () => {
+            await bindTurnComputer(resourceOwner, vpsResource, true);
+            previewCapture = vpsCapture;
+            if (threadBusy(bot.id, threadId)) {
+              const touched = screenPollers.get(threadId)?.touched ?? false;
+              stopScreenPoller(bot.id, threadId);
+              startScreenPoller(
+                bot.id,
+                threadId,
+                { computer: vpsCapture, ...(browserCapture ? { browser: browserCapture } : {}) },
+                { screenIsTheWork: touched },
+              );
+            }
+          },
+        });
       } else {
         activeVpsThreads.delete(bot.id);
         if (wants === "cloud") {
@@ -478,4 +594,3 @@ export async function assembleTurnIntegrations({
   }
   return { integrations, previewCapture, computerKind, worksInWorkspace, privateWorkspace, skillInstructions, packagePlaybooks, cwd, checkpointCwd, teamComputer };
 }
-

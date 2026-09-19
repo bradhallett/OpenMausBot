@@ -151,7 +151,9 @@ describe("deleting one browser session's saved logins", () => {
     expect(readFileSync(join(directory, "other-other.json"), "utf8")).toBe("keep");
   });
 
-  it.each(["", "../personal", "work/client", "work.client", "work*", "x".repeat(97)])("rejects invalid session %j before invoking a process", async (session) => {
+  // Dotted ids are legitimate browserSessionId output; only path-shaped,
+  // glob-shaped, empty, and over-long names stay invalid.
+  it.each(["", "../personal", "work/client", "work*", "x".repeat(97)])("rejects invalid session %j before invoking a process", async (session) => {
     const { options } = fixture();
     expect(await clearBrowserSessionState("fixture-browser", session, options)).toBe(false);
     expect(spawn).not.toHaveBeenCalled();
@@ -555,6 +557,26 @@ describe("what a bot gets", () => {
       expect(explicit.env.AGENT_BROWSER_EXECUTABLE_PATH).toBeUndefined();
       expect(explicit.env.PRIVATE_WORKSPACE_SECRET).toBeUndefined();
     }
+  });
+
+  it("forwards AGENT_BROWSER_CDP only when the caller passes attachCdpUrl explicitly, never from the ambient process environment", () => {
+    // Unset: byte-identical to every other call in this file that omits attachCdpUrl.
+    const withoutAttach = agentBrowserIntegration({ binaryPath: "/x/agent-browser", session: "bot-1", encryptionKey: "session-key", env: { PATH: "/usr/bin" } });
+    expect(withoutAttach.env).not.toHaveProperty("AGENT_BROWSER_CDP");
+    // Ambient process env must not leak in either: the source env passed here plays
+    // the same role vi.stubEnv plays in server/browser-live.test.ts's guarantee test.
+    const ambientAttempt = agentBrowserIntegration({
+      binaryPath: "/x/agent-browser", session: "bot-1", encryptionKey: "session-key",
+      env: { PATH: "/usr/bin", AGENT_BROWSER_CDP: "https://unrelated-browser.invalid" },
+    });
+    expect(ambientAttempt.env).not.toHaveProperty("AGENT_BROWSER_CDP");
+    // Set: only the explicit, caller-supplied config value reaches the curated env.
+    const attached = agentBrowserIntegration({
+      binaryPath: "/x/agent-browser", session: "bot-1", encryptionKey: "session-key",
+      env: { PATH: "/usr/bin" }, attachCdpUrl: "http://127.0.0.1:9333",
+    });
+    expect(attached.env.AGENT_BROWSER_CDP).toBe("http://127.0.0.1:9333");
+    expect(attached.env).toMatchObject({ AGENT_BROWSER_SESSION: "bot-1", AGENT_BROWSER_HEADLESS: "1" });
   });
 
   it("mounts agent-browser's MCP server with the core tools, an isolated auto-restored session, and WebMCP off", () => {

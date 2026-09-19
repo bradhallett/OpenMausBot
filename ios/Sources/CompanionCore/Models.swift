@@ -212,6 +212,10 @@ public struct Message: Codable, Hashable, Identifiable, Sendable {
     /// The message this one follows; nil at the thread root. Two messages
     /// sharing a parent are a fork.
     public var parentId: String?
+    /// Set when this line began as a queued send: the id the harness quoted
+    /// when it held the message, echoed back on the line that finally landed.
+    /// Clients match it against their held-send rows to retire them.
+    public var queueId: String?
     /// Rooms: which member said this.
     public var from: Sender?
     public var reactions: [Reaction]?
@@ -222,6 +226,8 @@ public struct Message: Codable, Hashable, Identifiable, Sendable {
     /// Screen messages in the full shape: base64 pixels, inline.
     public var png: String?
     public var mime: String?
+    /// Agent-generated images carried on a text reply, including late message patches.
+    public var attachments: [MessageImageAttachment]?
 
     public var date: Date { Date(timeIntervalSince1970: at / 1000) }
 }
@@ -276,6 +282,11 @@ public struct BotTask: Codable, Hashable, Sendable {
     /// Runtime state from newer computers; used to recover approvals in
     /// background threads without downloading every conversation.
     public var activity: String?
+    /// This thread's own turn is done and a dispatched teammate has not
+    /// settled yet (#1223): a wait, not work. Newer computers send it while
+    /// leaving busy/activity idle, so older builds simply see the thread
+    /// idle instead of spinning a work glyph for the whole teammate run.
+    public var waitingOnTeammate: Bool?
     public var unread: Bool?
     public var approvalMode: String?
     public var autoApprove: Bool?
@@ -319,17 +330,44 @@ public struct BotTask: Codable, Hashable, Sendable {
         return isArchived ? "Archived" : openedByLabel
     }
 
+    /// Waiting on a dispatched teammate: the thread's own turn is done and
+    /// a teammate has not settled. Flag-only, matching Android: the live
+    /// #1228 wire paints busy, working, and this flag together during a
+    /// coordination wait, so the flag alone decides — a quiet wait, never
+    /// the work spinner.
+    public var isWaitingOnTeammate: Bool { waitingOnTeammate == true }
+
     /// Whether the row must stay in the list regardless of closed state:
-    /// it is working, needs the person, or has something they have not read.
-    /// The queued activity is parsed defensively — the wire's activity enum
-    /// never carries it, but a companion build that derives it client-side
-    /// can hand it to this same rule.
-    public var demandsAttention: Bool {
-        if busy == true || unread == true { return true }
+    /// it is working, waiting on someone, has something they have not read,
+    /// or is holding a queued send. Queued is client state the harness
+    /// reports out-of-band, so it arrives as an input rather than living on
+    /// the wire-decoded task.
+    public func demandsAttention(queued: Bool = false) -> Bool {
+        if isWorking || isWaitingOnTeammate || unread == true { return true }
+        if queued { return true }
         switch activity {
-        case "waiting-on-you", "waiting", "working", "running", "queued": return true
+        case "waiting-on-you", "waiting", "queued": return true
         default: return false
         }
+    }
+}
+
+/// A message the harness is holding until the running turn settles. The
+/// phone's copy of a server-owned queue entry, identified by the harness's
+/// queueId and never by its text.
+public struct QueuedSend: Codable, Hashable, Identifiable, Sendable {
+    public var queueId: String
+    public var text: String
+    /// Why the harness held it. "capacity" is the known value; anything else
+    /// parses and is shown as a plain queued line.
+    public var reason: String?
+
+    public var id: String { queueId }
+
+    public init(queueId: String, text: String, reason: String? = nil) {
+        self.queueId = queueId
+        self.text = text
+        self.reason = reason
     }
 }
 
@@ -352,6 +390,10 @@ public struct Bot: Codable, Hashable, Identifiable, Sendable {
     public var modelSelection: ModelSelection
     public var createdAt: Double
     public var busy: Bool?
+    /// A dispatched teammate has not settled yet; the bot itself is waiting
+    /// on it rather than working (#1223). Carries the active thread's wait;
+    /// per-thread waits live on the task.
+    public var waitingOnTeammate: Bool?
     public var pinned: Bool?
     public var hidden: Bool?
     /// Desktop sidebar section. Missing or blank means the built-in Bots area.
@@ -404,6 +446,7 @@ public struct Bot: Codable, Hashable, Identifiable, Sendable {
         view.threadId = selectedThreadId
         view.modelSelection = task?.modelSelection ?? modelSelection
         view.busy = task?.busy ?? (selectedThreadId == threadId ? busy : false)
+        view.waitingOnTeammate = task?.waitingOnTeammate ?? (selectedThreadId == threadId ? waitingOnTeammate : false)
         view.unread = task?.unread ?? (selectedThreadId == threadId ? unread : false)
         view.approvalMode = task?.approvalMode ?? task?.autoApprove.map { $0 ? "auto" : "ask" } ?? approvalMode
         view.autoApprove = task?.autoApprove ?? autoApprove
@@ -486,7 +529,7 @@ public struct Room: Codable, Hashable, Identifiable, Sendable {
 
 // MARK: - Responses
 
-private struct Lossy<Element: Decodable>: Decodable {
+struct Lossy<Element: Decodable>: Decodable {
     let value: Element?
 
     init(from decoder: Decoder) throws {
@@ -497,18 +540,28 @@ private struct Lossy<Element: Decodable>: Decodable {
 public struct Fleet: Decodable, Sendable {
     public var bots: [Bot]
     public var groups: [Room]
+    /// Held sends for every bot thread, the same snapshot the
+    /// bot.queued frames carry. Older computers omit it.
+    public var botQueuedMessages: [String: [QueuedSend]]?
 
-    private enum CodingKeys: String, CodingKey { case bots, groups }
+    private enum CodingKeys: String, CodingKey { case bots, groups, botQueuedMessages }
 
-    public init(bots: [Bot], groups: [Room]) {
+    public init(bots: [Bot], groups: [Room], botQueuedMessages: [String: [QueuedSend]]? = nil) {
         self.bots = bots
         self.groups = groups
+        self.botQueuedMessages = botQueuedMessages
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         bots = try container.decodeIfPresent([Lossy<Bot>].self, forKey: .bots)?.compactMap(\.value) ?? []
         groups = try container.decodeIfPresent([Lossy<Room>].self, forKey: .groups)?.compactMap(\.value) ?? []
+        // One malformed entry must not cost the whole fleet: the roster is
+        // worth more than the queue note beside it.
+        botQueuedMessages = (try? container.decodeIfPresent(
+            [String: [Lossy<QueuedSend>]].self,
+            forKey: .botQueuedMessages
+        ))??.mapValues { list in list.compactMap(\.value) }
     }
 }
 
@@ -1243,4 +1296,11 @@ public struct ServerEnvironment: Codable, Hashable, Sendable {
     public var label: String
     public var platform: String?
     public var version: String?
+}
+
+/// Keep future attachment kinds decodable; only image entries are displayed.
+public struct MessageImageAttachment: Codable, Hashable, Sendable {
+    public var kind: String
+    public var path: String?
+    public var mime: String?
 }

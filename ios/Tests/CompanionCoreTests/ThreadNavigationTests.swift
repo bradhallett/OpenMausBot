@@ -78,6 +78,25 @@ final class ThreadNavigationTests: XCTestCase {
         )
     }
 
+    func testAHeldSendRanksInTheQueuedTierAboveTheThreadOpenHere() {
+        // A send held behind a running turn is client state, so it floats the
+        // thread the way a wire-queued one does, and a closed thread holding
+        // one stays surfaced — ordering, never filtering.
+        let closer = ThreadCloser(botId: "pm", name: "Parker", at: 9)
+        var helper = task("helper", title: "Helper")
+        helper.closedBy = closer
+        let bot = makeBot(tasks: [helper, task("current"), task("plan")])
+
+        XCTAssertEqual(
+            bot.threadGroups().flatMap(\.tasks).map(\.threadId),
+            ["current", "plan"]
+        )
+        XCTAssertEqual(
+            bot.threadGroups(queuedThreadIds: ["helper", "plan"]).flatMap(\.tasks).map(\.threadId),
+            ["helper", "plan", "current"]
+        )
+    }
+
     func testAttentionOrderingIsStableWithinATier() {
         var unreadB = task("unread-b")
         unreadB.unread = true
@@ -135,6 +154,7 @@ final class ThreadNavigationTests: XCTestCase {
         var bot = makeBot()
         bot.busy = true
         bot.unread = true
+        bot.waitingOnTeammate = true
         bot.approvalMode = "custom"
         bot.autoApprove = false
         bot.alwaysAllow = ["Bash:git"]
@@ -145,6 +165,8 @@ final class ThreadNavigationTests: XCTestCase {
         XCTAssertEqual(fallback.createdAt, bot.createdAt)
         XCTAssertEqual(fallback.modelSelection, bot.modelSelection)
         XCTAssertEqual(fallback.busy, true)
+        XCTAssertEqual(fallback.waitingOnTeammate, true)
+        XCTAssertTrue(fallback.isWaitingOnTeammate, "a legacy bot's wait must reach the thread row")
         XCTAssertEqual(fallback.unread, true)
         XCTAssertEqual(fallback.approvalMode, "custom")
         XCTAssertEqual(fallback.autoApprove, false)
@@ -269,7 +291,7 @@ final class ThreadNavigationTests: XCTestCase {
         held.archivedAt = 5
         held.activity = "waiting"
         XCTAssertFalse(held.isWorking)
-        XCTAssertTrue(held.demandsAttention, "a plain waiting thread still needs the person")
+        XCTAssertTrue(held.demandsAttention(), "a plain waiting thread still needs the person")
         var active = task("current")
         active.archivedAt = 7
         var bot = makeBot(tasks: [putAway, zero, waiting, running, held, active, task("plan")])

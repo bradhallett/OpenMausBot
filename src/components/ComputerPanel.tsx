@@ -46,7 +46,7 @@ export function ComputerPanel({
 }) {
   // Docked flush under the Windows caption corner: drop the header 16px.
   const { padClass } = useCaptionChrome();
-  const { panelWidth, onResizeStart, onResizeMove, onResizeEnd } = usePanelWidth();
+  const { panelWidth, onResizeStart, onResizeMove, onResizeEnd, separatorRef, separatorWidth, onSeparatorKeyDown } = usePanelWidth();
   const { state, dispatch } = useStore();
   const { capabilities, ready: capabilitiesReady } = useDesktopCapabilities();
   const localAvailable = capabilities.localComputer.available;
@@ -272,6 +272,9 @@ export function ComputerPanel({
         onResizeStart={onResizeStart}
         onResizeMove={onResizeMove}
         onResizeEnd={onResizeEnd}
+        separatorRef={separatorRef}
+        separatorWidth={separatorWidth}
+        onSeparatorKeyDown={onSeparatorKeyDown}
       />
 
       {panelView === "routines" ? (

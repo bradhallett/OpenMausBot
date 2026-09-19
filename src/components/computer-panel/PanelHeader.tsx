@@ -1,9 +1,10 @@
 import { CalendarClock, Globe, Monitor, Settings, Smartphone, X } from "lucide-react";
-import type { PointerEvent } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent, RefObject } from "react";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import { effectivePlace, isComputerPlace } from "@/lib/place";
 import type { ComputerPanelView } from "@/lib/computer-panel-view";
+import { PANEL_MAX_WIDTH_VALUE, PANEL_MIN_WIDTH_VALUE } from "./usePanelWidth";
 
 /** The panel's chrome: the resize handle, the settings/close buttons, and
  * the tab strip for Computer/Routines/Android/Browser with each live-place
@@ -22,6 +23,9 @@ export function PanelHeader({
   onResizeStart,
   onResizeMove,
   onResizeEnd,
+  separatorRef,
+  separatorWidth,
+  onSeparatorKeyDown,
 }: {
   padClass: string | undefined;
   panelView: ComputerPanelView;
@@ -36,18 +40,27 @@ export function PanelHeader({
   onResizeStart: (event: PointerEvent<HTMLDivElement>) => void;
   onResizeMove: (event: PointerEvent<HTMLDivElement>) => void;
   onResizeEnd: (event: PointerEvent<HTMLDivElement>) => void;
+  separatorRef: RefObject<HTMLDivElement | null>;
+  separatorWidth: number | null;
+  onSeparatorKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
 }) {
   return (
     <>
       <div
+        ref={separatorRef}
         role="separator"
         aria-orientation="vertical"
         aria-label={t("computer.resizeAria")}
+        aria-valuemin={PANEL_MIN_WIDTH_VALUE}
+        aria-valuemax={PANEL_MAX_WIDTH_VALUE}
+        aria-valuenow={separatorWidth ?? undefined}
+        tabIndex={0}
+        onKeyDown={onSeparatorKeyDown}
         onPointerDown={onResizeStart}
         onPointerMove={onResizeMove}
         onPointerUp={onResizeEnd}
         onPointerCancel={onResizeEnd}
-        className="absolute inset-y-0 left-0 z-10 w-1.5 cursor-col-resize hover:bg-accent/40"
+        className="absolute inset-y-0 left-0 z-10 w-1.5 cursor-col-resize hover:bg-accent/40 focus-visible:bg-accent/60"
       />
       {/* Header */}
       <div className={cn("flex items-center justify-between px-4 py-3", padClass)}>

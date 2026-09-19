@@ -17,11 +17,12 @@ import {
   type DelegationReceipt,
 } from "./delegations.ts";
 import { canReachPeer } from "./peer-roster.ts";
+import { registry } from "./runtime.ts";
 import type { RoomHandoffs } from "./room-handoffs.ts";
 import type { RoutineManager, RoutineRun } from "./routines.ts";
 import { store } from "./runtime.ts";
 import type { BotRecord, GroupRecord, Message } from "./store.ts";
-import { threadBusy } from "./turn-admission.ts";
+import { botForThread, threadBusy } from "./turn-admission.ts";
 import { isTurnAdmissionBlocked, ProviderTurnGenerationRegistry } from "./turn-dispatch-guard.ts";
 
 /** The settled-turn receipt the direct-followup machinery hands back. */
@@ -52,6 +53,7 @@ export interface DelegationWatchDeps {
     routines(): RoutineManager | null;
     startTurn(botId: string, text: string, opts?: { threadId?: string; cardContinuation?: boolean; unattended?: boolean }): Promise<unknown>;
     commsBus(): CommsBus;
+    turnInstance(bot: BotRecord, runOn: "cloud" | undefined, threadId: string): { instanceId: string } | null | undefined;
   };
   helpers: {
     retireProviderTurn(turnId: string): void;
@@ -61,7 +63,7 @@ export interface DelegationWatchDeps {
 }
 
 export function createDelegationWatch(deps: DelegationWatchDeps) {
-  const { roomHandoffs, routines, startTurn, commsBus } = deps.lateBound;
+  const { roomHandoffs, routines, startTurn, commsBus, turnInstance } = deps.lateBound;
   const { retireProviderTurn, isUnattended, activeGroupTurnForBot } = deps.helpers;
 
   const directFollowupTurns = new ProviderTurnGenerationRegistry<DirectTurnOutcome>();
@@ -193,6 +195,19 @@ export function createDelegationWatch(deps: DelegationWatchDeps) {
   function markTaskContextExternallyUpdated(bot: BotRecord, threadId: string): void {
     const task = store.taskByThread(bot.id, threadId);
     if (!task) return;
+    // An engine that records which messages its current session was handed
+    // keeps that session: its next turn is sent what it has not seen. Without a
+    // record for that exact session (another engine, one switched in since, a
+    // replaced session, or a task from before records existed) the next turn
+    // replays once, as before.
+    const owner = task.lastInstanceId;
+    const record = owner ? task.handedMessages?.[owner] : undefined;
+    if (owner && record?.session !== undefined && record.session === task.resumeCursors[owner] &&
+      turnInstance(botForThread(bot.id, threadId) ?? bot, undefined, threadId)?.instanceId === owner &&
+      registry.get(owner)?.adapter.capabilities.strictResume) {
+      store.patchTask(bot.id, threadId, { unread: true });
+      return;
+    }
     store.patchTask(bot.id, threadId, {
       resumeCursors: {},
       lastInstanceId: `${EXTERNAL_CONTEXT_MARKER_PREFIX}${randomUUID()}`,

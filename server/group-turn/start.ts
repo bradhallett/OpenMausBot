@@ -8,10 +8,13 @@
 // root.
 import { randomUUID } from "node:crypto";
 
-import { store } from "../runtime.ts";
+import { cfg, registry, store } from "../runtime.ts";
 import { mentionedBots, roomResponders, type Message } from "../store.ts";
 import { GROUP_GOAL_MAX_TURNS, selectGroupGoalCoordinator } from "../group-goal-run.ts";
 import { drainChannelMessages } from "../channel-queue.ts";
+import { llmThreadTitlesEnabled } from "../config.ts";
+import { extractTurnImages } from "../turn-images.ts";
+import { generateThreadTitle } from "../thread-titles.ts";
 import type { GroupTurnDeps } from "../group-turn.ts";
 import type { createGoalRun } from "./goal-run.ts";
 import type { createMemberTurn } from "./member-turn.ts";
@@ -26,6 +29,8 @@ type StartGroupTurnOptions = {
   /** The message came through the HTTP API with nothing to say a person
    * sent it (see Message.via). */
   via?: "api";
+  /** The person who sent it, when not the desktop owner (see Message.sender). */
+  sender?: { name: string };
 };
 
 /** Everything the starter and its queue drain read from their host. */
@@ -92,8 +97,10 @@ function startGroupTurn(
     channelMode,
     queueId,
     via: options.via,
+    sender: options.sender,
   });
-  if (!group.dm) store.titleGroupTaskFromFirstMessage(group.id, text, threadId);
+  const titled = group.dm ? null : store.titleGroupTaskFromFirstMessage(group.id, text, threadId);
+  const snippet = titled?.title;
 
   const archived = members.filter((member) => member.hidden);
   const mentionedArchived = mentionedBots(text, archived.map(({ name }) => ({ name })))[0];
@@ -137,6 +144,17 @@ function startGroupTurn(
       });
     }
     return message;
+  }
+
+  const titleBot = goalCoordinator ?? responders[0]!;
+  const titleInstance = registry.get(titleBot.modelSelection.instanceId);
+  const titleText = extractTurnImages(text).text;
+  if (titled && snippet && titleText.trim() && llmThreadTitlesEnabled(cfg) && titleInstance?.generateText) {
+    void generateThreadTitle(titleInstance, titleText)
+      .then((title) => {
+        if (title) store.retitleGroupTask(group.id, threadId, snippet, title);
+      })
+      .catch(() => undefined);
   }
 
   const operation = beginGroupTurnOperation(

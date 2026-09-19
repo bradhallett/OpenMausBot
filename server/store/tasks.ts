@@ -264,13 +264,27 @@ export function renameTask(ctx: StoreContext, botId: string, threadId: string, t
   return ctx.patchTask(botId, threadId, { title });
 }
 
-/** Name a task after its first message, once. */
-export function titleTaskFromFirstMessage(ctx: StoreContext, botId: string, text: string, threadId?: string) {
+/** Name a task after its first message, once. Returns the task it named
+ * so a caller can later replace exactly that machine-made title — and
+ * can see the peer provenance it must leave alone. */
+export function titleTaskFromFirstMessage(ctx: StoreContext, botId: string, text: string, threadId?: string): TaskRecord | null {
   const task = threadId ? ctx.taskByThread(botId, threadId) : ctx.activeTask(botId);
-  if (!task || (task.title !== UNTITLED_TASK && task.title !== UNTITLED_THREAD)) return;
+  if (!task || task.titleFromFirstMessage || (task.title !== UNTITLED_TASK && task.title !== UNTITLED_THREAD)) return null;
   task.title = titleFromMessage(text);
+  task.titleFromFirstMessage = true;
   ctx.saveBots();
   ctx.emit({ type: "bot", botId });
+  return task;
+}
+
+/** Swap a machine-made first-message title for a generated one, once.
+ * Equality against the snippet is the whole contract: a rename by the
+ * person, by pair adoption, or by an earlier generated title each break
+ * it, so this never overwrites a name anyone chose. */
+export function retitleTask(ctx: StoreContext, botId: string, threadId: string, machineTitle: string, title: string): TaskRecord | null {
+  const task = ctx.taskByThread(botId, threadId);
+  if (!task || task.title !== machineTitle) return null;
+  return renameTask(ctx, botId, threadId, threadTitleFrom(title));
 }
 
 /** Delete a task and its transcript, retaining generated project files.
@@ -311,8 +325,11 @@ export function setTaskActivity(ctx: StoreContext, botId: string, threadId: stri
   if (!record || !task) return null;
   const busy = ACTIVITY_BUSY.has(activity);
   if ((task.activity ?? "idle") === activity && Boolean(task.busy) === busy) return record;
+  const wasBusy = Boolean(task.busy);
   task.activity = activity;
   task.busy = busy;
+  if (busy && !wasBusy) task.turnStartedAt = Date.now();
+  else if (!busy) delete task.turnStartedAt;
   refreshBotActivity(ctx, record);
   ctx.emit({ type: "bot", botId });
   return record;

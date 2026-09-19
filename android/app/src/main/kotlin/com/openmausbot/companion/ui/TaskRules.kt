@@ -3,6 +3,7 @@ package com.openmausbot.companion.ui
 import com.openmausbot.companion.core.Bot
 import com.openmausbot.companion.core.BotTask
 import com.openmausbot.companion.core.Chat
+import com.openmausbot.companion.core.demandsAttention
 import com.openmausbot.companion.core.isClosed
 import com.openmausbot.companion.core.isArchived
 import com.openmausbot.companion.core.displayTitle
@@ -43,21 +44,23 @@ object TaskRules {
      * sidebar orders threads: waiting on the person first, then work, then
      * queued, then unread; the current thread rides above the idle tail.
      */
-    fun tasks(bot: Bot): List<BotTask> {
+    fun tasks(bot: Bot, queuedThreadIds: Set<String> = emptySet()): List<BotTask> {
         val navigable = bot.threadGroups(includingClosed = true).flatMap { it.tasks }
         val (surfaced, folded) = navigable.partition {
-            (!it.isClosed && !it.isArchived) || demandsAttention(it) || isCurrent(it, bot)
+            (!it.isClosed && !it.isArchived) ||
+                demandsAttention(it, queued = it.threadId in queuedThreadIds) ||
+                isCurrent(it, bot)
         }
         val (closed, archived) = folded.partition { !it.isArchived }
-        return orderedThreads(surfaced, bot.threadId) +
-            orderedThreads(closed, bot.threadId) +
-            orderedThreads(archived, bot.threadId)
+        return orderedThreads(surfaced, bot.threadId, queuedThreadIds) +
+            orderedThreads(closed, bot.threadId, queuedThreadIds) +
+            orderedThreads(archived, bot.threadId, queuedThreadIds)
     }
 
-    /** Running, needing the person, or holding something they have not read. */
-    fun demandsAttention(task: BotTask): Boolean =
-        task.busy == true || task.unread == true ||
-            task.activity in setOf("waiting-on-you", "waiting", "working", "running", "queued")
+    /** Running, needing the person, holding a queued send, or holding
+     * something they have not read. */
+    fun demandsAttention(task: BotTask, queued: Boolean = false): Boolean =
+        task.demandsAttention(queued)
 
     fun tasks(chat: Chat): List<BotTask> = when (chat) {
         is Chat.BotChat -> tasks(chat.bot)

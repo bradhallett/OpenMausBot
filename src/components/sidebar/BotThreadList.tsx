@@ -53,7 +53,7 @@ export function BotThreadList({ bot, selected, density = "comfortable", query = 
   useRevealedThreadRow(state.revealThread, selected ? bot.threadId : null);
   const renderThread = (task: (typeof tasks)[number]) => {
     const thread = currentTaskBot(bot, task.threadId);
-    return <SidebarThreadRow key={task.threadId} task={{ ...task, busy: thread.busy, activity: thread.activity }} current={selected && task.threadId === bot.threadId} compact={density === "compact"} folders={projects}
+    return <SidebarThreadRow key={task.threadId} task={{ ...task, busy: thread.busy, activity: thread.activity }} ownerId={bot.id} current={selected && task.threadId === bot.threadId} compact={density === "compact"} folders={projects}
       onSelect={() => { if (task.threadId !== bot.threadId) dispatch({ type: "switchTask", botId: bot.id, threadId: task.threadId }); else dispatch({ type: "select", id: bot.id }); }}
       onRename={(title) => dispatch({ type: "renameTask", botId: bot.id, threadId: task.threadId, title })}
       onDelete={() => dispatch({ type: "deleteTask", botId: bot.id, threadId: task.threadId })}
@@ -180,4 +180,3 @@ export function BotThreadList({ bot, selected, density = "comfortable", query = 
     </div>
   );
 }
-

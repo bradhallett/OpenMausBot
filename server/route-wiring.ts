@@ -411,7 +411,7 @@ const internalRoutes = createInternalRoutes({
   roomHandoffs, routineRequests, profileRequests, teamSetupRequests, routines,
   computerSelectionTurns, delegationWatch, turnComputerResources, autoVmClaims, personAskAt, roomPostBudgets,
   ASK_BOT_TIMEOUT_MS, MAX_COMMS_DEPTH, MAX_THREADS_OPENED_PER_TURN, MAX_WORKSPACE_BOTS, ROOM_POST_MAX_CHARS,
-  askBotAndWait, agentRoutine, appendSkillRequestCard, botComputerControlSnapshot, startOrQueueOpenedThread,
+  askBotAndWait, agentRoutine, appendSkillRequestCard, botComputerControlSnapshot, startOrQueueOpenedThread, startTurn,
   selectableComputers, computerPreviewSurface, browserIntegration, currentBrowserSession, createChannel, updateChannel,
   activeGroupTurnForBot, activeRoutineRunForThread, credentialDesktopHandoff, lastHumanRoomMessageAt,
   maybeResumeConnectors, notify, proposalPersistence, skillProposalPersistence, roomHandoffProblem,
@@ -443,9 +443,11 @@ const handleInstances = createInstanceRoutes({
   providerAuthSessions,
   sessions,
   describeInstances,
+  configStatus,
   persistProviderInstance,
   providerInstancesChanging,
   activeGroupTurnForBot,
+  broadcast,
 });
 const handleMcp = createMcpRoutes({ sessions, mcpServerResponse, mcpServerBody, persistMcpServers });
 const handleUsage = createUsageRoutes();

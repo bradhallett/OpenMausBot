@@ -189,4 +189,3 @@ export function claimDirectTurn({
   turnContext.delete(threadId);
   return { dispatchClaimId, resourceOwner };
 }
-

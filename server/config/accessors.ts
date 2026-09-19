@@ -1,10 +1,14 @@
 // Derived config reads: the scalar every caller asks the config for (turn
 // timeout, thread caps, feature gates) plus the persisted-VPS shape helper.
 import {
+  DEFAULT_ROOM_HANDOFF_HARD_CAP_MINUTES,
+  DEFAULT_ROOM_HANDOFF_LIFETIME_MINUTES,
+  DEFAULT_ROOM_HANDOFF_MIN_RUNWAY_MINUTES,
   DEFAULT_LOCAL_VM_MAX_INSTANCES,
   DEFAULT_LOCAL_VM_MODE,
   DEFAULT_MAX_CONCURRENT_BOT_THREADS,
   DEFAULT_ROOM_TURN_TIMEOUT_MINUTES,
+  isValidCdpTarget,
   isValidSshAlias,
   type AppConfig,
 } from "./schema.ts";
@@ -29,6 +33,31 @@ export function vpsSshAlias(cfg: AppConfig): string | null {
 
 export function roomTurnTimeoutMinutes(cfg: AppConfig): number {
   return cfg.rooms?.turnTimeoutMinutes ?? DEFAULT_ROOM_TURN_TIMEOUT_MINUTES;
+}
+
+/** Read-and-revalidate accessor, same shape as vpsSshAlias above: even
+ * though loadConfig()/parseStoredConfig() already schema-validate this
+ * field, callers that forward it into a child process environment get a
+ * second, cheap guarantee rather than trusting a hand-edited config.json. */
+export function browserEngineAttachCdpUrl(cfg: AppConfig): string | null {
+  return isValidCdpTarget(cfg.browserEngine?.attachCdpUrl) ? cfg.browserEngine.attachCdpUrl : null;
+}
+
+export interface RoomHandoffLimitsMs {
+  lifetimeMs: number;
+  minRunwayMs: number;
+  hardCapMs: number;
+}
+
+/** Room handoff tree budgets in milliseconds. The tree lifetime pauses
+ * while a node is actively executing; the hard cap is wall-clock and bounds
+ * trees that never stop. Read when the server starts. */
+export function roomHandoffLimits(cfg: AppConfig): RoomHandoffLimitsMs {
+  return {
+    lifetimeMs: (cfg.rooms?.handoffLifetimeMinutes ?? DEFAULT_ROOM_HANDOFF_LIFETIME_MINUTES) * 60_000,
+    minRunwayMs: (cfg.rooms?.handoffMinRunwayMinutes ?? DEFAULT_ROOM_HANDOFF_MIN_RUNWAY_MINUTES) * 60_000,
+    hardCapMs: (cfg.rooms?.handoffHardCapMinutes ?? DEFAULT_ROOM_HANDOFF_HARD_CAP_MINUTES) * 60_000,
+  };
 }
 
 export function maxConcurrentBotThreads(cfg: AppConfig): number {
@@ -93,6 +122,15 @@ export function sharedComputersEnabled(cfg: AppConfig): boolean {
  * personal CLAUDE.md out. */
 export function claudeUserMcpEnabled(cfg: AppConfig): boolean {
   return cfg.features?.claudeUserMcp === true;
+}
+
+/** Opt-in generated titles for new bot threads: a cheap provider one-shot
+ * names the row instead of the first-message snippet. Off until enabled by
+ * hand in ~/.openmausbot/config.json
+ * (`{"features": {"llmThreadTitles": true}}`); a one-shot that fails or
+ * answers anything unusable leaves the snippet untouched. */
+export function llmThreadTitlesEnabled(cfg: AppConfig): boolean {
+  return cfg.features?.llmThreadTitles === true;
 }
 
 /** Config sections no provider driver reads. A write that touches only

@@ -3,7 +3,7 @@
 import type { ServerResponse } from "node:http";
 
 import { DELEGATION_TTL_MS, findDelegationReceipt, pendingDelegationInfo, queueDelegation, summarizeDelegatedActivity, type QueueResult } from "../../delegations.ts";
-import { canAccessTeam, peerAllowed, peerStatus } from "../../peer-roster.ts";
+import { PEER_ACCESS_HELP, canAccessTeam, peerAllowed, peerStatus, resolveTeammate } from "../../peer-roster.ts";
 import type { InternalRoutesOptions } from "../internal.ts";
 import type { InternalRequestCtx } from "./types.ts";
 
@@ -82,7 +82,7 @@ export async function delegateBot(ctx: DelegationsCtx, res: ServerResponse): Pro
     store, commsBus, MAX_COMMS_DEPTH, connectorThread, peerReviewRequired, internalCapability, internalSender, json, readInternalBody,
   } = ctx;
     const body = await readInternalBody();
-    const toBotId = String(body.toBotId ?? "");
+    const toBotRef = String(body.toBotId ?? "");
     const message = String(body.message ?? "").trim();
     const reason = typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : undefined;
     if (
@@ -92,15 +92,18 @@ export async function delegateBot(ctx: DelegationsCtx, res: ServerResponse): Pro
       return json(res, 403, { error: "the recursion depth does not match this turn" });
     }
     const depth = internalCapability.depth;
-    if (!toBotId || !message) return json(res, 400, { error: "toBotId and message required" });
+    if (!toBotRef || !message) return json(res, 400, { error: "toBotId and message required" });
     const from = internalSender;
+    const resolvedTo = resolveTeammate(store.bots, from, toBotRef);
+    if ("error" in resolvedTo) return json(res, 404, { error: `no such bot: ${resolvedTo.error}` });
+    const toBotId = resolvedTo.id;
     const target = store.bot(toBotId);
     if (!target) return json(res, 404, { error: "no such bot" });
     if (!canAccessTeam(from, target.section) || target.hidden) {
-      return json(res, 403, { error: "that bot belongs to a different section" });
+      return json(res, 403, { error: `that bot belongs to a different section or is unavailable. ${PEER_ACCESS_HELP}` });
     }
     if (!peerAllowed(from, target.id)) {
-      return json(res, 403, { error: "that bot is not on this bot's allowed peers — call list_bots for the ones you can reach" });
+      return json(res, 403, { error: `that bot is not on this bot's allowed peers. ${PEER_ACCESS_HELP}` });
     }
     const fromThreadId = internalCapability.threadId;
     if (!connectorThread(from.id, fromThreadId)) {

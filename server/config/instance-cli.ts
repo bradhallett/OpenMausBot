@@ -42,13 +42,16 @@ export function withInstanceCli(
   return { ok: true, config: next };
 }
 
-/** Materialize defaults without copying injected workspace secrets to disk. */
+/** Materialize defaults without freezing injected workspace settings or secrets. */
 export function persistableInstanceConfigs(cfg: AppConfig): InstanceConfigMap {
   const map = instanceConfigs(cfg);
   for (const [id, entry] of Object.entries(map)) {
     const environment = cfg.instances?.[id]?.environment;
     if (environment) entry.environment = { ...environment };
     else delete entry.environment;
+    const config = cfg.instances?.[id]?.config;
+    if (config !== undefined) entry.config = structuredClone(config);
+    else delete entry.config;
   }
   return map;
 }

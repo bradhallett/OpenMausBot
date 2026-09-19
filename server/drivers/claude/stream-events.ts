@@ -21,6 +21,9 @@ export interface ClaudeStreamDeps {
   emit: (event: RuntimeEvent) => void;
   base: (threadId: string, turnId: string) => DriverEventBase;
   currentTurnId: () => string;
+  /** True while the session being announced was rebuilt from recoveryText
+   * (a rejected resume), so session.started can flag it as rebuilt. */
+  isRebuiltSession?: () => boolean;
 }
 
 export function handleLine(line: string, deps: ClaudeStreamDeps): void {
@@ -39,7 +42,7 @@ export function handleLine(line: string, deps: ClaudeStreamDeps): void {
         session.sawInit = true;
         session.nativePermissionMode = typeof o.permissionMode === "string" ? o.permissionMode : null;
         if (typeof o.session_id === "string") session.sessionId = o.session_id;
-        emit({ ...base(threadId, currentTurnId()), type: "session.started", sessionId: o.session_id, model: o.model });
+        emit({ ...base(threadId, currentTurnId()), type: "session.started", sessionId: o.session_id, model: o.model, ...(deps.isRebuiltSession?.() ? { rebuilt: true } : {}) });
       } else if (o.subtype === "thinking_tokens") {
         emit({ ...base(threadId, currentTurnId()), type: "item.updated", itemType: "reasoning", tokens: o.estimated_tokens });
       }
@@ -73,12 +76,15 @@ export function handleLine(line: string, deps: ClaudeStreamDeps): void {
         break;
       }
       if (text.trim()) {
+        // The CLI's own report of any other API error is still shown,
+        // but marked: the model never produced it.
+        const synthetic = o.is_api_error_message === true || typeof o.error === "string" ? { synthetic: true } : {};
         // fallback delta for CLIs/paths that never streamed the block
         if (!session.turn?.sawStreamDelta) {
-          emit({ ...base(threadId, currentTurnId()), type: "content.delta", streamKind: "assistant_text", delta: text });
+          emit({ ...base(threadId, currentTurnId()), ...synthetic, type: "content.delta", streamKind: "assistant_text", delta: text });
         }
         if (session.turn) session.turn.sawStreamDelta = false;
-        emit({ ...base(threadId, currentTurnId()), type: "item.completed", itemType: "assistant_text", text });
+        emit({ ...base(threadId, currentTurnId()), ...synthetic, type: "item.completed", itemType: "assistant_text", text });
       }
       for (const b of Array.isArray(msg.content) ? msg.content : []) {
         if (b.type === "tool_use") {

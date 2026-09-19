@@ -44,6 +44,8 @@ import { botDeletionRequestSubmit, profileRequestSubmit, routineRequestSubmit, r
 import { agentsList, roomsList, threadClose, threadsList } from "./internal/roster.ts";
 import { skillsList, skillsStage } from "./internal/skills.ts";
 import { createBot, createRoomOrManageRoom, startThread } from "./internal/threads.ts";
+import { retryThread } from "./internal/retry-thread.ts";
+import type { createTurnDispatch } from "../turn-dispatch.ts";
 
 // Every mounted proxy receives a fresh, turn-scoped capability for localhost
 // /api/internal calls. Identity, source thread, recursion depth and route
@@ -147,6 +149,7 @@ export interface InternalRoutesOptions {
   MAX_WORKSPACE_BOTS: number;
   ROOM_POST_MAX_CHARS: number;
   askBotAndWait(targetBotId: string, message: string, depth: number, fromBotId?: string, fromThreadId?: string, targetThreadId?: string): Promise<AskBotOutcome>;
+  startTurn: ReturnType<typeof createTurnDispatch>["startTurn"];
   agentRoutine(routine: ReturnType<RoutineManager["listRoutines"]>[number], latestRun?: RoutineRun): Record<string, unknown>;
   appendSkillRequestCard(args: {
     botId: string;
@@ -203,7 +206,7 @@ export function createInternalRoutes(options: InternalRoutesOptions) {
       roomHandoffs, routineRequests, profileRequests, teamSetupRequests, routines: getRoutines,
       computerSelectionTurns, delegationWatch, turnComputerResources, autoVmClaims, personAskAt, roomPostBudgets,
       ASK_BOT_TIMEOUT_MS, MAX_COMMS_DEPTH, MAX_THREADS_OPENED_PER_TURN, MAX_WORKSPACE_BOTS, ROOM_POST_MAX_CHARS,
-      askBotAndWait, agentRoutine, appendSkillRequestCard, botComputerControlSnapshot, startOrQueueOpenedThread,
+      askBotAndWait, agentRoutine, appendSkillRequestCard, botComputerControlSnapshot, startOrQueueOpenedThread, startTurn,
       selectableComputers, computerPreviewSurface, browserIntegration, currentBrowserSession, createChannel, updateChannel,
       activeGroupTurnForBot, activeRoutineRunForThread, credentialDesktopHandoff, lastHumanRoomMessageAt,
       maybeResumeConnectors, notify, proposalPersistence, skillProposalPersistence, roomHandoffProblem,
@@ -300,7 +303,7 @@ export function createInternalRoutes(options: InternalRoutesOptions) {
         roomHandoffs, routineRequests, profileRequests, teamSetupRequests, routines,
         computerSelectionTurns, delegationWatch, turnComputerResources, autoVmClaims, personAskAt, roomPostBudgets,
         ASK_BOT_TIMEOUT_MS, MAX_COMMS_DEPTH, MAX_THREADS_OPENED_PER_TURN, MAX_WORKSPACE_BOTS, ROOM_POST_MAX_CHARS,
-        askBotAndWait, agentRoutine, appendSkillRequestCard, botComputerControlSnapshot, startOrQueueOpenedThread,
+        askBotAndWait, agentRoutine, appendSkillRequestCard, botComputerControlSnapshot, startOrQueueOpenedThread, startTurn,
         selectableComputers, computerPreviewSurface, browserIntegration, currentBrowserSession, createChannel, updateChannel,
         activeGroupTurnForBot, activeRoutineRunForThread, credentialDesktopHandoff, lastHumanRoomMessageAt,
         maybeResumeConnectors, notify, proposalPersistence, skillProposalPersistence, roomHandoffProblem,
@@ -372,6 +375,9 @@ export function createInternalRoutes(options: InternalRoutesOptions) {
       }
       if (method === "POST" && path === "/api/internal/ask-bot") {
         return askBot(internalCtx, res);
+      }
+      if (method === "POST" && path === "/api/internal/retry-thread") {
+        return retryThread(internalCtx, res);
       }
       const delegationMatch = method === "GET" ? path.match(/^\/api\/internal\/delegations\/([\w-]{4,64})$/) : null;
       if (delegationMatch) {
