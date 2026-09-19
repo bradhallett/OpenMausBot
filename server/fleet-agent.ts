@@ -30,6 +30,11 @@ export interface FleetWorkspaceView extends FleetWorkspace {
 
 const MAX_BODY = 256 * 1024;
 
+// Each usage summary is two spawned processes on the single root agent, and
+// the dashboard polls this list every few seconds; serve repeats from a short
+// TTL cache, the same warming vps-computer.ts applies to its status polls.
+const USAGE_CACHE_TTL_MS = 5_000;
+
 function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     let text = "";
@@ -72,9 +77,9 @@ const models = (value: unknown): string[] => {
 };
 
 /** Only bounded, unprivileged aggregates cross back into the root process. */
-export function workspaceUsage(layout: FleetLayout, slug: string, now: Date, deps: FleetDeps): FleetWorkspaceView["usage"] {
+export async function workspaceUsage(layout: FleetLayout, slug: string, now: Date, deps: FleetDeps): Promise<FleetWorkspaceView["usage"]> {
   const month = now.toISOString().slice(0, 7);
-  try { return { month, ...deps.usage(workspaceDataDir(layout, slug), fleetUser(slug), now) }; }
+  try { return { month, ...(await deps.usage(workspaceDataDir(layout, slug), fleetUser(slug), now)) }; }
   catch { return { month, turns: null, costUsd: null, billableUsd: null, unavailable: true }; }
 }
 
@@ -95,6 +100,17 @@ export function createFleetAgent(options: FleetAgentOptions): Server {
     } catch {
       /* the audit line must never fail the action it records */
     }
+  };
+
+  // Keyed per workspace inside this agent so two agents on different roots
+  // (as in tests) never share summaries.
+  const usageCache = new Map<string, { usage: FleetWorkspaceView["usage"]; expiresAt: number }>();
+  const cachedUsage = async (slug: string): Promise<FleetWorkspaceView["usage"]> => {
+    const cached = usageCache.get(slug);
+    if (cached && cached.expiresAt > Date.now()) return cached.usage;
+    const usage = await workspaceUsage(layout, slug, now(), deps);
+    usageCache.set(slug, { usage, expiresAt: Date.now() + USAGE_CACHE_TTL_MS });
+    return usage;
   };
 
   const runAction = async (input: FleetInput): Promise<{ status: number; body: unknown }> => {
@@ -146,13 +162,15 @@ export function createFleetAgent(options: FleetAgentOptions): Server {
       if (method === "GET" && url.pathname === "/workspaces") {
         const registry = loadRegistry(layout, deps);
         const statusOnly = url.searchParams.get("statusOnly") === "true";
-        const workspaces: (FleetWorkspaceView | Pick<FleetWorkspaceView, "slug" | "live">)[] = [];
-        for (const workspace of Object.values(registry.workspaces).sort((a, b) => a.slug.localeCompare(b.slug))) {
+        const rows = Object.values(registry.workspaces).sort((a, b) => a.slug.localeCompare(b.slug));
+        // One slow unit query or usage helper must not serialize the fleet's
+        // listing behind it: every workspace's checks start together.
+        const workspaces: (FleetWorkspaceView | Pick<FleetWorkspaceView, "slug" | "live">)[] = await Promise.all(rows.map(async (workspace): Promise<FleetWorkspaceView | Pick<FleetWorkspaceView, "slug" | "live">> => {
           const live = workspace.status === "running" || workspace.status === "suspended"
             ? (await deps.run(["systemctl", "is-active", `openmausbot@${workspace.slug}.service`])).output.trim() || "unknown"
             : workspace.status;
-          workspaces.push(statusOnly ? { slug: workspace.slug, live } : { ...workspace, live, usage: workspaceUsage(layout, workspace.slug, now(), deps) });
-        }
+          return statusOnly ? { slug: workspace.slug, live } : { ...workspace, live, usage: await cachedUsage(workspace.slug) };
+        }));
         return send(200, { domain: registry.domain, operator: registry.operator ?? null, workspaces });
       }
       if (method === "POST" && url.pathname === "/workspaces") {

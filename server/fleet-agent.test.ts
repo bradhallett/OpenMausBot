@@ -25,7 +25,7 @@ function machine(root: string, options: { failing?: string[]; beforeRun?: (argv:
     },
     readText: (path) => files.get(path) ?? (path.endsWith("fleet.json") ? null : null),
     pathExists: (path) => files.has(path),
-    usage: (dataDir, owner, now) => {
+    usage: async (dataDir, owner, now) => {
       calls.push(`usage ${dataDir} as ${owner}`);
       const total = summarizeUsage(readUsage(dataDir, { from: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)), to: now }), "bot").total;
       return { turns: total.turns, costUsd: total.costUsd, billableUsd: null };
@@ -277,7 +277,7 @@ describe.skipIf(process.platform === "win32")("fleet agent over its socket", () 
     const m = machine(root);
     const entry = (slug: string, port: number) => ({ slug, host: `${slug}.agentada.cc`, port, webhookPort: port + 1, status: "running", createdAt: "" });
     m.files.set(fleetLayout(root).registryFile, JSON.stringify({ ...emptyRegistry("agentada.cc"), workspaces: { alpha: entry("alpha", 8810), beta: entry("beta", 8820) } }));
-    m.deps.usage = (dataDir, owner, now) => {
+    m.deps.usage = async (dataDir, owner, now) => {
       expect(owner).toBe(dataDir.includes("/alpha/") ? "omb-alpha" : "omb-beta");
       expect(now.toISOString()).toBe("2026-09-10T12:00:00.000Z");
       if (owner === "omb-alpha") throw new Error("unsafe fixture-secret ledger");
@@ -291,5 +291,41 @@ describe.skipIf(process.platform === "win32")("fleet agent over its socket", () 
     ] } });
     expect(JSON.stringify(listed)).not.toContain("fixture-secret");
     expect((await fleetRequest(socketPath, "GET", "/health")).status).toBe(200);
+  });
+
+  it("starts every workspace's usage summary together instead of one after another", async () => {
+    const m = machine(root);
+    const entry = (slug: string, port: number) => ({ slug, host: `${slug}.agentada.cc`, port, webhookPort: port + 1, status: "running", createdAt: "" });
+    m.files.set(fleetLayout(root).registryFile, JSON.stringify({ ...emptyRegistry("agentada.cc"), workspaces: { alpha: entry("alpha", 8810), beta: entry("beta", 8820) } }));
+    const started: string[] = [];
+    m.deps.usage = async (dataDir) => {
+      started.push(dataDir);
+      // Neither summary may wait for the other workspace's helper to finish.
+      await vi.waitFor(() => { if (started.length < 2) throw new Error("usage summaries did not start together"); });
+      return { turns: 1, costUsd: 0.25, billableUsd: null };
+    };
+    await boot(m);
+    const listed = await fleetRequest(socketPath, "GET", "/workspaces");
+    expect(listed).toMatchObject({ status: 200, body: { workspaces: [
+      { slug: "alpha", usage: { month: "2026-09", turns: 1, costUsd: 0.25, billableUsd: null } },
+      { slug: "beta", usage: { month: "2026-09", turns: 1, costUsd: 0.25, billableUsd: null } },
+    ] } });
+  });
+
+  it("serves an immediate repeat poll from the usage cache instead of re-spawning helpers", async () => {
+    const m = machine(root);
+    const entry = (slug: string, port: number) => ({ slug, host: `${slug}.agentada.cc`, port, webhookPort: port + 1, status: "running", createdAt: "" });
+    m.files.set(fleetLayout(root).registryFile, JSON.stringify({ ...emptyRegistry("agentada.cc"), workspaces: { alpha: entry("alpha", 8810), beta: entry("beta", 8820) } }));
+    await boot(m);
+    const first = await fleetRequest(socketPath, "GET", "/workspaces");
+    const second = await fleetRequest(socketPath, "GET", "/workspaces");
+    expect(first.status).toBe(200);
+    expect(second.body).toEqual(first.body);
+    expect(second.body).toMatchObject({ workspaces: [
+      { slug: "alpha", usage: { month: "2026-09", turns: 0, costUsd: null, billableUsd: null } },
+      { slug: "beta", usage: { month: "2026-09", turns: 0, costUsd: null, billableUsd: null } },
+    ] });
+    // One helper run per workspace; the repeat poll inside the TTL hits the cache.
+    expect(m.calls.filter((call) => call.startsWith("usage "))).toHaveLength(2);
   });
 });
