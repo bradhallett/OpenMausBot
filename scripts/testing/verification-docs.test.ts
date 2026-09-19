@@ -31,10 +31,12 @@ const serverModules = [
   join(ROOT, "server", "index.ts"),
   join(ROOT, "server", "request-handler.ts"),
   join(ROOT, "server", "route-wiring.ts"),
-  ...readdirSync(join(ROOT, "server", "routes"), { recursive: true })
-    .filter((name) => name.endsWith(".ts"))
-    .map((name) => join(ROOT, "server", "routes", name)),
-];
+  ...(existsSync(join(ROOT, "server", "routes"))
+    ? readdirSync(join(ROOT, "server", "routes"), { recursive: true })
+        .filter((name) => name.endsWith(".ts"))
+        .map((name) => join(ROOT, "server", "routes", name))
+    : []),
+].filter((path) => existsSync(path));
 const serverSource = serverModules.map((path) => readFileSync(path, "utf8")).join("\n");
 const hooksSource = readFileSync(join(ROOT, "server", "webhook-ingress.ts"), "utf8");
 const hostedSource = readFileSync(join(ROOT, "enterprise", "server", "workspace-access.ts"), "utf8");
