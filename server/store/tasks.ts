@@ -303,6 +303,7 @@ export function deleteTask(ctx: StoreContext, botId: string, threadId: string): 
   const record = ctx.bot(botId);
   if (!record?.tasks) return null;
   if (!record.tasks.some((t) => t.threadId === threadId)) return null;
+  const snapshot = structuredClone(record);
   record.tasks = record.tasks.filter((t) => t.threadId !== threadId);
   // Durable before anything is built on the filtered list, so a crash
   // below leaves a retryable deletion.
@@ -323,6 +324,8 @@ export function deleteTask(ctx: StoreContext, botId: string, threadId: string): 
   try {
     ctx.saveBots();
   } catch (error) {
+    // Roll the bot back so a failed save cannot leave a half-applied deletion for a later save to persist.
+    Object.assign(record, snapshot);
     clearPendingThreadDeletions(botId, [threadId]);
     throw error;
   }
