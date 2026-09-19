@@ -143,6 +143,15 @@ export class Store {
       ...this.groups.flatMap((group) => [group.threadId, ...(group.tasks ?? []).map((task) => task.threadId)]),
     ]);
     messageOps.migrateLegacyTranscripts(knownThreads);
+    // A tombstone whose owner record is already durably gone can never be
+    // resumed through the UI: no record means no delete button. Finish
+    // those deletions here so a crash between the record save and artifact
+    // cleanup cannot orphan workspace, skill-state, bot-folder, or
+    // transcript files. Owners still on disk keep their live retry paths.
+    for (const key of Object.keys(messageOps.pendingThreadDeletions())) {
+      if (this.bot(key) || this.group(key)) continue;
+      botOps.deleteBot(this.internals, key);
+    }
     this.registeringInitialSections = false;
   }
 
