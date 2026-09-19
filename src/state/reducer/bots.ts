@@ -84,7 +84,7 @@ export function reduceBots(state: AppState, action: BotsAction): AppState {
       const patch = taskPatchFields(action.patch);
       return reconcileModelVariantSessions(updateBot(state, action.botId, (bot) => ({
         ...bot,
-        tasks: (bot.tasks ?? [{ threadId: bot.threadId, title: "New thread", createdAt: Date.now() }]).map((task) =>
+        tasks: (bot.tasks ?? [{ threadId: bot.threadId, title: "New thread", createdAt: bot.createdAt ?? 0 }]).map((task) =>
           task.threadId === action.threadId ? { ...task, ...patch } : task),
       })));
     }
