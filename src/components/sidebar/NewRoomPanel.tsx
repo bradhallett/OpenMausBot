@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { X } from "lucide-react";
 import { useStore } from "@/state/store";
 import { track } from "@/lib/analytics";
@@ -11,6 +11,35 @@ export function NewRoomPanel({ onClose }: { onClose: () => void }) {
   const [name, setName] = useState("");
   const [section, setSection] = useState("");
   const [picked, setPicked] = useState<Set<string>>(new Set());
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const openerRef = useRef<Element | null>(null);
+  useEffect(() => {
+    openerRef.current = document.activeElement;
+    return () => {
+      const opener = openerRef.current;
+      if (opener instanceof HTMLElement && document.contains(opener)) opener.focus();
+    };
+  }, []);
+  const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "Escape") {
+      onClose();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    const panel = panelRef.current;
+    if (!panel) return;
+    const focusables = Array.from(
+      panel.querySelectorAll<HTMLElement>('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'),
+    ).filter((el) => !el.hasAttribute("disabled") && el.offsetParent !== null);
+    if (focusables.length === 0) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey ? active === first || !panel.contains(active) : active === last || !panel.contains(active)) {
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+    }
+  };
   const bots = state.bots.filter((b) => !b.hidden);
   const toggle = (id: string) =>
     setPicked((prev) => {
@@ -36,13 +65,12 @@ export function NewRoomPanel({ onClose }: { onClose: () => void }) {
       onMouseDown={(e) => e.target === e.currentTarget && onClose()}
     >
       <div
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="new-room-title"
         className="w-[340px] rounded-2xl border border-hairline/50 bg-card p-4 shadow-2xl"
-        onKeyDown={(e) => {
-          if (e.key === "Escape") onClose();
-        }}
+        onKeyDown={handleKeyDown}
       >
         <div className="mb-3 flex items-center justify-between gap-2">
           <div id="new-room-title" className="text-[15px] font-semibold text-ink">{t("sidebar.newChannel.title")}</div>
