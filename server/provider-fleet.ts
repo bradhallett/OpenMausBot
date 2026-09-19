@@ -117,7 +117,7 @@ export function createProviderFleet(deps: ProviderFleetDeps) {
     const direct = store.bots.flatMap(bot => store.tasks(bot.id)
       .filter(task => threadBusy(bot.id, task.threadId) && selected.has(botForThread(bot.id, task.threadId)!.modelSelection.instanceId))
       .map(task => ({ botId: bot.id, threadId: task.threadId, owner: turnResourceOwners.get(task.threadId), generation: directTurnGenerationByThread.get(task.threadId) })));
-    await Promise.all(direct.map(task => turns.interruptDirectThread(task.botId, task.threadId)));
+    await Promise.all(direct.map(task => turns.interruptDirectThread(task.botId, task.threadId).catch(() => {})));
     for (const { botId, threadId, owner, generation } of direct) {
       turns.releaseTurnResources(owner);
       settleDirectFollowup(owner?.generation);
@@ -143,7 +143,11 @@ export function createProviderFleet(deps: ProviderFleetDeps) {
       const owner = turnResourceOwners.get(threadId);
       if (group) cancelGroupTurnOperations(group.id, threadId);
       revokeInternalCapabilitiesForThread(threadId);
-      await runningTurnInstance(bot, threadId)?.adapter.interruptTurn(threadId);
+      try {
+        await runningTurnInstance(bot, threadId)?.adapter.interruptTurn(threadId);
+      } catch {
+        // a dying engine must not abort teardown for the rest of the batch
+      }
       const stillOwned = groupSpeakers.get(threadId) === speaker &&
         turnResourceOwners.get(threadId)?.generation === owner?.generation;
       turns.releaseTurnResources(owner);

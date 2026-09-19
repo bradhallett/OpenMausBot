@@ -163,7 +163,7 @@ export function WorksOnSection({
             <div className="mt-3 border-t border-hairline/40 pt-3 text-[11.5px] leading-5 text-ink-secondary" aria-live="polite">
               {!profileBot.computer ? (
                 currentTeamComputer
-                  ? `Auto uses ${currentTeamComputer.name}, shared with this team's other Auto bots. Choosing another destination overrides the team default.`
+                  ? t("computer.hint.autoTeam", { name: currentTeamComputer.name })
                   : cloudBackend === "vps" && bot.autoStartVps
                   ? t("computer.hint.vpsAuto")
                   : localSelectable && !isLinux

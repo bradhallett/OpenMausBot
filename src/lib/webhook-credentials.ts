@@ -40,7 +40,7 @@ export function loadWebhookCredentials(store: Store): Record<string, WebhookCred
       Object.entries(parsed).flatMap(([id, value]): [string, WebhookCredential][] => {
         if (isCredential(value)) return [[id, value]];
         if (hasLegacyCredentialParts(value)) {
-          return [[id, { ...value, url: `${value.endpointUrl}/${encodeURIComponent(value.secret)}` }]];
+          return [[id, { ...value, url: `${value.endpointUrl.replace(/\/+$/, "")}/${encodeURIComponent(value.secret)}` }]];
         }
         return [];
       }),

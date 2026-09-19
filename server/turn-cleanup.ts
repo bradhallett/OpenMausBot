@@ -67,8 +67,12 @@ export function createTurnCleanup(deps: TurnCleanupDeps) {
     revokeInternalCapabilitiesForThread(threadId);
     // Main routes Stop to the engine that started the turn; keep this branch's
     // generation fence so a replacement turn's approvals are never closed here.
-    await (owner ? runningTurnInstance(owner, threadId) : null)?.adapter.interruptTurn(threadId);
-    if (directTurnGenerationByThread.get(threadId) === generation) closeOpenApprovals(threadId);
+    try {
+      await (owner ? runningTurnInstance(owner, threadId) : null)?.adapter.interruptTurn(threadId);
+    } finally {
+      // generation-fenced so a replacement turn's approvals are never closed here
+      if (directTurnGenerationByThread.get(threadId) === generation) closeOpenApprovals(threadId);
+    }
   }
 
   /** Stop left teammates mid-turn: say so in the transcript, name them, and

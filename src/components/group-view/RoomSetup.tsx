@@ -159,7 +159,7 @@ export function RoomSetup({ group, members }: { group: Group; members: Bot[] }) 
                 disabled={saving}
                 className="flex shrink-0 items-center gap-1.5 rounded-xl border border-hairline/50 bg-raised px-3 py-2 text-[13px] font-medium text-ink hover:bg-raised-hover disabled:opacity-50"
               >
-                <FolderOpen size={14} /> Choose
+                <FolderOpen size={14} /> {t("room.folder.choose")}
               </button>
             )}
           </div>

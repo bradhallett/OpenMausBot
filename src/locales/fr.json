@@ -1142,6 +1142,7 @@
   "computer.hint.vpsAuto": "Utilise votre VPS et le démarre au besoin.",
   "computer.hint.autoLocal": "Préfère un ordinateur cloud existant ; sinon, utilise cet ordinateur. Choisissez Cloud pour démarrer un ordinateur cloud.",
   "computer.hint.autoCloud": "Utilise un ordinateur cloud existant. Choisissez Cloud pour en créer un ou le réveiller.",
+  "computer.hint.autoTeam": "Auto utilise {name}, partagé avec les autres bots Auto de cette équipe. Choisir une autre destination remplace la destination par défaut de l'équipe.",
   "computer.hint.vm": "Un bureau Linux privé sur cet appareil, séparé de votre propre écran.",
   "computer.vmSettingsLink": "Réglages de la VM locale →",
   "computer.hint.local": "Utilise votre écran, votre souris et votre clavier.",

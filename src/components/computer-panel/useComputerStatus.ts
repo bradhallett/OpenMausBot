@@ -244,7 +244,7 @@ export function useComputerStatus(deps: ComputerStatusDeps) {
       .then((status) => {
         if (!alive) return;
         const box = decideBoxPhase({
-          computer: bot.computer,
+          computer: profileBot.computer,
           canManageCloud,
           canUseCloud: cloudSupported,
           busy: resolveBusy.current,
