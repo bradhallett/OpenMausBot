@@ -1,5 +1,5 @@
 import { CalendarClock, Globe, Monitor, Settings, Smartphone, X } from "lucide-react";
-import type { KeyboardEvent, PointerEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import { effectivePlace, isComputerPlace } from "@/lib/place";
@@ -10,7 +10,6 @@ import type { ComputerPanelView } from "@/lib/computer-panel-view";
  * dot. */
 export function PanelHeader({
   padClass,
-  panelWidth,
   panelMinWidth,
   panelMaxWidth,
   panelView,
@@ -28,7 +27,6 @@ export function PanelHeader({
   onResizeKeyDown,
 }: {
   padClass: string | undefined;
-  panelWidth: number;
   panelMinWidth: number;
   panelMaxWidth: number;
   panelView: ComputerPanelView;
@@ -45,22 +43,39 @@ export function PanelHeader({
   onResizeEnd: (event: PointerEvent<HTMLDivElement>) => void;
   onResizeKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
 }) {
+  const separatorRef = useRef<HTMLDivElement>(null);
+  const [separatorWidth, setSeparatorWidth] = useState<number | null>(null);
+  useEffect(() => {
+    // The width state lives with the panel; mirror the styled panel only
+    // so the slider semantics stay truthful for assistive tech.
+    const panel = separatorRef.current?.closest("aside");
+    if (!panel) return;
+    const read = () => setSeparatorWidth(panel.offsetWidth);
+    read();
+    const observer = new ResizeObserver(read);
+    observer.observe(panel);
+    return () => observer.disconnect();
+  }, []);
   return (
     <>
       <div
+        ref={separatorRef}
         role="separator"
         aria-orientation="vertical"
         aria-label={t("computer.resizeAria")}
         aria-valuemin={panelMinWidth}
         aria-valuemax={panelMaxWidth}
-        aria-valuenow={panelWidth}
+        aria-valuenow={separatorWidth ?? undefined}
         tabIndex={0}
-        onKeyDown={onResizeKeyDown}
+        onKeyDown={(event) => {
+          if (separatorWidth === null) return;
+          onResizeKeyDown(event);
+        }}
         onPointerDown={onResizeStart}
         onPointerMove={onResizeMove}
         onPointerUp={onResizeEnd}
         onPointerCancel={onResizeEnd}
-        className="absolute inset-y-0 left-0 z-10 w-1.5 cursor-col-resize hover:bg-accent/40"
+        className="absolute inset-y-0 left-0 z-10 w-1.5 cursor-col-resize hover:bg-accent/40 focus-visible:bg-accent/60"
       />
       {/* Header */}
       <div className={cn("flex items-center justify-between px-4 py-3", padClass)}>

@@ -277,7 +277,6 @@ export function ComputerPanel({
         onOpenBotSettings={openBotSettings}
         onSelectBrowser={selectBrowserView}
         onClose={closePanel}
-        panelWidth={panelWidth}
         panelMinWidth={panelMinWidth}
         panelMaxWidth={panelMaxWidth}
         onResizeStart={onResizeStart}

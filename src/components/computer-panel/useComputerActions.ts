@@ -141,7 +141,9 @@ export function useComputerActions({
         if (kind === "sleep") {
           setResolvedComputerSelection(null);
           setBoxState(cloudBackend === "vps" ? "stopped" : "archived");
-          if (cloudBackend === "vps") setPhase("vps-stopped");
+          // The deciders map an archived box to the sleeping observation
+          // phase; re-resolving would see "ensure-box" and wake it again.
+          else setPhase("show-sleeping-box");
         }
       })
       .catch((e) => {
