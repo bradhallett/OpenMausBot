@@ -35,9 +35,17 @@ export function NewRoomPanel({ onClose }: { onClose: () => void }) {
       className="fixed inset-0 z-40 flex items-center justify-center bg-black/40"
       onMouseDown={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div className="w-[340px] rounded-2xl border border-hairline/50 bg-card p-4 shadow-2xl">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="new-room-title"
+        className="w-[340px] rounded-2xl border border-hairline/50 bg-card p-4 shadow-2xl"
+        onKeyDown={(e) => {
+          if (e.key === "Escape") onClose();
+        }}
+      >
         <div className="mb-3 flex items-center justify-between gap-2">
-          <div className="text-[15px] font-semibold text-ink">{t("sidebar.newChannel.title")}</div>
+          <div id="new-room-title" className="text-[15px] font-semibold text-ink">{t("sidebar.newChannel.title")}</div>
           <button type="button" onClick={onClose} aria-label={t("common.close")} className="rounded p-1 text-ink-secondary hover:bg-raised hover:text-ink"><X size={16} /></button>
         </div>
         <input
@@ -46,7 +54,7 @@ export function NewRoomPanel({ onClose }: { onClose: () => void }) {
           value={name}
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") create();
+            if (e.key === "Enter" && !e.nativeEvent.isComposing) create();
             if (e.key === "Escape") onClose();
           }}
           placeholder={t("sidebar.newChannel.name")}
@@ -57,7 +65,7 @@ export function NewRoomPanel({ onClose }: { onClose: () => void }) {
           maxLength={60}
           onChange={(e) => setSection(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") create();
+            if (e.key === "Enter" && !e.nativeEvent.isComposing) create();
             if (e.key === "Escape") onClose();
           }}
           placeholder={t("sidebar.newChannel.context")}

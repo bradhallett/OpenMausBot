@@ -763,6 +763,9 @@ export function createEventFold(deps: EventFoldDeps) {
             if (broken) reportIncident({ kind: "failed", bot: broken, threadId: event.threadId, detail: event.stopReason?.trim() || "the run ended without a result" });
           }
           const lastReported = turnUsage.get(event.threadId);
+          // the context figure: what the last model call's prompt held, with
+          // the window from the driver or, failing that, the model's family
+          const lastContext = turnContext.get(event.threadId);
           turnUsage.delete(event.threadId);
           turnContext.delete(event.threadId);
           // group turns run on the room's thread — the speaking bot's task
@@ -805,10 +808,6 @@ export function createEventFold(deps: EventFoldDeps) {
             // (turn.completed.usage) is authoritative; a driver that only
             // streams the running indicator falls back to its last value.
             const tokens = event.usage ?? lastReported;
-            // the context figure: what the last model call's prompt held, with
-            // the window from the driver or, failing that, the model's family
-            const lastContext = turnContext.get(event.threadId);
-            turnContext.delete(event.threadId);
             const contextModel = store.taskByThread(bot.id, event.threadId)?.modelSelection?.model ?? bot.modelSelection.model;
             store.addTaskUsage(bot.id, event.threadId, {
               input: tokens?.input,

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Folder, FolderOpen } from "lucide-react";
-import { api, type Group } from "@/state/store";
+import { api, useStore, type Group } from "@/state/store";
 import { shortPath } from "@/lib/short-path";
 import { t } from "@/lib/i18n";
 import { useDesktopCapabilities } from "../DesktopCapabilities";
@@ -14,6 +14,7 @@ import { useDesktopCapabilities } from "../DesktopCapabilities";
  * rejected folder must not stick in local state. */
 export function RoomWorkingFolder({ group }: { group: Group }) {
   const { capabilities } = useDesktopCapabilities();
+  const { dispatch } = useStore();
   const home = capabilities.host.homeDir;
   const [draft, setDraft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -27,7 +28,11 @@ export function RoomWorkingFolder({ group }: { group: Group }) {
     setSaving(true);
     setError(null);
     try {
-      await api(`/api/groups/${group.id}`, { method: "PATCH", body: JSON.stringify({ cwd }) });
+      const res = await api(`/api/groups/${group.id}`, { method: "PATCH", body: JSON.stringify({ cwd }) });
+      const updated = res?.group;
+      if (updated && typeof updated.cwd === "string") {
+        dispatch({ type: "patchGroup", groupId: group.id, patch: { cwd: updated.cwd } });
+      }
       setDraft(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
