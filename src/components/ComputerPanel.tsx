@@ -268,6 +268,7 @@ export function ComputerPanel({
     >
       <PanelHeader
         padClass={padClass}
+        panelWidth={panelWidth}
         panelView={panelView}
         selectPanelView={selectPanelView}
         placeLive={placeLive}
