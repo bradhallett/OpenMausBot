@@ -47,6 +47,7 @@ export function BotDeleteMenuItem({ deleting, onClick }: { deleting: boolean; on
     <button
       type="button"
       disabled={deleting}
+      role="menuitem"
       aria-busy={deleting || undefined}
       onClick={onClick}
       title={deleting ? t("sidebar.bot.deleteCheckingTitle") : undefined}

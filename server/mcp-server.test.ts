@@ -107,7 +107,7 @@ describe("MCP JSON-RPC protocol", () => {
     expect(parsePositiveLimit(50)).toBe(50);
     expect(parsePositiveLimit(7.9)).toBe(7);
     expect(parsePositiveLimit(999)).toBe(200);
-    for (const invalid of ["50", true, 0, -3, Number.NaN, Number.POSITIVE_INFINITY]) {
+    for (const invalid of ["50", true, 0, -3, 0.5, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(() => parsePositiveLimit(invalid)).toThrow(ToolInputError);
     }
   });
@@ -394,7 +394,7 @@ describe("MCP tool execution", () => {
     const fetcher = vi.fn();
     await expect(handleToolCall("edit_bot_message", {
       bot_id: "bot-1", message_id: "m-9", text: "   ",
-    }, fetcher as never)).rejects.toThrow("text is required");
+    }, fetcher as never)).rejects.toThrow("text must not be empty");
     expect(fetcher).not.toHaveBeenCalled();
   });
 

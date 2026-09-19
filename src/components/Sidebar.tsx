@@ -927,6 +927,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
         <SectionPicker
           current={state.bots.find((b) => b.id === sectionPicker.botId)?.section}
           anchor={sectionPicker}
+          triggerRef={sidebarRef}
           onClose={() => setSectionPicker(null)}
           onAssign={(section) => {
             if (!remoteClient) {
@@ -954,6 +955,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
         <SectionPicker
           current={state.groups.find((g) => g.id === roomSectionPicker.groupId)?.section}
           anchor={roomSectionPicker}
+          triggerRef={sidebarRef}
           onClose={() => setRoomSectionPicker(null)}
           onAssign={(section) =>
             dispatch({ type: "patchGroup", groupId: roomSectionPicker.groupId, patch: { section } })

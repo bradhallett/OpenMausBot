@@ -25,7 +25,7 @@ export class ToolInputError extends Error {}
 
 export function parsePositiveLimit(raw: unknown, fallback = 30, maximum = 200): number {
   if (raw === undefined) return fallback;
-  if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) throw new ToolInputError("limit must be a positive number");
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 1) throw new ToolInputError("limit must be at least 1");
   return Math.min(Math.floor(raw), maximum);
 }
 

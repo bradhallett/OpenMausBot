@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ClipboardCopy, FolderPlus, Pencil, Trash2, X } from "lucide-react";
 import { useStore } from "@/state/store";
@@ -19,6 +19,16 @@ export function RoomContextMenu({
   const group = state.groups.find((g) => g.id === menu.groupId);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(group?.name ?? "");
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    // menus take focus on open and hand it back to the trigger on close
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    containerRef.current?.querySelector<HTMLButtonElement>("button:not([disabled])")?.focus();
+    return () => {
+      if (previous && document.activeElement === document.body) previous.focus();
+    };
+  }, []);
 
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
@@ -42,14 +52,15 @@ export function RoomContextMenu({
     if (name) dispatch({ type: "patchGroup", groupId: group.id, patch: { name } });
     onClose();
   };
-  const top = Math.min(menu.y, window.innerHeight - 204);
-  const left = Math.min(menu.x, window.innerWidth - 240);
+  const top = Math.max(8, Math.min(menu.y, window.innerHeight - 204));
+  const left = Math.max(8, Math.min(menu.x, window.innerWidth - 240));
   return createPortal(
     <div
       data-room-menu
       data-sidebar
+      ref={containerRef}
       style={{ top, left }}
-      className="fixed z-40 w-[228px] overflow-hidden rounded-xl border border-hairline/50 bg-menu py-1.5 shadow-2xl shadow-black/60"
+      className="fixed z-40 max-h-[calc(100dvh-16px)] w-[228px] max-w-[calc(100vw-16px)] overflow-y-auto rounded-xl border border-hairline/50 bg-menu py-1.5 shadow-2xl shadow-black/60"
     >
       {!remoteClient && (renaming ? (
         <div className="flex items-center gap-1 px-2 py-1">
