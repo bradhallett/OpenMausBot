@@ -285,6 +285,37 @@ describe("server-owned browser MCP runtime", () => {
     const after = await value.agentRpc("s", spec(), "tools/list", {}) as { pid: number };
     expect(after.pid).not.toBe(before.pid);
   });
+
+  it.each([false, true])("retires an idle MCP client without killing its browser descendant (ignores EOF: %s)", async (ignoresEof) => {
+    // Windows taskkill /T includes even a daemon with its own process group.
+    // This inert descendant models that ownership boundary on every platform.
+    // unref alone does not detach a Windows child from its parent's console.
+    // Keep the POSIX group shared so an accidental group kill still fails here.
+    const fake = `
+      const browser = require('node:child_process').spawn(process.execPath,
+        ['-e', 'setInterval(() => {}, 1000)'],
+        { stdio: 'ignore', detached: process.platform === 'win32', windowsHide: true });
+      browser.unref();
+      ${ignoresEof ? "setInterval(() => {}, 1000);" : ""}
+      require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
+        const m = JSON.parse(line);
+        if (!m.id) return;
+        const result = m.method === 'initialize' ? { protocolVersion: '2024-11-05' }
+          : { tools: [], browserPid: browser.pid, transportPid: process.pid };
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: m.id, result }) + '\\n');
+      });
+    `;
+    const value = runtime({ idleMs: 40 });
+    const launch = { command: process.execPath, args: ["-e", fake], env: {} };
+    const first = await value.agentRpc("idle", launch, "tools/list", {}) as { browserPid: number; transportPid: number };
+    try {
+      expect(() => process.kill(first.browserPid, 0)).not.toThrow();
+      await vi.waitFor(() => expect(() => process.kill(first.transportPid, 0)).toThrow(), { timeout: 2_000, interval: 30 });
+      expect(() => process.kill(first.browserPid, 0)).not.toThrow();
+    } finally {
+      try { process.kill(first.browserPid, "SIGKILL"); } catch { /* fixture exited */ }
+    }
+  });
 });
 
 describe("browser MCP shaping at the runtime boundary", () => {
