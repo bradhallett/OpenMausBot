@@ -262,7 +262,9 @@ describe("Codex server-owned device authentication", () => {
     const controller = create("status-hang");
     const starting = controller.start();
     const rejection = expect(starting).rejects.toThrow("cancelled");
-    await expect.poll(() => existsSync(join(home, "calls.jsonl")), { timeout: 5000 }).toBe(true);
+    // Wait out a slow first spawn exactly as long as the controller's own
+    // startup window does, so this poll cannot expire before cancel matters.
+    await expect.poll(() => existsSync(join(home, "calls.jsonl")), { timeout: 10_000 }).toBe(true);
     await controller.cancel();
     await rejection;
     // The default windows tolerate slow spawns; keep one deliberately short
