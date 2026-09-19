@@ -173,10 +173,38 @@ export function applyTeamSetup(ctx: StoreContext, request: TeamSetupRequest): Te
   return result;
 }
 
+/** Workspace, skill-state and the bot folder go with the bot — shared by
+ * the first deletion attempt and by a retry that finds the record already
+ * gone. */
+function removeBotArtifacts(id: string): void {
+  // the bot's workspace (files + memory) goes with it — same rule as its
+  // transcripts: deleting a bot deletes what it knew
+  try {
+    rmSync(workspaceDir(id), { recursive: true, force: true });
+  } catch {}
+  // Generated task-workspaces are project files, not bot memory. Keep
+  // them (and user-selected cwd folders) when deleting conversations.
+  // Approval state deliberately lives outside the bot-writable workspace.
+  // It still belongs to the bot, so deleting the bot must remove staged
+  // proposals, manifests, and native-link ownership records with it.
+  try {
+    rmSync(join(DATA_DIR, "skill-state", id), { recursive: true, force: true });
+  } catch {}
+  // The bot folder (SOUL.md mirror) is the bot's too.
+  removeBotFolder(id);
+}
+
 export function deleteBot(ctx: StoreContext, id: string, setupRequest?: TeamSetupRequest): boolean {
-  flushPendingThreadDeletions(ctx, id);
+  const resumed = flushPendingThreadDeletions(ctx, id);
   const record = ctx.bot(id);
-  if (!record) return false;
+  if (!record) {
+    // The record is durably gone; a non-empty flush means a prior attempt
+    // died mid-deletion. Finish its cleanup and still notify clients.
+    if (resumed.length === 0) return false;
+    removeBotArtifacts(id);
+    ctx.emit({ type: "bot.deleted", botId: id });
+    return false;
+  }
   let nextBots = ctx.bots.filter((b) => b.id !== id);
   if (setupRequest) {
     const chief = ctx.bot(setupRequest.botId);
@@ -204,22 +232,10 @@ export function deleteBot(ctx: StoreContext, id: string, setupRequest?: TeamSetu
   for (const threadId of new Set(threadIds)) {
     ctx.deleteThreadRecord(threadId);
   }
+  // If this throws, the tombstone stays staged: the record is already gone,
+  // so a retry takes the resumed branch above and finishes this cleanup.
+  removeBotArtifacts(id);
   clearPendingThreadDeletions(id, threadIds);
-  // the bot's workspace (files + memory) goes with it — same rule as its
-  // transcripts: deleting a bot deletes what it knew
-  try {
-    rmSync(workspaceDir(id), { recursive: true, force: true });
-  } catch {}
-  // Generated task-workspaces are project files, not bot memory. Keep
-  // them (and user-selected cwd folders) when deleting conversations.
-  // Approval state deliberately lives outside the bot-writable workspace.
-  // It still belongs to the bot, so deleting the bot must remove staged
-  // proposals, manifests, and native-link ownership records with it.
-  try {
-    rmSync(join(DATA_DIR, "skill-state", id), { recursive: true, force: true });
-  } catch {}
-  // The bot folder (SOUL.md mirror) is the bot's too.
-  removeBotFolder(id);
   ctx.emit({ type: "bot.deleted", botId: id });
   return true;
 }

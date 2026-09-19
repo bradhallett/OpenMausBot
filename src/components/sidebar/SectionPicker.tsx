@@ -13,6 +13,7 @@ export function SectionPicker({
   anchor,
   onClose,
   onAssign,
+  triggerRef,
 }: {
   /** the target's current section; undefined = none */
   current: string | undefined;
@@ -20,6 +21,8 @@ export function SectionPicker({
   onClose: () => void;
   /** "" clears — the server drops an empty section */
   onAssign: (section: string) => void;
+  /** element to return focus to when the picker closes */
+  triggerRef?: { current: HTMLElement | null };
 }) {
   const { state } = useStore();
   const [name, setName] = useState("");
@@ -39,6 +42,12 @@ export function SectionPicker({
       window.removeEventListener("blur", onClose);
     };
   }, [onClose]);
+
+  useEffect(() => {
+    return () => {
+      if (triggerRef?.current && document.activeElement === document.body) triggerRef.current.focus();
+    };
+  }, [triggerRef]);
 
   // Hidden bots can carry a stale assignment; don't offer it as a context.
   // Channels and bots share one namespace, so Work or Personal can hold both.
@@ -62,6 +71,8 @@ export function SectionPicker({
   return (
     <div
       data-section-picker
+      role="dialog"
+      aria-label={t("sidebar.section.moveToContext")}
       style={{ top, left, maxHeight }}
       className="fixed z-40 max-w-[calc(100vw-16px)] w-[236px] overflow-y-auto rounded-xl border border-hairline/50 bg-menu py-2 shadow-2xl shadow-black/60"
     >

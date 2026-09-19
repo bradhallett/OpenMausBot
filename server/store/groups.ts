@@ -102,22 +102,32 @@ export function patchGroup(ctx: StoreContext, id: string, patch: Partial<Pick<Gr
 }
 
 export function deleteGroup(ctx: StoreContext, id: string): boolean {
+  const resumed = flushPendingThreadDeletions(ctx, id);
   const record = ctx.group(id);
-  if (!record) return false;
-  const index = ctx.groups.indexOf(record);
-  // Phase 1: snapshot every owned thread before anything is deleted, so a
-  // partway failure can restore the full retryable state.
+  if (!record) {
+    // No record and nothing flushed: nothing to delete. A non-empty flush
+    // means a prior attempt removed the group and died before finishing
+    // its thread cleanup — this retry completes the finalization and still
+    // notifies clients.
+    if (resumed.length === 0) return false;
+    ctx.emit({ type: "group.deleted", groupId: id });
+    return true;
+  }
+  // Every thread the group owns, deduped, staged durably BEFORE the group
+  // leaves groups.json: a crash mid-delete leaves the tombstone behind, so
+  // the next retry takes the no-record branch above and finishes.
   const ownedThreads = [...new Set([record.threadId, ...(record.tasks ?? []).map((task) => task.threadId)])];
+  stagePendingThreadDeletions(id, ownedThreads);
+  const index = ctx.groups.indexOf(record);
+  // Snapshot the in-memory threads so a failure inside this call restores the
+  // full retryable shape; the durable tombstone above keeps a crash between
+  // phases retryable as well.
   const snapshots = ownedThreads.map((threadId) => ({ threadId, state: ctx.threads.get(threadId) }));
-  // Phase 2: only now unlink transcripts, and never remove the group until
-  // every thread deletion has succeeded.
   try {
     for (const { threadId } of snapshots) {
       ctx.deleteThreadRecord(threadId);
     }
   } catch (error) {
-    // Threads whose deletion already ran are restored from the snapshot, so
-    // the group and its full thread list stay retryable.
     for (const { threadId, state } of snapshots) {
       if (state) ctx.threads.set(threadId, state);
     }
@@ -128,10 +138,12 @@ export function deleteGroup(ctx: StoreContext, id: string): boolean {
     ctx.saveGroups();
   } catch (error) {
     // The in-memory group is restored so groups.json stays authoritative and a
-    // retry can find it.
+    // retry can find it; the tombstone stays staged because the threads are
+    // already durably gone.
     ctx.groups.splice(index, 0, record);
     throw error;
   }
+  clearPendingThreadDeletions(id, ownedThreads);
   ctx.emit({ type: "group.deleted", groupId: id });
   return true;
 }
@@ -270,6 +282,19 @@ export function deleteGroupTask(ctx: StoreContext, groupId: string, threadId: st
   const record = ctx.group(groupId);
   if (!record || record.dm || !record.tasks || record.tasks.length < 2) return null;
   if (!record.tasks.some((task) => task.threadId === threadId)) return null;
+  // The filter and active-thread reassignment below reshape the record;
+  // snapshot the pre-delete shape so a failed save restores it exactly.
+  const prev: {
+    tasks: GroupTaskRecord[];
+    threadId: string;
+    pinnedCwd: string | null | undefined;
+    pinnedMessageId: string | undefined;
+  } = {
+    tasks: record.tasks,
+    threadId: record.threadId,
+    pinnedCwd: record.pinnedCwd,
+    pinnedMessageId: record.pinnedMessageId,
+  };
   record.tasks = record.tasks.filter((task) => task.threadId !== threadId);
   if (record.threadId === threadId) {
     const next = record.tasks[0]!;
@@ -281,6 +306,10 @@ export function deleteGroupTask(ctx: StoreContext, groupId: string, threadId: st
   try {
     ctx.saveGroups();
   } catch (error) {
+    record.tasks = prev.tasks;
+    record.threadId = prev.threadId;
+    record.pinnedCwd = prev.pinnedCwd;
+    record.pinnedMessageId = prev.pinnedMessageId;
     clearPendingThreadDeletions(groupId, [threadId]);
     throw error;
   }

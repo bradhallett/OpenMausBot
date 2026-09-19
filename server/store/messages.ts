@@ -488,13 +488,17 @@ export function clearPendingThreadDeletions(key: string, threadIds: string[]): v
   savePendingThreadDeletions(record);
 }
 
-export function flushPendingThreadDeletions(ctx: StoreContext, key: string): void {
+/** Finish any pending deletions for `key`; returns the ids whose cleanup
+ * this call completed, so a caller that finds its owner record already
+ * gone can tell a resumed finalization from a plain no-op. */
+export function flushPendingThreadDeletions(ctx: StoreContext, key: string): string[] {
   const threadIds = pendingThreadDeletions()[key];
-  if (!threadIds?.length) return;
+  if (!threadIds?.length) return [];
   for (const threadId of threadIds) {
     ctx.deleteThreadRecord(threadId);
   }
   clearPendingThreadDeletions(key, threadIds);
+  return [...threadIds];
 }
 
 /** The first thing the human asked in a thread — a task's natural name. */

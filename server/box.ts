@@ -446,20 +446,36 @@ export async function runCommand(cfg: AppConfig, boxId: string, command: string,
 //      networks; answers {provisioning:true} first, so poll for the URL.
 //   2) WebRTC stream (POST /desktop) as fallback — STUN-only, can hang.
 // The desktopUrl stored on the box object is NOT usable on its own.
+/** A desktop URL we minted must be a clean https origin-less viewer URL:
+ * reject anything the Box API returned that is not https or carries
+ * credentials, so a compromised/misbehaving response cannot redirect the
+ * viewer somewhere hostile. */
+function validDesktopUrl(value: unknown): string | null {
+  if (typeof value !== "string" || !value) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return null;
+  }
+  if (parsed.username || parsed.password) return null;
+  if (parsed.protocol !== "https:") return null;
+  return value;
+}
+
 async function mintDesktopUrl(cfg: AppConfig, boxId: string, { vncBudgetMs = 60_000 } = {}) {
   assertBoxNotDeleting(boxId);
   const t0 = Date.now();
   while (Date.now() - t0 < vncBudgetMs) {
     assertBoxNotDeleting(boxId);
     const { body } = await boxJson(cfg, `/boxes/${boxId}/desktop?vnc=1`, { method: "POST" });
-    const url = body?.desktopUrl ?? body?.url;
-    if (typeof url === "string" && url) return url;
+    const url = validDesktopUrl(body?.desktopUrl ?? body?.url);
+    if (url) return url;
     if (!body?.provisioning) break;
     await new Promise((r) => setTimeout(r, 3000));
   }
   const { body } = await boxJson(cfg, `/boxes/${boxId}/desktop`, { method: "POST" });
-  const url = body?.desktopUrl ?? body?.url;
-  return typeof url === "string" && url ? url : null;
+  return validDesktopUrl(body?.desktopUrl ?? body?.url);
 }
 
 async function waitReady(cfg: AppConfig, boxId: string, budgetMs = 90_000) {

@@ -87,8 +87,7 @@ export const handlers = {
   async edit_bot_message(args: Json, ctx: ToolContext): Promise<unknown> {
     const botId = idArg(args, "bot_id");
     const messageId = idArg(args, "message_id");
-    const text = String(args.text ?? "").trim();
-    if (!text) throw new Error("text is required");
+    const text = stringArg(args, "text", { trim: true, max: 100_000 });
     const current = await fleet(ctx.fetch);
     const bot = records(current.bots).find((candidate) => candidate.id === botId);
     if (!bot) throw new Error(`Bot not found: ${botId}`);
