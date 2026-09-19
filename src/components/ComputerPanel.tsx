@@ -268,6 +268,7 @@ export function ComputerPanel({
     >
       <PanelHeader
         padClass={padClass}
+        panelWidth={panelWidth}
         panelView={panelView}
         selectPanelView={selectPanelView}
         placeLive={placeLive}
@@ -277,7 +278,6 @@ export function ComputerPanel({
         onOpenBotSettings={openBotSettings}
         onSelectBrowser={selectBrowserView}
         onClose={closePanel}
-        panelWidth={panelWidth}
         panelMinWidth={panelMinWidth}
         panelMaxWidth={panelMaxWidth}
         onResizeStart={onResizeStart}
