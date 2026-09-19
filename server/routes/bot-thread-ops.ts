@@ -187,7 +187,7 @@ export function createBotThreadOpsRoutes(deps: {
       }
       const sendId = parseSendId(body.sendId);
       const replyTo = resolveReplyTarget(threadId, body.replyToId);
-      const receipt = await sendSequencer.run(
+      const receiptPromise = sendSequencer.run(
         sendId ? `bot:${bot.id}:${threadId}:${sendId}` : undefined,
         sendFingerprint(text, replyTo?.id),
         async () => {
@@ -294,8 +294,19 @@ export function createBotThreadOpsRoutes(deps: {
           return startOrQueueDirectMessage(bot.id, threadId, text, replyTo, sendId);
         },
       );
-      json(res, 202, receipt);
-      return true;
+      try {
+        json(res, 202, await receiptPromise);
+        return true;
+      } catch (error) {
+        // The steer-or-queue decision inside the receipt callback can refuse
+        // with an HTTP status (a busy thread's queue is bounded): answer it
+        // from this route, like the spend-cap check above.
+        if (typeof (error as { status?: unknown })?.status === "number") {
+          json(res, (error as { status: number }).status, { error: error instanceof Error ? error.message : String(error) });
+          return true;
+        }
+        throw error;
+      }
     }
 
     m = path.match(/^\/api\/bots\/([\w-]+)\/queue\/([\w-]+)$/);

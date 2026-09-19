@@ -213,7 +213,19 @@ async function startOrQueueOpenedThread(
   // one); the drain's own block check already waits for it, so the words
   // queue here rather than bounce.
   if (botAtThreadCapacity(botId) || activeGroupTurnForBot(botId)) {
-    queueSteeredMessage(botId, threadId, text, { reason: "capacity", unattended, peerAsk });
+    try {
+      queueSteeredMessage(botId, threadId, text, { reason: "capacity", unattended, peerAsk });
+    } catch (error) {
+      // A full queue refused the words, so they were not kept: report the
+      // failure the same way the refused start below reports itself.
+      const why = error instanceof Error ? error.message : String(error);
+      store.appendMessage(threadId, {
+        role: "bot",
+        kind: "activity",
+        tool: { name: `error: this thread could not start — ${why.slice(0, 120)}`, ok: false },
+      });
+      return { state: "failed", error: why };
+    }
     return { state: "queued", position: queuedThreadPosition(botId, threadId) ?? 1 };
   }
   try {
