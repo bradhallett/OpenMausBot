@@ -12,7 +12,9 @@ import { createCompanyBackupSchedule } from "./company-backup-schedule.mjs";
 // importing Electron main (which would start the app). All IO, connection state,
 // and transfer results are synthetic; these tests do not prove archive transport,
 // OS keychain storage, or a renderer workflow.
-const moduleSource = readFileSync(new URL("./main/company-backup.mjs", import.meta.url), "utf8");
+// A Windows checkout under core.autocrlf hands us CRLF, and the section anchors
+// below slice on literal "\n" boundaries, so normalise the source first.
+const moduleSource = readFileSync(new URL("./main/company-backup.mjs", import.meta.url), "utf8").replaceAll("\r\n", "\n");
 function section(start, end, includeEnd = false) {
   const from = moduleSource.indexOf(start);
   const to = moduleSource.indexOf(end, from + start.length);
