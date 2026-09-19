@@ -1250,7 +1250,6 @@ const {
 } = createLocalVmTurnPrep({
   lateBound: {
     broadcast: (payload) => broadcast(payload),
-    getLocalVmProvisionBusy: () => localVmProvisionBusy,
     localVmProvisionBusy: () => localVmProvisionBusy,
     setLocalVmProvisionBusy: (value) => { localVmProvisionBusy = value; },
   },
