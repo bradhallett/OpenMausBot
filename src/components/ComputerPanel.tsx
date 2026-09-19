@@ -53,7 +53,7 @@ export function ComputerPanel({
     onResizeStart,
     onResizeMove,
     onResizeEnd,
-    onResizeKeyDown,
+    onResizeBy,
   } = usePanelWidth();
   const { state, dispatch } = useStore();
   const { capabilities, ready: capabilitiesReady } = useDesktopCapabilities();
@@ -277,13 +277,12 @@ export function ComputerPanel({
         onOpenBotSettings={openBotSettings}
         onSelectBrowser={selectBrowserView}
         onClose={closePanel}
-        panelWidth={panelWidth}
         panelMinWidth={panelMinWidth}
         panelMaxWidth={panelMaxWidth}
         onResizeStart={onResizeStart}
         onResizeMove={onResizeMove}
         onResizeEnd={onResizeEnd}
-        onResizeKeyDown={onResizeKeyDown}
+        onResizeBy={onResizeBy}
       />
 
       {panelView === "routines" ? (
