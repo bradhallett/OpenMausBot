@@ -110,7 +110,7 @@ export async function prepareTurnDispatch({
       // and skip the frame while another thread holds it.
       browserCapture = async () => {
         const owner = turnResourceOwners.get(threadId);
-        if (!owner || !claimTurnResource(owner, \`browser:\${session}\`)) throw new Error("another thread is using this browser");
+        if (!owner || !claimTurnResource(owner, `browser:`{session})) throw new Error("another thread is using this browser");
         return browserRuntime.withAgentAction(session, () => agentBrowserFrame(frame));
       };
     }
