@@ -638,6 +638,7 @@ const handleComputers = createComputersRoutes({
   localVmTargetForBot,
   localVmInventoryPayload,
   localVmLifecycleBusy,
+  localVmActiveThreads,
   LOCAL_VM_IDLE_MS,
   computerPreviewBot,
   computerPreviewSurface,

@@ -1,9 +1,12 @@
 import { CalendarClock, Globe, Monitor, Settings, Smartphone, X } from "lucide-react";
-import type { PointerEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import { effectivePlace, isComputerPlace } from "@/lib/place";
 import type { ComputerPanelView } from "@/lib/computer-panel-view";
+import { PANEL_MAX_WIDTH, PANEL_MIN_WIDTH } from "./usePanelWidth";
+
+const PANEL_RESIZE_STEP = 40;
 
 /** The panel's chrome: the resize handle, the settings/close buttons, and
  * the tab strip for Computer/Routines/Android/Browser with each live-place
@@ -22,6 +25,7 @@ export function PanelHeader({
   onResizeStart,
   onResizeMove,
   onResizeEnd,
+  onResizeBy,
 }: {
   padClass: string | undefined;
   panelView: ComputerPanelView;
@@ -36,18 +40,45 @@ export function PanelHeader({
   onResizeStart: (event: PointerEvent<HTMLDivElement>) => void;
   onResizeMove: (event: PointerEvent<HTMLDivElement>) => void;
   onResizeEnd: (event: PointerEvent<HTMLDivElement>) => void;
+  onResizeBy: (delta: number) => void;
 }) {
+  const separatorRef = useRef<HTMLDivElement>(null);
+  const [separatorWidth, setSeparatorWidth] = useState<number | null>(null);
+  useEffect(() => {
+    // The width state lives in usePanelWidth; mirror the styled panel only
+    // so the slider semantics stay truthful for assistive tech.
+    const panel = separatorRef.current?.closest("aside");
+    if (!panel) return;
+    const read = () => setSeparatorWidth(panel.offsetWidth);
+    read();
+    const observer = new ResizeObserver(read);
+    observer.observe(panel);
+    return () => observer.disconnect();
+  }, []);
+  const onSeparatorKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    const widen = event.key === "ArrowLeft" ? PANEL_RESIZE_STEP : event.key === "ArrowRight" ? -PANEL_RESIZE_STEP : null;
+    if (widen === null || separatorWidth === null) return;
+    event.preventDefault();
+    onResizeBy(widen);
+  };
   return (
     <>
       <div
+        ref={separatorRef}
         role="separator"
         aria-orientation="vertical"
         aria-label={t("computer.resizeAria")}
+        aria-valuemin={PANEL_MIN_WIDTH}
+        aria-valuemax={PANEL_MAX_WIDTH}
+        aria-valuenow={separatorWidth ?? undefined}
+        tabIndex={0}
+        onKeyDown={onSeparatorKeyDown}
         onPointerDown={onResizeStart}
         onPointerMove={onResizeMove}
         onPointerUp={onResizeEnd}
         onPointerCancel={onResizeEnd}
-        className="absolute inset-y-0 left-0 z-10 w-1.5 cursor-col-resize hover:bg-accent/40"
+        className="absolute inset-y-0 left-0 z-10 w-1.5 cursor-col-resize hover:bg-accent/40 focus-visible:bg-accent/60"
       />
       {/* Header */}
       <div className={cn("flex items-center justify-between px-4 py-3", padClass)}>

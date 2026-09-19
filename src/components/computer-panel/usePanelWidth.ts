@@ -1,8 +1,8 @@
 import { useRef, useState, type PointerEvent } from "react";
 
 const PANEL_WIDTH_KEY = "omb-computer-panel-width";
-const PANEL_MIN_WIDTH = 360;
-const PANEL_MAX_WIDTH = 960;
+export const PANEL_MIN_WIDTH = 360;
+export const PANEL_MAX_WIDTH = 960;
 const PANEL_DEFAULT_WIDTH = 400;
 
 function readPanelWidth(): number {
@@ -20,6 +20,13 @@ function readPanelWidth(): number {
 export function usePanelWidth() {
   const [panelWidth, setPanelWidth] = useState(readPanelWidth);
   const resizeFrom = useRef<{ x: number; width: number } | null>(null);
+  const persist = (width: number) => {
+    try {
+      localStorage.setItem(PANEL_WIDTH_KEY, String(width));
+    } catch {
+      /* storage blocked — width lives for this session */
+    }
+  };
   const onResizeStart = (event: PointerEvent<HTMLDivElement>) => {
     resizeFrom.current = { x: event.clientX, width: panelWidth };
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -33,11 +40,16 @@ export function usePanelWidth() {
     if (!resizeFrom.current) return;
     resizeFrom.current = null;
     event.currentTarget.releasePointerCapture(event.pointerId);
-    try {
-      localStorage.setItem(PANEL_WIDTH_KEY, String(panelWidth));
-    } catch {
-      /* storage blocked — width lives for this session */
-    }
+    persist(panelWidth);
   };
-  return { panelWidth, onResizeStart, onResizeMove, onResizeEnd };
+  /** Keyboard resize: the same clamp and stored preference the pointer flow
+   * uses, so arrow-key changes stay in React state like a drag would. */
+  const onResizeBy = (delta: number) => {
+    setPanelWidth((current) => {
+      const next = Math.min(PANEL_MAX_WIDTH, Math.max(PANEL_MIN_WIDTH, current + delta));
+      persist(next);
+      return next;
+    });
+  };
+  return { panelWidth, onResizeStart, onResizeMove, onResizeEnd, onResizeBy };
 }

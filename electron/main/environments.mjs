@@ -99,7 +99,7 @@ export function sharingController() {
         if (!response.ok) throw new Error("This computer is in use locally or held by a person. Wait, then observe it again before acting.");
       };
       await lease("acquire");
-      return { renew: () => lease("acquire"), release: () => lease("release") };
+      return { renew: () => lease("renew"), release: () => lease("release") };
     },
   });
   return computerSharing;

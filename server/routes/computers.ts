@@ -83,6 +83,7 @@ export function createComputersRoutes(deps: {
   localVmTargetForBot: ComputerLifecycle["localVmTargetForBot"];
   localVmInventoryPayload: ComputerLifecycle["localVmInventoryPayload"];
   localVmLifecycleBusy: ComputerLifecycle["localVmLifecycleBusy"];
+  localVmActiveThreads: ComputerLifecycle["localVmActiveThreads"];
   LOCAL_VM_IDLE_MS: ComputerLifecycle["LOCAL_VM_IDLE_MS"];
   computerPreviewBot: ComputerLifecycle["computerPreviewBot"];
   computerPreviewSurface: ComputerLifecycle["computerPreviewSurface"];
@@ -127,6 +128,7 @@ export function createComputersRoutes(deps: {
       localVmTargetForBot,
       localVmInventoryPayload,
       localVmLifecycleBusy,
+      localVmActiveThreads,
       LOCAL_VM_IDLE_MS,
       computerPreviewBot,
       computerPreviewSurface,
@@ -185,6 +187,12 @@ export function createComputersRoutes(deps: {
       }
       if (method === "GET" && action === "control" && found) {
         json(res, 200, computerControl.snapshot(teamComputerOwner(found.id)));
+        return true;
+      }
+      // A GET carries no body, so the content-type gate below can only
+      // mislead: the control snapshot is the sole GET on this subtree.
+      if (method === "GET" && action !== "control") {
+        json(res, 404, { error: "unknown team computer action" });
         return true;
       }
       if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
@@ -425,6 +433,13 @@ export function createComputersRoutes(deps: {
         json(res, 409, { error: "the Local VM is being used by a bot — stop that turn first" });
         return true;
       }
+      // A lease can lapse under a long, quiet turn whose thread still holds
+      // the desktop, so stop/remove must also refuse while the thread
+      // registry or a setup action pins it — the same guard bot deletion uses.
+      if ((action === "stop" || action === "remove") && (localVmActiveThreads.has(SHARED_LOCAL_VM_TARGET.key) || localVmLifecycleBusy.has(SHARED_LOCAL_VM_TARGET.key))) {
+        json(res, 409, { error: localVmActiveThreads.has(SHARED_LOCAL_VM_TARGET.key) ? "the Local VM is being used by a bot — stop that turn first" : "another Local VM setup action is still running" });
+        return true;
+      }
       if (action === "pull") localVmImageBusy.set(true);
       else localVmLifecycleBusy.add(SHARED_LOCAL_VM_TARGET.key);
       try {
@@ -446,6 +461,7 @@ export function createComputersRoutes(deps: {
     }
     if (method === "POST" && path === "/api/local-computer/screenshot") {
       localVmIdleFor(SHARED_LOCAL_VM_TARGET).touch();
+      res.setHeader("cache-control", "private, no-store");
       json(res, 200, {
         image: await containerComputerScreenshot(undefined, undefined, SHARED_LOCAL_VM_TARGET),
       });
@@ -494,6 +510,12 @@ export function createComputersRoutes(deps: {
       const vmOwner = localVmLeaseFor(target).current(localVmOwnerBusy);
       if (vmOwner) {
         json(res, 409, { error: "this bot is using its Local VM — stop the turn first" });
+        return true;
+      }
+      // Mirrors the shared-target guard above: the lease alone can miss a
+      // long, quiet turn, and a setup action must not be torn down mid-call.
+      if ((action === "stop" || action === "remove") && (localVmActiveThreads.has(target.key) || localVmLifecycleBusy.has(target.key))) {
+        json(res, 409, { error: localVmActiveThreads.has(target.key) ? "this bot is using its Local VM — stop the turn first" : "this bot's Local VM setup action is still running" });
         return true;
       }
       // Fence this target, and the cross-target capacity decision for creates,
@@ -546,6 +568,7 @@ export function createComputersRoutes(deps: {
       }
       const target = localVmTargetForBot(bot.id);
       localVmIdleFor(target).touch();
+      res.setHeader("cache-control", "private, no-store");
       json(res, 200, {
         image: await containerComputerScreenshot(undefined, undefined, target),
       });
