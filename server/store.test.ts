@@ -13,7 +13,7 @@ import type { ModelSelection } from "./contracts.ts";
 import * as mdb from "./message-db.ts";
 import { peerAllowKey } from "./peer-approval-key.ts";
 import { canAccessTeam } from "./peer-roster.ts";
-import { pendingThreadDeletions } from "./store/messages.ts";
+import { pendingThreadDeletions, stagePendingThreadDeletions } from "./store/messages.ts";
 import { Store, type BotRecord } from "./store.ts";
 import type { TeamSetupRequest } from "../shared/team-setup.ts";
 import { SECTION_CONTEXTS_FILE } from "./section-context.ts";
@@ -966,6 +966,26 @@ describe("Store", () => {
     expect(pendingThreadDeletions()[bot.id]).toBeUndefined();
     expect(new Store(selection).messagesFor(bot.threadId)).toHaveLength(0);
     expect(new Store(selection).messagesFor(second.threadId)).toHaveLength(0);
+  });
+  it("resumes pending deletions at startup when the owner record is already gone", () => {
+    const store = new Store(selection);
+    const bot = store.createBot();
+    const second = store.createTask(bot.id, "second", false)!;
+    store.appendMessage(second.threadId, { role: "user", kind: "text", text: "second transcript" });
+    const skillState = join(DATA_DIR, "skill-state", bot.id);
+    mkdirSync(skillState, { recursive: true });
+    writeFileSync(join(skillState, "staged.json"), '{"writes":{}}');
+    // simulate a crash after bots.json lost the record but before artifact
+    // cleanup finished: the tombstone and the leftover files are all that remain
+    stagePendingThreadDeletions(bot.id, [bot.threadId, second.threadId]);
+    const bots = JSON.parse(readFileSync(join(DATA_DIR, "bots.json"), "utf8")) as BotRecord[];
+    writeFileSync(join(DATA_DIR, "bots.json"), JSON.stringify(bots.filter((b) => b.id !== bot.id)));
+
+    const resumed = new Store(selection);
+    expect(pendingThreadDeletions()[bot.id]).toBeUndefined();
+    expect(resumed.messagesFor(bot.threadId)).toHaveLength(0);
+    expect(resumed.messagesFor(second.threadId)).toHaveLength(0);
+    expect(existsSync(skillState)).toBe(false);
   });
   it("migrates a pre-branching flat transcript file", () => {
     const store = new Store(selection);
