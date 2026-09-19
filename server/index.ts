@@ -418,7 +418,6 @@ const {
   localVmImageBusy: () => localVmImageBusy,
   localVmModeChangeBusy: () => localVmModeChangeBusy,
   localVmProvisionBusy: { get: () => localVmProvisionBusy, set: (value: boolean) => { localVmProvisionBusy = value; } },
-  setLocalVmProvisionBusy: (value: boolean) => { localVmProvisionBusy = value; },
   roomSetupPending: () => roomSetupPending,
   resolveReplyTarget: () => resolveReplyTarget,
   routineWiring: () => routineWiring,
