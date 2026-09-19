@@ -197,6 +197,12 @@ export async function assembleTurnIntegrations({
   let previewCapture: (() => Promise<{ png: string; format: string }>) | null = null;
   let computerKind: "box" | "vps" | "vm" | "local" | null = null;
   let autoVpsProblem: string | null = null;
+  /** The lease generation stamped by this turn's most recent Local VM
+   * claim. Direct threads reuse their thread id across turns, so the
+   * async paths below — the settled-frame capture, failure cleanup — tell
+   * this turn's claim from a replacement's by generation, never by
+   * thread id alone. */
+  let localVmClaimGeneration: number | undefined;
   /** The exclusive Local VM claim sequence, verbatim from the old inline
    * attach path, shared by dispatch (eager today) and the first-screen-
    * call gate (issue #1361). Idempotent per turn: the resource claim and
@@ -214,6 +220,11 @@ export async function assembleTurnIntegrations({
     if (!localVmLeaseFor(localVmTarget).claim(claimThreadId, bot.id, localVmOwnerBusy)) {
       throw new Error("this Local VM is already being used by another turn — wait for that turn to finish");
     }
+    // Read the stamped generation back in the same synchronous block: every
+    // claim — including the gate's idempotent re-assert — stamps a fresh
+    // one, and later callbacks must compare against the latest, not their
+    // own invocation's.
+    localVmClaimGeneration = localVmLeaseFor(localVmTarget).generationOf(claimThreadId);
     localVmThreadTargets.set(claimThreadId, localVmTarget);
     localVmActiveThreads.set(localVmTarget.key, claimThreadId);
     localVmIdleFor(localVmTarget).touch();
@@ -233,7 +244,10 @@ export async function assembleTurnIntegrations({
       // taken after the lease is already released. No owner means the
       // desktop is simply idle: that final frame is ours to keep.
       const owner = localVmLeaseFor(localVmTarget).current(localVmOwnerBusy);
-      if (owner && owner.threadId !== claimThreadId) {
+      // The thread check alone cannot fence a direct thread's replacement:
+      // it re-claims under the SAME thread id, so only the generation
+      // separates the two claims.
+      if (owner && (owner.threadId !== claimThreadId || owner.generation !== localVmClaimGeneration)) {
         throw new Error("the Local VM moved on to another turn");
       }
       return containerComputerFrame(undefined, undefined, localVmTarget);
@@ -279,7 +293,13 @@ export async function assembleTurnIntegrations({
       return true;
     } catch (error) {
       if (strict) throw error;
-      releaseLocalVmThread(threadId);
+      // Clean up only while this turn's claim is still the live one. A
+      // replacement may have re-claimed the same thread id while
+      // readyLocalVmForTurn was in flight; a blind release would drop ITS
+      // lease along with the target bookkeeping.
+      if (localVmLeaseFor(localVmTarget).generationOf(threadId) === localVmClaimGeneration) {
+        releaseLocalVmThread(threadId);
+      }
       return false;
     }
   };

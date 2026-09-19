@@ -184,9 +184,17 @@ export function createEventFold(deps: EventFoldDeps) {
       const stalledResourceOwner = turnResourceOwners.get(turn.threadId);
       const stalledGeneration = directTurnGenerationByThread.get(turn.threadId);
       cancelDirectTurnDispatch(turn.botId, turn.threadId);
-      // Room targets carry an invocation identity; only those claims belong
-      // to the room grace cleanup added here.
-      const stalledVmTarget = groupSpeakers.has(turn.threadId) ? localVmThreadTargets().get(turn.threadId) : undefined;
+      // A stalled turn takes its Local VM claim with it — room and direct
+      // threads alike. Without this, a direct turn that loses its terminal
+      // event pins the desktop until the lease TTL: the next task's claim()
+      // finds the owner busy again, so the lease's lazy idle clear never
+      // runs. Direct threads reuse their thread id and shared mode stores
+      // one singleton target, so capture the lease generation too — a late
+      // release must never drop a replacement turn's freshly stamped claim.
+      const stalledVmTarget = localVmThreadTargets().get(turn.threadId);
+      const stalledVmGeneration = stalledVmTarget
+        ? localVmLeaseFor(stalledVmTarget).generationOf(turn.threadId)
+        : undefined;
       revokeInternalCapabilitiesForThread(turn.threadId);
       repeats.settle(turn.threadId);
       const bot = botForThread(turn.botId, turn.threadId);
@@ -227,7 +235,15 @@ export function createEventFold(deps: EventFoldDeps) {
           retry.unref?.();
           return;
         }
-        if (stalledVmTarget && localVmThreadTargets().get(turn.threadId) === stalledVmTarget) {
+        // Target identity alone cannot fence a direct replacement: both
+        // turns store the same shared-mode singleton. The generation
+        // captured at stall time must still be the live claim's.
+        if (
+          stalledVmTarget &&
+          localVmThreadTargets().get(turn.threadId) === stalledVmTarget &&
+          localVmLeaseFor(stalledVmTarget).generationOf(turn.threadId) === stalledVmGeneration
+        ) {
+          localVmLeaseFor(stalledVmTarget).release(turn.threadId, stalledVmGeneration);
           releaseLocalVmThread(turn.threadId);
         }
         const group = store.groupByThread(turn.threadId);
