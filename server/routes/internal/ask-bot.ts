@@ -6,7 +6,7 @@ import type { ServerResponse } from "node:http";
 import { getOrCreateChannel, mirrorActivity, mirrorExchange, mirrorReply } from "../../comms-visibility.ts";
 import { newId } from "../../contracts.ts";
 import { queueDelegation } from "../../delegations.ts";
-import { canAccessTeam, canReachPeer, peerAllowed, resolveTeammate } from "../../peer-roster.ts";
+import { canAccessTeam, canReachPeer, peerAllowed, resolveTeammate, PEER_ACCESS_HELP} from "../../peer-roster.ts";
 import { withPeerProvenance } from "../../peer-provenance.ts";
 import { requestPeerApproval } from "../../peer-approval.ts";
 import type { InternalRoutesOptions } from "../internal.ts";
@@ -60,13 +60,13 @@ export async function askBot(ctx: AskBotCtx, res: ServerResponse): Promise<boole
     // hard refusal — every peer turn has an accountable sender.
     const from = internalSender;
     if (!canAccessTeam(from, target.section) || target.hidden) {
-      return json(res, 403, { error: "that bot belongs to a different section" });
+      return json(res, 403, { error: `that bot belongs to a different section or is unavailable. ${PEER_ACCESS_HELP}` });
     }
     // The sender's allow-list, when it has one. Checked here rather than
     // trusted from the roster: the tool call carries a bot id, and an id
     // the model held from an earlier turn must not outlive the grant.
     if (!peerAllowed(from, target.id)) {
-      return json(res, 403, { error: "that bot is not on this bot's allowed peers — call list_bots for the ones you can reach" });
+      return json(res, 403, { error: `that bot is not on this bot's allowed peers. ${PEER_ACCESS_HELP}` });
     }
     const fromThreadId = internalCapability.threadId;
     // Rooms are conversations too. The task-only lookup here refused every
