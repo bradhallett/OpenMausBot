@@ -81,6 +81,7 @@ export interface RequestHandlerDeps {
   handleSystem: RouteHandlers["handleSystem"];
   handleBrowserLive: RouteHandlers["handleBrowserLive"];
   handleFleet: RouteHandlers["handleFleet"];
+  handleNotify: RouteHandlers["handleNotify"];
 }
 
 export function createRequestHandler(deps: RequestHandlerDeps) {
@@ -96,7 +97,7 @@ export function createRequestHandler(deps: RequestHandlerDeps) {
   handleTeams, handleBots, handleBotManagement, handleBotThreadOps,
   handleBotTasks, handleBotProfile, handleBotMemory, handlePreAuth,
   handleAuthSession, handleWorkspaceComms, handleComputers, handleBotCards,
-  handleBotComputer, handleSystem, handleBrowserLive, handleFleet,
+  handleBotComputer, handleSystem, handleBrowserLive, handleFleet, handleNotify,
   } = deps;
 
   return async function handleRequest(req: IncomingMessage, res: ServerResponse) {
@@ -212,6 +213,8 @@ export function createRequestHandler(deps: RequestHandlerDeps) {
     if (await handleSystem(req, res, rctx)) return;
 
     if (await handleFleet(req, res, rctx)) return;
+
+    if (await handleNotify(req, res, rctx)) return;
 
     if (await handleUsage(req, res, rctx)) return;
 

@@ -53,6 +53,7 @@ import { createUsageRoutes } from "./routes/usage.ts";
 import { createConfigRoutes } from "./routes/config.ts";
 import { createBrowserLiveRoutes } from "./routes/browser-live.ts";
 import { createFleetRoutes } from "./routes/fleet.ts";
+import { createNotifyRoutes } from "./routes/notify.ts";
 import type { RequestAuth } from "./request-auth.ts";
 import type { WorkspaceAccess } from "./enterprise.ts";
 import type { RoutineManager } from "./routines.ts";
@@ -702,11 +703,13 @@ const handleFleet = createFleetRoutes({
   readBody,
 });
 
+const handleNotify = createNotifyRoutes({ notify, store });
+
   return {
     workspaceBackupRoutes, routinesRoutes, internalRoutes, handleCalendarCalls, handleMessages,
     handleInstances, handleMcp, handleUsage, handleConfig, handleTts, handleConnectors, handleWebhooks,
     handleTeams, handleBots, handleBotManagement, handleBotThreadOps, handleBotTasks, handleBotProfile,
     handleBotMemory, handlePreAuth, handleAuthSession, handleWorkspaceComms, handleComputers, handleBotCards,
-    handleBotComputer, handleSystem, handleBrowserLive, handleFleet,
+    handleBotComputer, handleSystem, handleBrowserLive, handleFleet, handleNotify,
   };
 }

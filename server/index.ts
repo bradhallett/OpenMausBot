@@ -663,7 +663,7 @@ const {
   handleConnectors, handleWebhooks, handleTeams, handleBots, handleBotManagement,
   handleBotThreadOps, handleBotTasks, handleBotProfile, handleBotMemory, handlePreAuth,
   handleAuthSession, handleWorkspaceComms, handleComputers, handleBotCards, handleBotComputer,
-  handleSystem, handleBrowserLive, handleFleet,
+  handleSystem, handleBrowserLive, handleFleet, handleNotify,
 } = createRouteHandlers({
   DATA_DIR,
   PORT,
@@ -908,6 +908,7 @@ const handleRequest = createRequestHandler({
   handleSystem,
   handleBrowserLive,
   handleFleet,
+  handleNotify,
 });
 
 const server = createServer(handleRequest);
