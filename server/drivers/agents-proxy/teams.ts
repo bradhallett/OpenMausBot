@@ -26,6 +26,7 @@ export const handlers = {
         instructions,
       }),
     });
+    if (r.error) return { text: `Couldn't create bot: ${String(r.error)}`, isError: true };
     createdThisTurn(ctx.turnGeneration, 1);
     return {
       text: `Created @${r.name ?? botName} in ${r.section ?? "General"} [id: ${r.id}]. Assign work with ${ctx.coordinating ? "coordinate_bots" : "delegate_bot"}.`,

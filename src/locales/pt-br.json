@@ -1149,6 +1149,7 @@
   "computer.hint.vpsAuto": "Usa seu VPS e o inicia quando necessário.",
   "computer.hint.autoLocal": "Prefere um computador na nuvem já existente; senão, usa este computador. Escolha Nuvem para iniciar um computador na nuvem.",
   "computer.hint.autoCloud": "Usa um computador na nuvem já existente. Escolha Nuvem para criar ou acordar um.",
+  "computer.hint.autoTeam": "Auto usa {name}, compartilhado com os demais bots Auto desta equipe. Escolher outro destino substitui o padrão da equipe.",
   "computer.hint.vm": "Um desktop Linux privado neste dispositivo, separado da sua própria tela.",
   "computer.vmSettingsLink": "Configurações da VM local →",
   "computer.hint.local": "Usa sua tela, seu mouse e seu teclado.",

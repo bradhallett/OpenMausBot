@@ -78,10 +78,15 @@ export const BoxAgentDriver: ProviderDriver<BoxAgentConfig> = {
       cancel: () => void;
       turnId: string;
       boxId: string;
+      /** Resolves when the turn's prompt dispatch settles, so teardown awaits it. */
+      done: Promise<void>;
     }
     const runtime = createDriverSessionRuntime<Turn>({
       driverKind: DRIVER_KIND,
-      stopTurn: (turn) => turn.cancel(),
+      stopTurn: (turn) => {
+        turn.cancel();
+        return turn.done;
+      },
     });
     const { emit, base } = runtime;
 
@@ -89,7 +94,7 @@ export const BoxAgentDriver: ProviderDriver<BoxAgentConfig> = {
       const res = await fetch(`${BOX_API}${path}`, {
         ...opts,
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json", ...opts.headers },
-        signal: (opts as any).signal ?? AbortSignal.timeout(30_000),
+        signal: opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
       });
       const body: any = await res.json().catch(() => null);
       if (!res.ok || body?.ok === false) {
@@ -145,147 +150,188 @@ export const BoxAgentDriver: ProviderDriver<BoxAgentConfig> = {
         emit({ ...base(threadId, turnId), type: "turn.completed", ok: false, stopReason: "interrupted", cost: null });
         return { turnId };
       }
-      const started: any = await api(`/boxes/${boxId}/prompt`, {
-        method: "POST",
-        body: JSON.stringify({ ...providerFor(model), prompt }),
-      });
-      appendNative(threadId, { dir: "out", source: "box.prompt", msg: { model, prompt, response: started } });
-      // real shape (2026-08): {type:"prompt.queued", promptId, promptRun:{id,…},
-      // id:<box id>} — never fall back to the bare id, it's the box's
-      const promptId = started?.promptRun?.id ?? started?.prompt?.id ?? started?.promptId ?? null;
-
+      const abort = new AbortController();
       let cancelled = false;
+      let promptDispatched = false;
+      let resolvePrompt!: () => void;
+      const promptDone = new Promise<void>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      // Own the claim for the prompt POST: stopAll() must be able to abort it
+      // and await settlement, instead of clearing a reservation that still has
+      // a fetch in flight.
       runtime.setTurn(threadId, {
         turnId,
         boxId,
+        done: promptDone,
         cancel: () => {
           cancelled = true;
-          void api(`/boxes/${boxId}/interrupt`, { method: "POST" }).catch(() => {});
+          abort.abort();
+          if (promptDispatched) {
+            void api(`/boxes/${boxId}/interrupt`, { method: "POST" }).catch(() => {});
+          }
         },
       });
-      emit({ ...base(threadId, turnId), type: "turn.started" });
-      emit({ ...base(threadId, turnId), type: "session.started", sessionId: promptId, model });
-
-      // poll events + run status until the prompt settles
-      (async () => {
-        const seen = new Set<string>();
-        const startedAt = Date.now();
-        let lastText = "";
-        let pendingText = "";
-        /** Why the box could not answer (login expired, model refused, …). */
-        let problem: string | null = null;
-        /** Emit unflushed deltas as assistant_text and reset pendingText. */
-        const flushAssistantText = () => {
-          const text = pendingText;
-          pendingText = "";
-          if (!text.trim()) return;
-          emit({ ...base(threadId, turnId), type: "item.completed", itemType: "assistant_text", text });
-        };
-        /** Stream a full-text snapshot as a delta and accumulate it for flush. */
-        const ingest = (text: string) => {
-          const delta = text.startsWith(lastText) ? text.slice(lastText.length) : text;
-          lastText = text;
-          if (!delta) return;
-          pendingText += delta;
-          emit({ ...base(threadId, turnId), type: "content.delta", streamKind: "assistant_text", delta });
-        };
-        try {
-          for (;;) {
-            if (cancelled) break;
-            await new Promise((r) => setTimeout(r, config.pollMs));
-            const events: any = await api(`/boxes/${boxId}/events`).catch(() => null);
-            const list: any[] = events?.events ?? events?.items ?? [];
-            for (const ev of list) {
-              // The stream is the whole conversation from its start; `taskId`
-              // names the prompt run an event belongs to. Earlier turns are
-              // history, not this answer.
-              if (promptId && ev.taskId && String(ev.taskId) !== promptId) continue;
-              const id = String(ev.id ?? ev.eventId ?? JSON.stringify(ev).slice(0, 120));
-              if (seen.has(id)) continue;
-              seen.add(id);
-              appendNative(threadId, { dir: "in", source: "box.events", msg: ev });
-              const kind = String(ev.type ?? ev.kind ?? "");
-              // "response" events carry the agent's text at data.content —
-              // the FULL text so far, not a chunk. Clients accumulate
-              // deltas, so forward only the growth; a drifted (non-prefix)
-              // event re-sends whole and the settled message replaces the
-              // stream anyway.
-              const text = ev.text ?? ev.message ?? ev.data?.text ?? ev.data?.content ?? null;
-              if (/assistant|message|output|response/i.test(kind) && typeof text === "string" && text.trim()) {
-                ingest(text);
-              } else if (/usage_limit|error|fail/i.test(kind)) {
-                const why = ev.data?.summary ?? ev.data?.message ?? ev.data?.error ?? ev.message;
-                if (typeof why === "string" && why.trim()) problem = why.trim();
-              } else if (/tool|command|exec|browse/i.test(kind)) {
-                flushAssistantText();
-                emit({
-                  ...base(threadId, turnId),
-                  type: "item.started",
-                  itemType: "tool",
-                  itemId: id,
-                  title: String(ev.title ?? ev.command ?? kind).slice(0, 80),
-                });
-              }
-              // shape-drift backstop: without a promptId the status poll
-              // below can never see a terminal state, so settle off the
-              // events themselves instead of hanging to the 30-min ceiling
-              if (!promptId && /complete|finish|done|success|fail|error/i.test(kind)) {
-                runtime.endTurn(threadId, turnId);
-                flushAssistantText();
-                const failed = /fail|error/i.test(kind);
-                emit({ ...base(threadId, turnId), type: "turn.completed", ok: !failed, stopReason: failed ? kind : null, cost: null });
-                return;
-              }
-            }
-            if (promptId) {
-              const status: any = await api(`/boxes/${boxId}/prompts/${promptId}`).catch(() => null);
-              appendNative(threadId, { dir: "in", source: "box.prompt.status", msg: status });
-              // real shape (2026-08): {promptRun:{status:"finished",…}} —
-              // flat fallbacks kept for drift
-              const run: any = status?.promptRun ?? status?.prompt ?? status ?? {};
-              const state = String(run?.status ?? "");
-              if (/completed|succeeded|done|finished/i.test(state)) {
-                const result = run?.result ?? run?.output ?? lastText;
-                if (typeof result === "string" && result.trim() && result !== lastText) {
-                  ingest(result);
-                }
-                if (!pendingText.trim() && !lastText.trim()) {
-                  // a run that ends with nothing said and a recorded problem
-                  // (login expired, …) is a failure the person must see
-                  if (problem) throw new Error(problem);
-                  pendingText = "(finished)";
-                }
-                flushAssistantText();
-                runtime.endTurn(threadId, turnId);
-                emit({ ...base(threadId, turnId), type: "turn.completed", ok: true, stopReason: null, cost: null });
-                return;
-              }
-              if (/failed|error|cancelled|interrupted/i.test(state)) {
-                const runError = [run?.error, run?.failureReason, run?.message].find((v) => typeof v === "string" && v.trim());
-                if (problem || runError || /failed|error/i.test(state)) throw new Error(problem ?? runError ?? `the box run ${state}`);
-                flushAssistantText();
-                runtime.endTurn(threadId, turnId);
-                emit({ ...base(threadId, turnId), type: "turn.completed", ok: false, stopReason: state, cost: null });
-                return;
-              }
-            }
-            if (Date.now() - startedAt > 30 * 60_000) {
-              throw new Error("box run exceeded 30 minutes — interrupted");
-            }
-          }
-          // cancelled
-          flushAssistantText();
-          runtime.endTurn(threadId, turnId);
-          emit({ ...base(threadId, turnId), type: "turn.completed", ok: false, stopReason: "interrupted", cost: null });
-        } catch (e) {
-          flushAssistantText();
-          runtime.endTurn(threadId, turnId);
-          emit({ ...base(threadId, turnId), type: "runtime.error", message: (e as Error).message });
-          emit({ ...base(threadId, turnId), type: "turn.completed", ok: false, stopReason: "error", cost: null });
+      const settleInterrupted = () => {
+        runtime.endTurn(threadId, turnId);
+        emit({ ...base(threadId, turnId), type: "turn.started" });
+        emit({ ...base(threadId, turnId), type: "turn.completed", ok: false, stopReason: "interrupted", cost: null });
+        return { turnId };
+      };
+      try {
+        if (cancelled || runtime.turn(threadId)?.turnId !== turnId) {
+          return settleInterrupted();
         }
-      })();
+        let started: any;
+        try {
+          started = await api(`/boxes/${boxId}/prompt`, {
+            method: "POST",
+            body: JSON.stringify({ ...providerFor(model), prompt }),
+            signal: abort.signal,
+          });
+        } catch (error) {
+          if (cancelled) {
+            void api(`/boxes/${boxId}/interrupt`, { method: "POST" }).catch(() => {});
+            return settleInterrupted();
+          }
+          throw error;
+        }
+        if (cancelled || runtime.turn(threadId)?.turnId !== turnId) {
+          void api(`/boxes/${boxId}/interrupt`, { method: "POST" }).catch(() => {});
+          return settleInterrupted();
+        }
+        promptDispatched = true;
+        appendNative(threadId, { dir: "out", source: "box.prompt", msg: { model, prompt, response: started } });
+        // real shape (2026-08): {type:"prompt.queued", promptId, promptRun:{id,…},
+        // id:<box id>} — never fall back to the bare id, it's the box's
+        const promptId = started?.promptRun?.id ?? started?.prompt?.id ?? started?.promptId ?? null;
 
-      return { turnId };
+        emit({ ...base(threadId, turnId), type: "turn.started" });
+        emit({ ...base(threadId, turnId), type: "session.started", sessionId: promptId, model });
+
+        // poll events + run status until the prompt settles
+        (async () => {
+          const seen = new Set<string>();
+          const startedAt = Date.now();
+          let lastText = "";
+          let pendingText = "";
+          /** Why the box could not answer (login expired, model refused, …). */
+          let problem: string | null = null;
+          /** Emit unflushed deltas as assistant_text and reset pendingText. */
+          const flushAssistantText = () => {
+            const text = pendingText;
+            pendingText = "";
+            if (!text.trim()) return;
+            emit({ ...base(threadId, turnId), type: "item.completed", itemType: "assistant_text", text });
+          };
+          /** Stream a full-text snapshot as a delta and accumulate it for flush. */
+          const ingest = (text: string) => {
+            const delta = text.startsWith(lastText) ? text.slice(lastText.length) : text;
+            lastText = text;
+            if (!delta) return;
+            pendingText += delta;
+            emit({ ...base(threadId, turnId), type: "content.delta", streamKind: "assistant_text", delta });
+          };
+          try {
+            for (;;) {
+              if (cancelled) break;
+              await new Promise((r) => setTimeout(r, config.pollMs));
+              const events: any = await api(`/boxes/${boxId}/events`).catch(() => null);
+              const list: any[] = events?.events ?? events?.items ?? [];
+              for (const ev of list) {
+                // The stream is the whole conversation from its start; `taskId`
+                // names the prompt run an event belongs to. Earlier turns are
+                // history, not this answer.
+                if (promptId && ev.taskId && String(ev.taskId) !== promptId) continue;
+                const id = String(ev.id ?? ev.eventId ?? JSON.stringify(ev).slice(0, 120));
+                if (seen.has(id)) continue;
+                seen.add(id);
+                appendNative(threadId, { dir: "in", source: "box.events", msg: ev });
+                const kind = String(ev.type ?? ev.kind ?? "");
+                // "response" events carry the agent's text at data.content —
+                // the FULL text so far, not a chunk. Clients accumulate
+                // deltas, so forward only the growth; a drifted (non-prefix)
+                // event re-sends whole and the settled message replaces the
+                // stream anyway.
+                const text = ev.text ?? ev.message ?? ev.data?.text ?? ev.data?.content ?? null;
+                if (/assistant|message|output|response/i.test(kind) && typeof text === "string" && text.trim()) {
+                  ingest(text);
+                } else if (/usage_limit|error|fail/i.test(kind)) {
+                  const why = ev.data?.summary ?? ev.data?.message ?? ev.data?.error ?? ev.message;
+                  if (typeof why === "string" && why.trim()) problem = why.trim();
+                } else if (/tool|command|exec|browse/i.test(kind)) {
+                  flushAssistantText();
+                  emit({
+                    ...base(threadId, turnId),
+                    type: "item.started",
+                    itemType: "tool",
+                    itemId: id,
+                    title: String(ev.title ?? ev.command ?? kind).slice(0, 80),
+                  });
+                }
+                // shape-drift backstop: without a promptId the status poll
+                // below can never see a terminal state, so settle off the
+                // events themselves instead of hanging to the 30-min ceiling
+                if (!promptId && /complete|finish|done|success|fail|error/i.test(kind)) {
+                  runtime.endTurn(threadId, turnId);
+                  flushAssistantText();
+                  const failed = /fail|error/i.test(kind);
+                  emit({ ...base(threadId, turnId), type: "turn.completed", ok: !failed, stopReason: failed ? kind : null, cost: null });
+                  return;
+                }
+              }
+              if (promptId) {
+                const status: any = await api(`/boxes/${boxId}/prompts/${promptId}`).catch(() => null);
+                appendNative(threadId, { dir: "in", source: "box.prompt.status", msg: status });
+                // real shape (2026-08): {promptRun:{status:"finished",…}} —
+                // flat fallbacks kept for drift
+                const run: any = status?.promptRun ?? status?.prompt ?? status ?? {};
+                const state = String(run?.status ?? "");
+                if (/completed|succeeded|done|finished/i.test(state)) {
+                  const result = run?.result ?? run?.output ?? lastText;
+                  if (typeof result === "string" && result.trim() && result !== lastText) {
+                    ingest(result);
+                  }
+                  if (!pendingText.trim() && !lastText.trim()) {
+                    // a run that ends with nothing said and a recorded problem
+                    // (login expired, …) is a failure the person must see
+                    if (problem) throw new Error(problem);
+                    pendingText = "(finished)";
+                  }
+                  flushAssistantText();
+                  runtime.endTurn(threadId, turnId);
+                  emit({ ...base(threadId, turnId), type: "turn.completed", ok: true, stopReason: null, cost: null });
+                  return;
+                }
+                if (/failed|error|cancelled|interrupted/i.test(state)) {
+                  const runError = [run?.error, run?.failureReason, run?.message].find((v) => typeof v === "string" && v.trim());
+                  if (problem || runError || /failed|error/i.test(state)) throw new Error(problem ?? runError ?? `the box run ${state}`);
+                  flushAssistantText();
+                  runtime.endTurn(threadId, turnId);
+                  emit({ ...base(threadId, turnId), type: "turn.completed", ok: false, stopReason: state, cost: null });
+                  return;
+                }
+              }
+              if (Date.now() - startedAt > 30 * 60_000) {
+                throw new Error("box run exceeded 30 minutes — interrupted");
+              }
+            }
+            // cancelled
+            flushAssistantText();
+            runtime.endTurn(threadId, turnId);
+            emit({ ...base(threadId, turnId), type: "turn.completed", ok: false, stopReason: "interrupted", cost: null });
+          } catch (e) {
+            flushAssistantText();
+            runtime.endTurn(threadId, turnId);
+            emit({ ...base(threadId, turnId), type: "runtime.error", message: (e as Error).message });
+            emit({ ...base(threadId, turnId), type: "turn.completed", ok: false, stopReason: "error", cost: null });
+          }
+        })();
+
+        return { turnId };
+      } finally {
+        resolvePrompt();
+      }
     };
 
     const snapshot = async (): Promise<ProviderSnapshot> => {

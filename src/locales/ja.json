@@ -1142,6 +1142,7 @@
   "computer.hint.vpsAuto": "あなたの VPS を使い、必要なときに起動します。",
   "computer.hint.autoLocal": "既存のクラウドコンピューターを優先し、なければこのコンピューターを使います。クラウドコンピューターを起動するにはクラウドを選んでください。",
   "computer.hint.autoCloud": "既存のクラウドコンピューターを使います。作成または起動するにはクラウドを選んでください。",
+  "computer.hint.autoTeam": "Auto は {name} を使い、このチームの他の Auto ボットと共有します。別の作業先を選ぶと、チームの既定が上書きされます。",
   "computer.hint.vm": "この端末上の専用 Linux デスクトップ。あなたの画面とは別です。",
   "computer.vmSettingsLink": "ローカル VM の設定 →",
   "computer.hint.local": "あなたの画面、マウス、キーボードを使います。",
