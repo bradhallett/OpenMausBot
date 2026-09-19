@@ -346,6 +346,9 @@ export async function runBootSequence(deps: BootSequenceDeps): Promise<void> {
       },
       () => flushAllProfileHistory(),
       () => flushAllMemoryJournals(),
+      // Room handoff persistence is coalesced per macrotask; a shutdown
+      // between publish and the deferred write must not lose the last state.
+      () => roomHandoffs.flushNow(),
       () => flushUsageLedger(DATA_DIR),
       () => flushDecisionLog(DATA_DIR),
     ],
