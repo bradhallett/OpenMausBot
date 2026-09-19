@@ -125,22 +125,19 @@ async function waitUntil<T>(probe: () => Promise<T>, timeoutMs: number, what: st
   }
 }
 
-/** Click the first element with this accessible name. `ui click --name`
- * fails outright when the sidebar briefly renders the same chevron twice,
- * so poll for the name the way resolveTarget does, then pin the first
- * matching ref: snapshot order follows the accessibility tree, whose
- * first match is the primary chevron. */
-async function clickFirstNamed(handle: string, name: string): Promise<void> {
+/** Click a named chevron inside one sidebar entity's row. Duplicate names
+ * are real: a bot named Pepper and a group whose member bot is also Pepper
+ * both render "Expand Pepper threads", and an unscoped by-name click hits
+ * whichever the accessibility tree returns first, so evaluate inside the
+ * row carrying data-sidebar-entity and click the chevron found there. */
+async function clickEntityChevron(handle: string, entityId: string, name: string): Promise<void> {
   const deadline = Date.now() + 10_000;
+  const selector = `[data-sidebar-entity="${entityId}"] button[aria-label="${name}"]`;
   for (;;) {
-    const state = await ui("snapshot", handle);
-    const refs = (state.refs ?? {}) as Record<string, { name?: unknown }>;
-    const ref = Object.entries(refs).find(([, element]) => element?.name === name)?.[0];
-    if (ref) {
-      await ui("click", handle, "--ref", `@${ref}`);
-      return;
-    }
-    if (Date.now() > deadline) throw new Error(`no element is named ${JSON.stringify(name)} within 10000ms (snapshot had ${Object.keys(refs).length} refs)`);
+    const state = await ui("eval", handle, "--js",
+      `(() => { const button = document.querySelector('[data-sidebar-entity="${entityId}"] button[aria-label="${name}"]'); if (!button) return false; button.click(); return true; })()`);
+    if (state.result === true) return;
+    if (Date.now() > deadline) throw new Error(`no element matches ${selector} within 10000ms`);
     await new Promise((done) => setTimeout(done, 250));
   }
 }
@@ -172,7 +169,7 @@ describe("the thinking timer stays anchored across a thread switch", () => {
     const otherThread = (await api("POST", `/api/bots/${info.botId}/tasks`, {})).task.threadId;
     // A bot's thread list starts collapsed (the sidebar's threadsOpen state
     // defaults false), so expand Pepper's threads before any row is needed.
-    await clickFirstNamed(info.ui, "Expand Pepper threads");
+    await clickEntityChevron(info.ui, info.botId, "Expand Pepper threads");
     await waitUntil(() => evaluate(`Boolean(document.querySelector('[data-sidebar-thread-row="${otherThread}"]'))`), 10_000, "the new thread's sidebar row to appear");
 
     // The composer sends; the hang-mode engine accepts the turn and holds it.
@@ -248,9 +245,9 @@ describe("the thinking timer stays anchored across a thread switch", () => {
     const groupId = group.id;
 
     // Both thread lists start collapsed behind their chevrons.
-    await clickFirstNamed(info.ui, "Expand Pepper threads");
+    await clickEntityChevron(info.ui, info.botId, "Expand Pepper threads");
     await waitUntil(() => evaluate(`Boolean(document.querySelector('button[aria-label="Expand Timer group threads"]'))`), 30_000, "the group's sidebar row to appear");
-    await clickFirstNamed(info.ui, "Expand Timer group threads");
+    await clickEntityChevron(info.ui, groupId, "Expand Timer group threads");
     await waitUntil(() => evaluate(`Boolean(document.querySelector('[data-sidebar-thread-row="${group.threadId}"]'))`), 10_000, "the group's sidebar thread row to appear");
     await selectThread(group.threadId);
     await waitUntil(() => isCurrent(group.threadId), 10_000, "the group to become current");

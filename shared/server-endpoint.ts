@@ -13,7 +13,13 @@ export interface ServerEndpointEnv {
  * discovery behavior; a whitespace-only OPENMAUSBOT_URL counts as unset. */
 export function configuredServerUrl(env: ServerEndpointEnv): string | undefined {
   const explicit = env.OPENMAUSBOT_URL?.trim() || "";
-  return explicit || (env.OMB_PORT ? `http://127.0.0.1:${env.OMB_PORT}` : undefined);
+  if (explicit) return explicit;
+  const port = env.OMB_PORT?.trim() ?? "";
+  if (!port) return undefined;
+  if (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535) {
+    throw new Error(`Invalid OMB_PORT: '${env.OMB_PORT}' (expected an integer between 1 and 65535)`);
+  }
+  return `http://127.0.0.1:${port}`;
 }
 
 export function validateBaseUrl(url: string): string {

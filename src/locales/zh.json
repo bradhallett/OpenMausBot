@@ -1142,6 +1142,7 @@
   "computer.hint.vpsAuto": "使用你的 VPS，并在需要时启动它。",
   "computer.hint.autoLocal": "优先使用已有的云电脑；否则使用这台电脑。选择“云端”可启动一台云电脑。",
   "computer.hint.autoCloud": "使用已有的云电脑。选择“云端”可创建或唤醒一台。",
+  "computer.hint.autoTeam": "Auto 使用 {name}，与本团队的其他 Auto 机器人共享。选择其他工作位置会覆盖团队默认值。",
   "computer.hint.vm": "本设备上的私有 Linux 桌面，与你自己的屏幕分开。",
   "computer.vmSettingsLink": "本地虚拟机设置 →",
   "computer.hint.local": "使用你的屏幕、鼠标和键盘。",

@@ -82,6 +82,7 @@ export function GroupListItem({
     <>
     <div className="group relative">
     <button
+      data-sidebar-entity={group.id}
       onClick={() => dispatch({ type: "select", id: group.id })}
       onContextMenu={(e) => {
         e.preventDefault();

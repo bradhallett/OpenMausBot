@@ -1754,6 +1754,7 @@
   "computer.hint.vpsAuto": "Uses your VPS and starts it when needed.",
   "computer.hint.autoLocal": "Prefers an existing cloud computer; otherwise uses this computer. Select Cloud to start a cloud computer.",
   "computer.hint.autoCloud": "Uses an existing cloud computer. Select Cloud to create or wake one.",
+  "computer.hint.autoTeam": "Auto uses {name}, shared with this team’s other Auto bots. Choosing another destination overrides the team default.",
   "computer.hint.vm": "A private Linux desktop on this device, separate from your own screen.",
   "computer.vmSettingsLink": "Local VM settings →",
   "computer.hint.local": "Uses your screen, mouse, and keyboard.",

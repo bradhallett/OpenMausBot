@@ -104,13 +104,12 @@ export function mirrorActiveTask(record: BotRecord, task: TaskRecord) {
   record.pinnedMessageId = task.pinnedMessageId;
 }
 
-/** A fresh context on the same bot: new thread, new session, same
- * persona/tools/computer. Becomes the active task. */
-export function createTask(ctx: StoreContext, botId: string, title?: string, activate = true, projectId?: string, openedBy?: TaskOpenedBy): TaskRecord | null {
-  const record = ctx.bot(botId);
-  if (!record) return null;
-  if (projectId !== undefined && !ctx.project(botId, projectId)) return null;
-  const task: TaskRecord = {
+/** The pure half of createTask: a fresh task row — new thread id, the
+ * bot's current defaults, idle — with no store, save or emit side
+ * effects, so mid-delete replacement rows can be built without
+ * persisting or broadcasting anything. */
+function newTaskRecord(record: BotRecord, title?: string, projectId?: string, openedBy?: TaskOpenedBy): TaskRecord {
+  return {
     threadId: newId(),
     title: threadTitleFrom(title),
     createdAt: Date.now(),
@@ -125,6 +124,15 @@ export function createTask(ctx: StoreContext, botId: string, title?: string, act
     activity: "idle",
     busy: false,
   };
+}
+
+/** A fresh context on the same bot: new thread, new session, same
+ * persona/tools/computer. Becomes the active task. */
+export function createTask(ctx: StoreContext, botId: string, title?: string, activate = true, projectId?: string, openedBy?: TaskOpenedBy): TaskRecord | null {
+  const record = ctx.bot(botId);
+  if (!record) return null;
+  if (projectId !== undefined && !ctx.project(botId, projectId)) return null;
+  const task = newTaskRecord(record, title, projectId, openedBy);
   record.tasks = [task, ...(record.tasks ?? [])];
   if (activate) {
     mirrorActiveTask(record, task);
@@ -296,14 +304,22 @@ export function deleteTask(ctx: StoreContext, botId: string, threadId: string): 
   if (!record?.tasks) return null;
   if (!record.tasks.some((t) => t.threadId === threadId)) return null;
   record.tasks = record.tasks.filter((t) => t.threadId !== threadId);
-  const visible = record.tasks.find((task) => !task.routineRunId)
-    ?? ctx.createTask(botId, undefined, record.threadId === threadId)!;
+  // Durable before anything is built on the filtered list, so a crash
+  // below leaves a retryable deletion.
+  stagePendingThreadDeletions(botId, [threadId]);
+  let visible = record.tasks.find((task) => !task.routineRunId);
+  if (!visible) {
+    // No visible conversation left: build the replacement row purely (no
+    // save, no emit, no activation) — this function persists and notifies
+    // exactly once, at the end.
+    visible = newTaskRecord(record, undefined);
+    record.tasks.unshift(visible);
+  }
   if (record.threadId === threadId || ctx.taskByThread(botId, record.threadId)?.routineRunId) {
     mirrorActiveTask(record, visible);
   }
   record.unread = record.tasks.some((task) => task.unread);
   refreshBotActivity(ctx, record);
-  stagePendingThreadDeletions(botId, [threadId]);
   try {
     ctx.saveBots();
   } catch (error) {

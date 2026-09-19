@@ -226,6 +226,7 @@ export function BotListItem({
         }
         aria-busy={deleting || undefined}
         data-sidebar-bot-row={bot.id}
+        data-sidebar-entity={bot.id}
         onClick={onSelect}
         onKeyDown={(event) => {
           if (renaming) return;
