@@ -2200,7 +2200,7 @@ describe("harness HTTP API", () => {
     const stream = await openSse(`${BASE}/api/events`);
     try {
       writeFileSync(failureMarker, "fail");
-      expect((await api("POST", "/api/browser-engine/install")).status).toBe(202);
+      expect((await api("POST", "/api/browser-engine/install", {})).status).toBe(202);
       const start = await stream.until((frame) => frame.kind === "config" && frame.browserEngine?.installing === true);
       expect(start.browserEngine).toMatchObject({ kind: "engine", installing: true });
       expect(start.browserEngine).not.toHaveProperty("installError");
@@ -2209,7 +2209,7 @@ describe("harness HTTP API", () => {
       expect(failed.browserEngine.installing).not.toBe(true);
       rmSync(failureMarker);
       stream.frames.splice(0);
-      expect((await api("POST", "/api/browser-engine/install")).status).toBe(202);
+      expect((await api("POST", "/api/browser-engine/install", {})).status).toBe(202);
       const retry = await stream.until((frame) => frame.kind === "config" && frame.browserEngine?.installing === true);
       expect(retry.browserEngine).not.toHaveProperty("installError");
       await stream.until((frame) => frame.kind === "config" && frame.browserEngine?.kind === "engine" && !frame.browserEngine.installing && !frame.browserEngine.installError);
@@ -2217,6 +2217,21 @@ describe("harness HTTP API", () => {
       rmSync(failureMarker, { force: true });
       stream.close();
     }
+  });
+
+  it("refuses a form-shaped browser-engine install before any dispatch", async () => {
+    const form = await fetch(`${BASE}/api/browser-engine/install`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "engine=1",
+    });
+    expect(form.status).toBe(415);
+    expect(await form.json()).toEqual({ error: "content-type must be application/json" });
+    const bare = await fetch(`${BASE}/api/browser-engine/install`, { method: "POST" });
+    expect(bare.status).toBe(415);
+    // Rejected before dispatch: the engine never entered the installing state.
+    const summary = await api("GET", "/api/config");
+    expect(summary.body.browserEngine?.installing).not.toBe(true);
   });
 
   it.each([

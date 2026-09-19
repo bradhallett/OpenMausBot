@@ -36,7 +36,7 @@ export function createSystemRoutes(deps: {
   broadcast: ReturnType<typeof createEventsRoutes>["broadcast"];
   configStatus: ReturnType<typeof createConfigViews>["configStatus"];
 }) {
-  return async (_req: IncomingMessage, res: ServerResponse, rctx: RouteContext): Promise<boolean> => {
+  return async (req: IncomingMessage, res: ServerResponse, rctx: RouteContext): Promise<boolean> => {
     const { method, path, url } = rctx;
     /** scratch for route matches, shared by every `path.match` below */
     let m: RegExpMatchArray | null = null;
@@ -58,6 +58,14 @@ export function createSystemRoutes(deps: {
     // a Chrome for Testing, a one-time download), or ask how that is going.
     // One install at a time; the config frame's browserEngine tells the rest.
     if (method === "POST" && path === "/api/browser-engine/install") {
+      // A page served from another loopback origin can fire a simple form
+      // POST at this route; requiring JSON makes the request non-simple, so
+      // the browser must preflight and the loopback origin policy applies
+      // before any download is triggered.
+      if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+        json(res, 415, { error: "content-type must be application/json" });
+        return true;
+      }
       if (!browserEngineInstall.get()) {
         const status = browserEngineStatus();
         if (status.kind === "unavailable" && !status.installable) {
