@@ -6,7 +6,7 @@ import type { ServerResponse } from "node:http";
 import { z } from "zod";
 import { DATA_DIR } from "../../config.ts";
 import { appendDecision } from "../../decision-log.ts";
-import { canAccessTeam, canReachPeer, peerAllowed } from "../../peer-roster.ts";
+import { canAccessTeam, canReachPeer, peerAllowed, PEER_ACCESS_HELP} from "../../peer-roster.ts";
 import type { RoutineRun } from "../../routines.ts";
 import type { InternalRoutesOptions } from "../internal.ts";
 import type { InternalRequestCtx } from "./types.ts";
@@ -96,7 +96,7 @@ export async function routineRequestSubmit(ctx: RequestsCtx, res: ServerResponse
           return json(res, 404, { error: "no bot with that id — call list_bots and copy the exact id from the result" });
         }
         if (!canReachPeer(from, target)) {
-          return json(res, 403, { error: "that bot belongs to a different section" });
+          return json(res, 403, { error: `that bot belongs to a different section or is unavailable. ${PEER_ACCESS_HELP}` });
         }
         forBot = { botId: target.id, name: target.name };
       }

@@ -7,7 +7,7 @@ import { z } from "zod";
 import { fitsOnOneLine } from "../../bot-profile.ts";
 import { maxConcurrentBotThreads } from "../../config.ts";
 import { queueDelegation, pendingDelegationSnapshot, type QueueResult } from "../../delegations.ts";
-import { canAccessTeam, peerAllowed, reachablePeers } from "../../peer-roster.ts";
+import { canAccessTeam, peerAllowed, reachablePeers, PEER_ACCESS_HELP} from "../../peer-roster.ts";
 import { redactSecretsInText } from "../../redact.ts";
 import { sectionKey, type Message } from "../../store.ts";
 import type { InternalRoutesOptions } from "../internal.ts";
@@ -121,10 +121,10 @@ export async function startThread(ctx: ThreadsCtx, res: ServerResponse): Promise
       return json(res, 200, { error: "thread chains are limited to one hop — open the thread on yourself, or do this one here" });
     }
     if (!canAccessTeam(from, target.section) || target.hidden) {
-      return json(res, 403, { error: "that bot belongs to a different section" });
+      return json(res, 403, { error: `that bot belongs to a different section or is unavailable. ${PEER_ACCESS_HELP}` });
     }
     if (!peerAllowed(from, target.id)) {
-      return json(res, 403, { error: "that bot is not on this bot's allowed peers — call list_bots for the ones you can reach" });
+      return json(res, 403, { error: `that bot is not on this bot's allowed peers. ${PEER_ACCESS_HELP}` });
     }
     const task = store.createTask(target.id, title, false, projectId, { botId: from.id, name: from.name, at: Date.now() });
     if (!task) return json(res, 500, { error: "couldn't create that thread" });
