@@ -188,7 +188,10 @@ export function createBotComputerRoutes(deps: {
         const release = m[2] === "sleep" ? claimTeamComputerLifecycle(teamComputer) : claimBotComputerLifecycle(key);
         try {
           if (m[2] === "join") { json(res, 200, await box.joinReadyBox(cfg, key)); return true; }
-          if (m[2] === "screenshot") { json(res, 200, await box.screenshotBox(cfg, key)); return true; }
+          if (m[2] === "screenshot") {
+            res.setHeader("cache-control", "private, no-store");
+            json(res, 200, await box.screenshotBox(cfg, key)); return true;
+          }
           json(res, 200, await box.sleepBox(cfg, key));
           return true;
         } finally { release(); }
@@ -202,6 +205,7 @@ export function createBotComputerRoutes(deps: {
             });
             vpsPreviewRequests.set(botId, preview);
           }
+          res.setHeader("cache-control", "private, no-store");
           json(res, 200, await preview);
           return true;
         }
@@ -280,6 +284,7 @@ export function createBotComputerRoutes(deps: {
             json(res, 200, await computerBackend.action(cfg, botId, "exec", { command: boxCommand ?? "" }));
             return true;
           case "screenshot":
+            res.setHeader("cache-control", "private, no-store");
             json(res, 200, await computerBackend.screenshot(cfg, botId));
             return true;
         }
