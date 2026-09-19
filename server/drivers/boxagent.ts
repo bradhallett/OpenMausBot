@@ -150,15 +150,12 @@ export const BoxAgentDriver: ProviderDriver<BoxAgentConfig> = {
       // the remote queue a prompt nobody will collect.
       let cancelled = false;
       const controller = new AbortController();
-      runtime.setTurn(threadId, {
-        turnId,
-        boxId,
-        cancel: () => {
-          cancelled = true;
-          controller.abort();
-          void api(`/boxes/${boxId}/interrupt`, { method: "POST" }).catch(() => {});
-        },
-      });
+      const cancel = () => {
+        cancelled = true;
+        controller.abort();
+        void api(`/boxes/${boxId}/interrupt`, { method: "POST" }).catch(() => {});
+      };
+      runtime.setTurn(threadId, { turnId, boxId, cancel });
       let started: any;
       try {
         started = await api(`/boxes/${boxId}/prompt`, {
@@ -167,8 +164,13 @@ export const BoxAgentDriver: ProviderDriver<BoxAgentConfig> = {
           signal: controller.signal,
         });
       } catch (error) {
-        // An abort is the interrupt that was asked for, not a dispatch failure.
-        if (!controller.signal.aborted) throw error;
+        // An abort is the interrupt that was asked for, not a dispatch
+        // failure. Any other error must still stop a prompt the box may
+        // already have accepted before the failure surfaced.
+        if (!controller.signal.aborted) {
+          cancel();
+          throw error;
+        }
       }
       // Teardown won the race with the dispatch: settle as interrupted and
       // never start a poller for a prompt this turn no longer owns.
