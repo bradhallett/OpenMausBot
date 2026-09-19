@@ -121,7 +121,8 @@ export function PanelHeader({
           </div>
         )}
         <button
-        onClick={onClose}
+          aria-label={t("common.close")}
+          onClick={onClose}
           className="rounded-md p-1 text-ink-secondary hover:bg-control hover:text-ink"
         >
           <X size={18} />

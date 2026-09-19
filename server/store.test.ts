@@ -1311,7 +1311,7 @@ describe("Store change stream", () => {
     expect(events.at(-1)).toEqual({ type: "group.deleted", groupId: g.id });
   });
 
-  it("deleteGroup is retryable when thread deletion or the save fails partway", () => {
+  it("deleteGroup survives thread-deletion and save failures through durable tombstones", () => {
     const store = new Store(selection);
     const a = store.createBot();
     const b = store.createBot();
@@ -1322,8 +1322,12 @@ describe("Store change stream", () => {
     };
     expect(() => store.deleteGroup(g.id)).toThrow("thread deletion failed");
     store.deleteThreadRecord = realDeleteThreadRecord;
-    expect(store.group(g.id)?.id).toBe(g.id);
-    expect(store.deleteGroup(g.id)).toBe(true);
+    // The group is already durably removed; the retry drains the staged
+    // tombstone instead of resurrecting an in-memory snapshot.
+    expect(store.deleteGroup(g.id)).toBe(false);
+    const reloaded = new Store(selection);
+    expect(reloaded.group(g.id)).toBeUndefined();
+    expect(reloaded.messagesFor(g.threadId)).toHaveLength(0);
 
     const g3 = store.createGroup("ops-3", [a.id, b.id]);
     const channel = store.createGroupTask(g3.id, "channel", false)!;
@@ -1338,12 +1342,12 @@ describe("Store change stream", () => {
     };
     expect(() => store.deleteGroup(g3.id)).toThrow("second thread deletion failed");
     store.deleteThreadRecord = realTwoPhaseDelete;
-    expect(store.group(g3.id)?.id).toBe(g3.id);
-    expect(store.messagesFor(g3.threadId)).toHaveLength(1);
-    expect(store.messagesFor(channel.threadId)).toHaveLength(1);
-    expect(store.deleteGroup(g3.id)).toBe(true);
-    expect(store.messagesFor(g3.threadId)).toHaveLength(0);
-    expect(store.messagesFor(channel.threadId)).toHaveLength(0);
+    expect(store.deleteGroup(g3.id)).toBe(false);
+    const reloaded3 = new Store(selection);
+    expect(reloaded3.group(g3.id)).toBeUndefined();
+    expect(reloaded3.messagesFor(g3.threadId)).toHaveLength(0);
+    expect(reloaded3.messagesFor(channel.threadId)).toHaveLength(0);
+
     const g2 = store.createGroup("ops-2", [a.id, b.id]);
     const persistable = store as unknown as { saveGroups: () => void };
     const realSaveGroups = persistable.saveGroups.bind(store);
@@ -1356,9 +1360,15 @@ describe("Store change stream", () => {
       realSaveGroups();
     };
     expect(() => store.deleteGroup(g2.id)).toThrow("disk full");
-    expect(store.group(g2.id)?.id).toBe(g2.id);
     persistable.saveGroups = realSaveGroups;
-    expect(store.deleteGroup(g2.id)).toBe(true);
+    // The failed save leaves the group on disk with no tombstone; a fresh
+    // store still finds it and can delete it for good.
+    const onDisk = new Store(selection);
+    expect(onDisk.group(g2.id)?.id).toBe(g2.id);
+    expect(onDisk.deleteGroup(g2.id)).toBe(true);
+    const reloaded2 = new Store(selection);
+    expect(reloaded2.group(g2.id)).toBeUndefined();
+    expect(reloaded2.messagesFor(g2.threadId)).toHaveLength(0);
   });
 
   it("delivers each change to the listener snapshot captured before emission", () => {

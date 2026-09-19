@@ -702,7 +702,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
           state.settled = true;
           if (interruptTimer) clearTimeout(interruptTimer);
           for (const finish of asks.values()) finish("cancel", "system");
-          acp.failAll(new Error("turn settled"));
+          acp.close();
           runtime.endTurn(threadId, turnId);
           flushAssistantText();
           emit({ ...base(threadId, turnId), type: "turn.completed", ok, stopReason, cost: null });

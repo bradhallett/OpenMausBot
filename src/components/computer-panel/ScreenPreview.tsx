@@ -91,7 +91,7 @@ export function ScreenPreview({
     "busy-box": t("computer.phase.busyBox"),
     unconfigured: t("computer.phase.unconfigured"),
     "auto-unavailable": t("computer.phase.autoUnavailable"),
-    "team-box": "This bot uses a shared team computer. Open Team map to view or manage it.",
+    "team-box": t("computer.phase.teamBox"),
     "show-ready-box": t("computer.phase.showReadyBox"),
     "show-sleeping-box": t("computer.phase.showSleepingBox"),
     "show-pending-box": t("computer.phase.showPendingBox"),
@@ -110,7 +110,7 @@ export function ScreenPreview({
           {/* Screen preview */}
           <div className="mb-1.5 mt-2 flex items-center justify-between text-[13px] text-ink-secondary">
             <span>{t("computer.screenOf", { name: bot.name })}</span>
-            {currentTeamComputer && <span className="text-[11px]">Team default</span>}
+            {currentTeamComputer && <span className="text-[11px]">{t("computer.badge.teamDefault")}</span>}
             {phase === "local" && <span className="text-[11px]">{t("computer.badge.local")}</span>}
             {phase === "vm" && <span className="text-[11px]">{t("vm.dest.vm")}</span>}
             {(phase === "show-ready-box" || phase === "show-sleeping-box" || phase === "show-pending-box") && (
@@ -186,11 +186,11 @@ export function ScreenPreview({
                     : emptyState[phase]}
               </span>
               {currentTeamComputer && <>
-                <p className="text-[12px]">Shared files and signed-in accounts. Auto uses this Box, not a private computer.</p>
+                <p className="text-[12px]">{t("computer.teamSharedDescription")}</p>
                 <button type="button" onClick={onShowTeamMap}
-                  className="mt-1 rounded-lg bg-control px-3 py-1.5 text-[12px] text-ink hover:bg-raised-hover">Open Team map</button>
+                  className="mt-1 rounded-lg bg-control px-3 py-1.5 text-[12px] text-ink hover:bg-raised-hover">{t("computer.openTeamMap")}</button>
                 <button type="button" onClick={onRefreshStatus}
-                  className="text-[11px] text-ink-secondary hover:text-ink">Refresh shared computer status</button>
+                  className="text-[11px] text-ink-secondary hover:text-ink">{t("computer.refreshSharedComputer")}</button>
               </>}
               {phase === "local" && !isLinux && localMisses >= 3 && (
                 <button

@@ -41,6 +41,7 @@ export const handlers = {
       method: "PATCH",
       body: JSON.stringify({ modelSelection: selection, requireAvailableModel: true }),
     });
+    if (!isRecord(res?.bot)) throw new Error("OpenMausBot did not return the updated bot");
     return { success: true, bot: projectBot(res.bot) };
   },
 } satisfies Record<string, ToolHandler>;

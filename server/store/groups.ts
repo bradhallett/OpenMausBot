@@ -102,36 +102,25 @@ export function patchGroup(ctx: StoreContext, id: string, patch: Partial<Pick<Gr
 }
 
 export function deleteGroup(ctx: StoreContext, id: string): boolean {
+  flushPendingThreadDeletions(ctx, id);
   const record = ctx.group(id);
   if (!record) return false;
-  const index = ctx.groups.indexOf(record);
-  // Phase 1: snapshot every owned thread before anything is deleted, so a
-  // partway failure can restore the full retryable state.
+  // Stage every transcript the group owns before anything disappears: the
+  // pending-deletion record on disk is what a crash, reload, or retry
+  // finishes, so no history can outlive the group in groups.json.
   const ownedThreads = [...new Set([record.threadId, ...(record.tasks ?? []).map((task) => task.threadId)])];
-  const snapshots = ownedThreads.map((threadId) => ({ threadId, state: ctx.threads.get(threadId) }));
-  // Phase 2: only now unlink transcripts, and never remove the group until
-  // every thread deletion has succeeded.
-  try {
-    for (const { threadId } of snapshots) {
-      ctx.deleteThreadRecord(threadId);
-    }
-  } catch (error) {
-    // Threads whose deletion already ran are restored from the snapshot, so
-    // the group and its full thread list stay retryable.
-    for (const { threadId, state } of snapshots) {
-      if (state) ctx.threads.set(threadId, state);
-    }
-    throw error;
-  }
+  stagePendingThreadDeletions(id, ownedThreads);
   ctx.groups = ctx.groups.filter((g) => g.id !== id);
   try {
     ctx.saveGroups();
   } catch (error) {
-    // The in-memory group is restored so groups.json stays authoritative and a
-    // retry can find it.
-    ctx.groups.splice(index, 0, record);
+    clearPendingThreadDeletions(id, ownedThreads);
     throw error;
   }
+  for (const threadId of ownedThreads) {
+    ctx.deleteThreadRecord(threadId);
+  }
+  clearPendingThreadDeletions(id, ownedThreads);
   ctx.emit({ type: "group.deleted", groupId: id });
   return true;
 }

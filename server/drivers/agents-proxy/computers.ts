@@ -20,7 +20,7 @@ export const handlers = {
     const response = await ctx.api("/api/internal/shared-computers", { method: "POST", body: JSON.stringify(args) });
     const result = response.result as Json;
     if (Array.isArray(result?.content)) return { result };
-    return { text: JSON.stringify(result) };
+    return { text: JSON.stringify(result ?? response) };
   },
   async select_computer(args: Json, ctx: ToolContext): Promise<ToolOutcome> {
     if (args.surface !== undefined && (typeof args.surface !== "string" || !["auto", "cloud", "vm", "local", "browser"].includes(args.surface))) {
