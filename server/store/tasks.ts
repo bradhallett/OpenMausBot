@@ -298,6 +298,7 @@ export function deleteTask(ctx: StoreContext, botId: string, threadId: string): 
   const previousTasks = record.tasks;
   const previousThreadId = record.threadId;
   const previousPinnedMessageId = record.pinnedMessageId;
+  const snapshot = structuredClone(record);
   record.tasks = record.tasks.filter((t) => t.threadId !== threadId);
   // The tombstone is durable before anything below can save: the
   // replacement branch persists via createTask, and a crash between that
@@ -318,6 +319,8 @@ export function deleteTask(ctx: StoreContext, botId: string, threadId: string): 
     record.tasks = previousTasks;
     record.threadId = previousThreadId;
     record.pinnedMessageId = previousPinnedMessageId;
+    // Roll the bot back so a failed save cannot leave a half-applied deletion for a later save to persist.
+    Object.assign(record, snapshot);
     clearPendingThreadDeletions(botId, [threadId]);
     throw error;
   }
