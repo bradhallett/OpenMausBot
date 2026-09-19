@@ -30,7 +30,7 @@ export function NewRoomPanel({ onClose }: { onClose: () => void }) {
     if (!panel) return;
     const focusables = Array.from(
       panel.querySelectorAll<HTMLElement>('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'),
-    ).filter((el) => !el.disabled && el.offsetParent !== null);
+    ).filter((el) => !el.hasAttribute("disabled") && el.offsetParent !== null);
     if (focusables.length === 0) return;
     const first = focusables[0];
     const last = focusables[focusables.length - 1];

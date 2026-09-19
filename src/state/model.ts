@@ -280,6 +280,8 @@ export interface TaskUsage {
 export interface Bot {
   id: string;
   threadId: string;
+  /** When the bot was created (wire bots always carry it); used for fallback task timestamps. */
+  createdAt?: number;
   /** every context this bot has, newest first */
   tasks?: Task[];
   projects?: BotProject[];
