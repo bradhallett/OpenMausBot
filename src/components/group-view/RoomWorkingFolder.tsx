@@ -30,8 +30,13 @@ export function RoomWorkingFolder({ group }: { group: Group }) {
     try {
       const res = await api(`/api/groups/${group.id}`, { method: "PATCH", body: JSON.stringify({ cwd }) });
       const updated = res?.group;
-      if (updated && typeof updated.cwd === "string") {
-        dispatch({ type: "patchGroup", groupId: group.id, patch: { cwd: updated.cwd } });
+      if (updated) {
+        if (typeof updated.cwd === "string" || updated.cwd === null) {
+          dispatch({ type: "patchGroup", groupId: group.id, patch: { cwd: updated.cwd ?? undefined } });
+        } else if (cwd === null) {
+          // A successful clear may omit the field entirely — clear locally all the same.
+          dispatch({ type: "patchGroup", groupId: group.id, patch: { cwd: undefined } });
+        }
       }
       setDraft(null);
     } catch (e) {
