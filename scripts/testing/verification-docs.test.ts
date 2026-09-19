@@ -34,7 +34,7 @@ const serverModules = [
   ...readdirSync(join(ROOT, "server", "routes"), { recursive: true })
     .filter((name) => name.endsWith(".ts"))
     .map((name) => join(ROOT, "server", "routes", name)),
-];
+].filter((path) => existsSync(path));
 const serverSource = serverModules.map((path) => readFileSync(path, "utf8")).join("\n");
 const hooksSource = readFileSync(join(ROOT, "server", "webhook-ingress.ts"), "utf8");
 const hostedSource = readFileSync(join(ROOT, "enterprise", "server", "workspace-access.ts"), "utf8");
