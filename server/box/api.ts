@@ -6,6 +6,14 @@ import type { AppConfig } from "../config.ts";
 
 // overridable so tests can point at a stub instead of the live provider
 const BOX_API = process.env.OMB_BOX_API || "https://ascii.dev/api/box/v1";
+// Desktop URLs carry stream tokens, so a provider answer may only send the
+// user to the Box service's own host, a subdomain of it, or one of these
+// explicitly allowlisted extras (OMB_BOX_DESKTOP_HOSTS, comma-separated).
+export const BOX_API_HOST = new URL(BOX_API).hostname.toLowerCase();
+export const EXTRA_DESKTOP_HOSTS = (process.env.OMB_BOX_DESKTOP_HOSTS ?? "")
+  .split(",")
+  .map((host) => host.trim().toLowerCase())
+  .filter(Boolean);
 export const READY = new Set(["idle", "ready", "running"]);
 
 export const BOX_ID = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;

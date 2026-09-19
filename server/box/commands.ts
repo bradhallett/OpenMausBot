@@ -2,7 +2,7 @@
 // synchronous command endpoint, and desktop URL minting.
 
 import type { AppConfig } from "../config.ts";
-import { boxFetch, boxJson } from "./api.ts";
+import { BOX_API_HOST, boxFetch, boxJson, EXTRA_DESKTOP_HOSTS } from "./api.ts";
 import { assertBoxNotDeleting } from "./deletion.ts";
 
 const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
@@ -48,18 +48,33 @@ export async function runCommand(cfg: AppConfig, boxId: string, command: string,
 //      networks; answers {provisioning:true} first, so poll for the URL.
 //   2) WebRTC stream (POST /desktop) as fallback — STUN-only, can hang.
 // The desktopUrl stored on the box object is NOT usable on its own.
+/** A provider desktop URL is forwarded only when it is https and its host is
+ * the Box service domain, a subdomain of it, or an explicitly allowlisted
+ * extra — anything else the provider answers is refused (null). */
+export function validDesktopUrl(url: unknown): string | null {
+  if (typeof url !== "string" || !url) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:") return null;
+  const host = parsed.hostname.toLowerCase();
+  if (host !== BOX_API_HOST && !host.endsWith(`.${BOX_API_HOST}`) && !EXTRA_DESKTOP_HOSTS.includes(host)) return null;
+  return url;
+}
 export async function mintDesktopUrl(cfg: AppConfig, boxId: string, { vncBudgetMs = 60_000 } = {}) {
   assertBoxNotDeleting(boxId);
   const t0 = Date.now();
   while (Date.now() - t0 < vncBudgetMs) {
     assertBoxNotDeleting(boxId);
     const { body } = await boxJson(cfg, `/boxes/${boxId}/desktop?vnc=1`, { method: "POST" });
-    const url = body?.desktopUrl ?? body?.url;
-    if (typeof url === "string" && url) return url;
+    const url = validDesktopUrl(body?.desktopUrl ?? body?.url);
+    if (url) return url;
     if (!body?.provisioning) break;
     await new Promise((r) => setTimeout(r, 3000));
   }
   const { body } = await boxJson(cfg, `/boxes/${boxId}/desktop`, { method: "POST" });
-  const url = body?.desktopUrl ?? body?.url;
-  return typeof url === "string" && url ? url : null;
+  return validDesktopUrl(body?.desktopUrl ?? body?.url);
 }
