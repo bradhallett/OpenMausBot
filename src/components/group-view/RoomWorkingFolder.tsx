@@ -29,7 +29,13 @@ export function RoomWorkingFolder({ group }: { group: Group }) {
     setError(null);
     try {
       const response = await api(`/api/groups/${group.id}`, { method: "PATCH", body: JSON.stringify({ cwd }) });
-      dispatch({ type: "groupPatched", group: response.group });
+      // A cleared folder comes back absent from the server's group (it
+      // stores undefined), so a plain merge would keep the stale local
+      // cwd — make the cleared value explicit before it merges into state.
+      const updated = response.group;
+      if (updated) {
+        dispatch({ type: "groupPatched", group: { ...updated, cwd: typeof updated.cwd === "string" ? updated.cwd : undefined } });
+      }
       setDraft(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
