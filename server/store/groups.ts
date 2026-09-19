@@ -116,8 +116,9 @@ export function deleteGroup(ctx: StoreContext, id: string): boolean {
       ctx.deleteThreadRecord(threadId);
     }
   } catch (error) {
-    // Threads whose deletion already ran are restored from the snapshot, so
-    // the group and its full thread list stay retryable.
+    // Threads whose deletion already ran keep their durable deletion; the
+    // snapshot only restores the in-memory thread cache, so the group record
+    // and its not-yet-deleted threads stay retryable.
     for (const { threadId, state } of snapshots) {
       if (state) ctx.threads.set(threadId, state);
     }
@@ -127,8 +128,7 @@ export function deleteGroup(ctx: StoreContext, id: string): boolean {
   try {
     ctx.saveGroups();
   } catch (error) {
-    // The in-memory group is restored so groups.json stays authoritative and a
-    // retry can find it.
+    // The in-memory group list is restored so a retry can find the record.
     ctx.groups.splice(index, 0, record);
     throw error;
   }

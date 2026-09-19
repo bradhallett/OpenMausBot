@@ -147,7 +147,7 @@ export function ArchivedBotsPanel({
     setRestoringAll(true);
     setError("");
     try {
-      const responses = await Promise.all(
+      const results = await Promise.allSettled(
         bots.map((bot) =>
           api(`/api/bots/${bot.id}`, {
             method: "PATCH",
@@ -155,7 +155,15 @@ export function ArchivedBotsPanel({
           }),
         ),
       );
-      for (const response of responses) dispatch({ type: "botPatched", bot: response.bot });
+      const failures: string[] = [];
+      for (const result of results) {
+        if (result.status === "fulfilled") dispatch({ type: "botPatched", bot: result.value.bot });
+        else failures.push(result.reason instanceof Error ? result.reason.message : String(result.reason));
+      }
+      if (failures.length > 0) {
+        setError(failures.join("; "));
+        return;
+      }
       const first = bots[0];
       if (first) dispatch({ type: "select", id: first.id });
       onRestored(
@@ -164,8 +172,6 @@ export function ArchivedBotsPanel({
           : t("sidebar.archived.restoredMany", { count: bots.length }),
       );
       onClose();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setRestoringAll(false);
     }

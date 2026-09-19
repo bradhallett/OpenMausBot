@@ -1339,8 +1339,9 @@ describe("Store change stream", () => {
     expect(() => store.deleteGroup(g3.id)).toThrow("second thread deletion failed");
     store.deleteThreadRecord = realTwoPhaseDelete;
     expect(store.group(g3.id)?.id).toBe(g3.id);
-    expect(store.messagesFor(g3.threadId)).toHaveLength(1);
-    expect(store.messagesFor(channel.threadId)).toHaveLength(1);
+    const reloaded = new Store(selection);
+    expect(reloaded.messagesFor(g3.threadId)).toHaveLength(0);
+    expect(reloaded.messagesFor(channel.threadId)).toHaveLength(1);
     expect(store.deleteGroup(g3.id)).toBe(true);
     expect(store.messagesFor(g3.threadId)).toHaveLength(0);
     expect(store.messagesFor(channel.threadId)).toHaveLength(0);

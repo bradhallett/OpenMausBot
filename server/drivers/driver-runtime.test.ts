@@ -48,6 +48,18 @@ describe("driver session runtime teardown", () => {
     expect(runtime.claimCanceled("turn-1")).toBe(false);
   });
 
+  it("rejects a claim on a busy thread and releases an unlaunched claim", async () => {
+    const { runtime } = makeRuntime();
+    runtime.claimTurn("t1", "turn-1");
+    expect(() => runtime.claimTurn("t1", "turn-2")).toThrow(/already running/);
+    await runtime.stopAll();
+    expect(runtime.claimCanceled("turn-1")).toBe(true);
+    runtime.endTurn("t1", "turn-1");
+    expect(() => runtime.claimTurn("t1", "turn-3")).not.toThrow();
+    runtime.setTurn("t1", { turnId: "turn-3" });
+    expect(() => runtime.claimTurn("t1", "turn-4")).toThrow(/already running/);
+  });
+
   it("rejects new claims while a stopAll teardown is in flight", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });

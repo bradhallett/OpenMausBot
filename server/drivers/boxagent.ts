@@ -145,24 +145,44 @@ export const BoxAgentDriver: ProviderDriver<BoxAgentConfig> = {
         emit({ ...base(threadId, turnId), type: "turn.completed", ok: false, stopReason: "interrupted", cost: null });
         return { turnId };
       }
-      const started: any = await api(`/boxes/${boxId}/prompt`, {
-        method: "POST",
-        body: JSON.stringify({ ...providerFor(model), prompt }),
-      });
-      appendNative(threadId, { dir: "out", source: "box.prompt", msg: { model, prompt, response: started } });
-      // real shape (2026-08): {type:"prompt.queued", promptId, promptRun:{id,…},
-      // id:<box id>} — never fall back to the bare id, it's the box's
-      const promptId = started?.promptRun?.id ?? started?.prompt?.id ?? started?.promptId ?? null;
-
+      // Register before the dispatch, not after: a teardown while the POST
+      // is pending aborts it — and interrupts the box — instead of letting
+      // the remote queue a prompt nobody will collect.
       let cancelled = false;
+      const controller = new AbortController();
       runtime.setTurn(threadId, {
         turnId,
         boxId,
         cancel: () => {
           cancelled = true;
+          controller.abort();
           void api(`/boxes/${boxId}/interrupt`, { method: "POST" }).catch(() => {});
         },
       });
+      let started: any;
+      try {
+        started = await api(`/boxes/${boxId}/prompt`, {
+          method: "POST",
+          body: JSON.stringify({ ...providerFor(model), prompt }),
+          signal: controller.signal,
+        });
+      } catch (error) {
+        // An abort is the interrupt that was asked for, not a dispatch failure.
+        if (!controller.signal.aborted) throw error;
+      }
+      // Teardown won the race with the dispatch: settle as interrupted and
+      // never start a poller for a prompt this turn no longer owns.
+      if (runtime.claimCanceled(turnId) || controller.signal.aborted) {
+        runtime.endTurn(threadId, turnId);
+        emit({ ...base(threadId, turnId), type: "turn.started" });
+        emit({ ...base(threadId, turnId), type: "turn.completed", ok: false, stopReason: "interrupted", cost: null });
+        return { turnId };
+      }
+      appendNative(threadId, { dir: "out", source: "box.prompt", msg: { model, prompt, response: started } });
+      // real shape (2026-08): {type:"prompt.queued", promptId, promptRun:{id,…},
+      // id:<box id>} — never fall back to the bare id, it's the box's
+      const promptId = started?.promptRun?.id ?? started?.prompt?.id ?? started?.promptId ?? null;
+
       emit({ ...base(threadId, turnId), type: "turn.started" });
       emit({ ...base(threadId, turnId), type: "session.started", sessionId: promptId, model });
 

@@ -60,6 +60,7 @@ export function useComputerActions({
 }) {
   const desktopJoin = useRef<AbortController | null>(null);
   useEffect(() => () => desktopJoin.current?.abort(), [viewerConnectionKey]);
+  const ownsActiveConnection = () => viewerConnection.current === viewerConnectionKey;
 
   const openDesktop = async () => {
     const controller = new AbortController();
@@ -123,9 +124,10 @@ export function useComputerActions({
   const run = (kind: "sleep" | "provision") => {
     setPending(kind);
     setError(null);
-    api(`/api/bots/${bot.id}/computer/${kind}`, { method: "POST" })
-      .then((result) => {
-        if (kind === "provision") {
+  api(`/api/bots/${bot.id}/computer/${kind}`, { method: "POST" })
+    .then((result) => {
+      if (!ownsActiveConnection()) return;
+      if (kind === "provision") {
           setBoxState(result.container ?? null);
           if (result.ready) {
             if (bot.computer === "cloud") {
@@ -143,10 +145,11 @@ export function useComputerActions({
           setBoxState(cloudBackend === "vps" ? "stopped" : "archived");
           if (cloudBackend === "vps") setPhase("vps-stopped");
         }
-      })
-      .catch((e) => {
-        setError(e.message);
-      })
+    })
+    .catch((e) => {
+      if (!ownsActiveConnection()) return;
+      setError(e.message);
+    })
       .finally(() => setPending(null));
   };
 
@@ -169,12 +172,14 @@ export function useComputerActions({
           method: "POST",
           body: "{}",
         });
+        if (!ownsActiveConnection()) return;
       }
       if (action !== "vm-delete") {
         const status: LocalVmStatus = await api(`/api/bots/${bot.id}/local-computer/run`, {
           method: "POST",
           body: "{}",
         });
+        if (!ownsActiveConnection()) return;
         setVmStatus(status);
         setPhase(status.ready ? "vm" : "checking");
       } else {
@@ -182,11 +187,12 @@ export function useComputerActions({
         setPhase("vm-unavailable");
       }
     } catch (e) {
+      if (!ownsActiveConnection()) return;
       setError(e instanceof Error ? e.message : String(e));
       setPhase("vm-unavailable");
     } finally {
       setPending(null);
-      setRetry((n) => n + 1);
+      if (ownsActiveConnection()) setRetry((n) => n + 1);
     }
   };
 
@@ -196,10 +202,12 @@ export function useComputerActions({
     setError(null);
     try {
       await api(`/api/bots/${bot.id}/computer/remove`, { method: "POST", body: "{}" });
+      if (!ownsActiveConnection()) return;
       const result: VpsComputerStatus = await api(`/api/bots/${bot.id}/computer/provision`, {
         method: "POST",
         body: "{}",
       });
+      if (!ownsActiveConnection()) return;
       setVpsStatus(result);
       setBoxState(result.container ?? null);
       if (result.ready && bot.computer === "cloud") {
@@ -208,11 +216,12 @@ export function useComputerActions({
       setPhase(result.ready ? "ready" : "error");
       if (!result.ready) setError(result.problem ?? new LocalizedPanelError("computer.err.vpsReplaceNotReady"));
     } catch (e) {
+      if (!ownsActiveConnection()) return;
       setError(e instanceof Error ? e.message : String(e));
       setPhase("error");
     } finally {
       setPending(null);
-      setRetry((n) => n + 1);
+      if (ownsActiveConnection()) setRetry((n) => n + 1);
     }
   };
 

@@ -394,7 +394,10 @@ describe("MCP tool execution", () => {
     const fetcher = vi.fn();
     await expect(handleToolCall("edit_bot_message", {
       bot_id: "bot-1", message_id: "m-9", text: "   ",
-    }, fetcher as never)).rejects.toThrow("text is required");
+    }, fetcher as never)).rejects.toThrow("text must not be empty");
+    await expect(handleToolCall("edit_bot_message", {
+      bot_id: "bot-1", message_id: "m-9", text: { not: "a string" },
+    }, fetcher as never)).rejects.toThrow("arguments.text must be string");
     expect(fetcher).not.toHaveBeenCalled();
   });
 

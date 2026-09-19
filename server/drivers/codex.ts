@@ -419,8 +419,11 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         "codex_apps",
         "computer-use",
       ]);
-      runtime.assertThreadIdle(threadId);
       const turnId = newId();
+      // Claim before any launch work: the reservation, not a bare idle
+      // check, is what a stopAll()/dispose() racing the spawn sees — the
+      // new process cannot survive a teardown that already snapshotted.
+      runtime.claimTurn(threadId, turnId);
       // a retry relaunches the whole app-server; the backoff is scaled down in
       // tests so a fake's transient failures don't stall real seconds
       const retryScale = Number(process.env.FAKE_CODEX_RETRY_SCALE ?? "1");
@@ -1297,7 +1300,11 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       }
     };
 
-    void launchAttempt(0).catch(() => {});
+    void launchAttempt(0).catch(() => {
+      // setTurn consumes the claim; a launch that never reached it (a spawn
+      // failure) must hand the thread back instead of holding it busy forever.
+      runtime.endTurn(threadId, turnId);
+    });
     return { turnId };
   };
 

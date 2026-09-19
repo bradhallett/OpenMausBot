@@ -158,7 +158,10 @@ export async function probeCuaDesktop(probe: CuaDesktopProbe): Promise<CuaDeskto
       // bounded tail turns an endless "not ready yet" into something the
       // user can act on.
       const errorLog = await probe.errorLogTail();
-      desktop_error = errorLog.stdout.replace(/\s+/g, " ").trim().slice(0, 320) || desktop_error;
+      const logTail = errorLog.stdout.replace(/\s+/g, " ").trim();
+      if (logTail) {
+        desktop_error = [desktop_error, logTail].filter(Boolean).join(": ").slice(0, 320);
+      }
     } catch {
       // The log may not exist during the first seconds of container boot.
     }

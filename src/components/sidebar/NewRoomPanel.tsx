@@ -46,7 +46,7 @@ export function NewRoomPanel({ onClose }: { onClose: () => void }) {
           value={name}
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") create();
+            if (e.key === "Enter" && !e.nativeEvent.isComposing) create();
             if (e.key === "Escape") onClose();
           }}
           placeholder={t("sidebar.newChannel.name")}
@@ -57,7 +57,7 @@ export function NewRoomPanel({ onClose }: { onClose: () => void }) {
           maxLength={60}
           onChange={(e) => setSection(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") create();
+            if (e.key === "Enter" && !e.nativeEvent.isComposing) create();
             if (e.key === "Escape") onClose();
           }}
           placeholder={t("sidebar.newChannel.context")}
