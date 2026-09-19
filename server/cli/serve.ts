@@ -2,6 +2,7 @@
 // supervising the child process, and pairing at startup.
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
+import { networkInterfaces } from "node:os";
 import { join, resolve } from "node:path";
 
 import { ensureCaddy, startCaddy, type RunningCaddy } from "../caddy.ts";
@@ -42,6 +43,25 @@ export function serverEntry(here = HERE): { command: string; args: string[]; sta
   const source = join(here, "index.ts");
   const staticDir = existsSync(join(root, "dist", "index.html")) ? join(root, "dist") : null;
   return { command: process.execPath, args: ["--experimental-strip-types", source], staticDir, skillsDir: existsSync(join(root, "skills")) ? join(root, "skills") : null };
+}
+
+/** RFC1918 check for interface addresses; loopback and link-local stay out
+ * because pairing from the same machine uses a different, local path. */
+function isPrivateIpv4(address: string): boolean {
+  const match = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(address);
+  if (!match) return false;
+  const [a, b] = [Number(match[1]), Number(match[2])];
+  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+/** One-line nudge for the "no LAN option" path (#1283): with no public URL
+ * configured, the desktop client still accepts a plain-http pairing link for
+ * a private LAN address, so show how to publish one. Null when there is no
+ * address worth suggesting. */
+export function lanPairingHint(addresses: string[], port: number): string | null {
+  const address = addresses[0];
+  if (!address) return null;
+  return `on this network: pair a desktop client via OMB_PUBLIC_URL=http://${address}:${port} (serve behind any local http proxy on that address)`;
 }
 
 interface TunnelPlan {
@@ -257,6 +277,16 @@ export async function runServe(options: CliOptions, log: (line: string) => void 
     }
     log("");
     log(`OpenMausBot is running on http://127.0.0.1:${options.port}${publicUrl ? `, reachable at ${publicUrl}` : ""}`);
+    if (!publicUrl) {
+      // The desktop validator accepts plain-http pairing links only for
+      // private LAN hosts, so surface that option when one is reachable.
+      const addresses = Object.values(networkInterfaces())
+        .flatMap((entries) => entries ?? [])
+        .filter((entry) => entry.family === "IPv4" && isPrivateIpv4(entry.address))
+        .map((entry) => entry.address);
+      const lanHint = lanPairingHint(addresses, options.port);
+      if (lanHint) log(lanHint);
+    }
     if (options.guided) {
       log("Your bots and conversations are saved automatically.");
       log(`Details if you need help: ${logPath}`);
