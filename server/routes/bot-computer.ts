@@ -188,7 +188,7 @@ export function createBotComputerRoutes(deps: {
         const release = m[2] === "sleep" ? claimTeamComputerLifecycle(teamComputer) : claimBotComputerLifecycle(key);
         try {
           if (m[2] === "join") { json(res, 200, await box.joinReadyBox(cfg, key)); return true; }
-          if (m[2] === "screenshot") { json(res, 200, await box.screenshotBox(cfg, key)); return true; }
+          if (m[2] === "screenshot") { json(res, 200, await box.screenshotBox(cfg, key), { "cache-control": "private, no-store" }); return true; }
           json(res, 200, await box.sleepBox(cfg, key));
           return true;
         } finally { release(); }
@@ -202,7 +202,7 @@ export function createBotComputerRoutes(deps: {
             });
             vpsPreviewRequests.set(botId, preview);
           }
-          json(res, 200, await preview);
+          json(res, 200, await preview, { "cache-control": "private, no-store" });
           return true;
         }
         // Opening the existing SSH viewer can coexist with a capture. Start,
@@ -280,7 +280,7 @@ export function createBotComputerRoutes(deps: {
             json(res, 200, await computerBackend.action(cfg, botId, "exec", { command: boxCommand ?? "" }));
             return true;
           case "screenshot":
-            json(res, 200, await computerBackend.screenshot(cfg, botId));
+            json(res, 200, await computerBackend.screenshot(cfg, botId), { "cache-control": "private, no-store" });
             return true;
         }
       } finally {

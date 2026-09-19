@@ -135,6 +135,7 @@ describe("live browser connection lifecycle", () => {
     await settle();
     expect(api).toHaveBeenCalledWith("/api/bots/pepper/browser/action", {
       method: "POST", body: JSON.stringify({ type: "restart", viewerId: "current-viewer" }),
+      timeoutMs: 120_000,
     });
     source.emit("error", { message: "Browser restarted" });
     restart.resolve(); await settle();
@@ -246,6 +247,7 @@ describe("live browser connection lifecycle", () => {
     viewport.props.acknowledge!(8);
     expect(api).toHaveBeenCalledWith("/api/bots/pepper/browser/action", {
       method: "POST", body: JSON.stringify({ type: "ack", seq: 8, viewerId: "old-viewer" }),
+      timeoutMs: 120_000,
     });
     cleanup?.();
     const secondCleanup = connect();

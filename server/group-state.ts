@@ -141,7 +141,7 @@ export interface GroupStateDeps {
     followupsReady(): boolean;
     localVmImageBusy(): boolean;
     localVmModeChangeBusy(): boolean;
-    setLocalVmProvisionBusy(value: boolean): void;
+    localVmProvisionBusy: { get(): boolean; set(value: boolean): void };
     roomSetupPending(group: GroupRecord): boolean;
     resolveReplyTarget(threadId: string, value: unknown): Message | undefined;
     routines(): RoutineManager | null;
@@ -174,7 +174,7 @@ export function createGroupState(deps: GroupStateDeps) {
     GROUP_GOAL_WAIT_MAX_MS, GROUP_GOAL_MAX_WAIT_EXHAUSTIONS,
     providerFleet, providerInstancesChanging,
     drainQueuedSends, retryDelegationsWaitingOn, startTurn,
-    followupsReady, localVmImageBusy, localVmModeChangeBusy, setLocalVmProvisionBusy,
+    followupsReady, localVmImageBusy, localVmModeChangeBusy, localVmProvisionBusy,
     roomSetupPending, resolveReplyTarget,
     routines, routineWiring, phoneSecretSubmissions,
   } = deps.lateBound;
@@ -395,7 +395,7 @@ const {
 } = createLocalVmTurnPrep({
   lateBound: {
     broadcast: (payload) => broadcast(payload),
-    setLocalVmProvisionBusy,
+    localVmProvisionBusy,
   },
   lifecycle: {
     localVmLifecycleBusy, LOCAL_VM_IDLE_MS, LOCAL_VM_DESKTOP_WAIT_MS, localVmIdleFor, noteLocalVmSeen,

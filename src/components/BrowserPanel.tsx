@@ -33,6 +33,7 @@ export function LiveBrowser({ bot }: { bot: Bot }) {
   const profilesDialog = useRef<HTMLDialogElement>(null);
   const typingDialog = useRef<HTMLDialogElement>(null);
   const inputQueue = useRef<ReturnType<typeof createBrowserInputQueue> | null>(null);
+  const haltMessage = useRef("");
   const urlEditing = useRef(false);
   const profileName = bot.browserProfile === "guest" ? "Temporary browser"
     : state.config?.browserProfiles?.find((profile) => profile.id === bot.browserProfile)?.name ?? `${bot.name}’s own browser`;
@@ -41,7 +42,11 @@ export function LiveBrowser({ bot }: { bot: Bot }) {
 
   const action = useCallback(async (body: Record<string, unknown>, expected = viewer.current) => {
     if (!expected) throw new Error("Open the browser connection first.");
-    return api(`/api/bots/${bot.id}/browser/action`, { method: "POST", body: JSON.stringify({ ...body, viewerId: expected }) });
+    // 120s matches the server's browser requestTimeoutMs: restart replies can
+    // be legitimately slow (see the reconnect note in the stream error
+    // handler), but a wedged request must surface an error instead of
+    // leaving the panel pending forever.
+    return api(`/api/bots/${encodeURIComponent(bot.id)}/browser/action`, { method: "POST", body: JSON.stringify({ ...body, viewerId: expected }), timeoutMs: 120_000 });
   }, [bot.id]);
   const input = useCallback((body: Record<string, unknown>) => {
     inputQueue.current?.enqueue(body);
@@ -60,29 +65,35 @@ export function LiveBrowser({ bot }: { bot: Bot }) {
     const current = ++generation.current;
     const ownsConnection = () => generation.current === current;
     let stopped = false;
-    viewer.current = ""; pendingOperation.current = null;
+    viewer.current = ""; pendingOperation.current = null; haltMessage.current = "";
     setFrame(null); setTabs([]); setAddress(""); setConnected(false); setError("");
     setControl({ held: false, controlling: false, owned: false }); setPending(false);
-    const source = new EventSource(`/api/bots/${bot.id}/browser/live`);
+    const source = new EventSource(`/api/bots/${encodeURIComponent(bot.id)}/browser/live`);
     const listen = (name: string, handler: (data: any) => void) => source.addEventListener(name, (event) => {
       if (stopped || !ownsConnection()) return;
       try { handler(JSON.parse((event as MessageEvent).data)); } catch { /* Malformed events are not rendered. */ }
     });
     listen("ready", (data) => {
-      const expected = String(data.viewerId);
+      if (typeof data.viewerId !== "string" || !data.viewerId) return;
+      const expected = data.viewerId;
       viewer.current = expected;
       inputQueue.current = createBrowserInputQueue(async (body) => {
         if (ownsConnection() && viewer.current === expected) await action(body, expected);
-      }, (cause) => { if (ownsConnection() && viewer.current === expected) setError(cause instanceof Error ? cause.message : String(cause)); });
+      }, (cause) => {
+        if (!ownsConnection() || viewer.current !== expected) return;
+        haltMessage.current = cause instanceof Error ? cause.message : String(cause);
+        setError(haltMessage.current);
+      });
       setConnected(true);
     });
     listen("frame", (data) => { if (viewer.current) setFrame({ ...data, viewerId: viewer.current, generation: current }); });
     listen("tabs", (data) => {
+      if (!Array.isArray(data.tabs)) return;
       setTabs(data.tabs);
       const active = data.tabs.find((tab: BrowserTab) => tab.active);
       if (active && !urlEditing.current) setAddress(active.url === "about:blank" ? "" : active.url);
     });
-    listen("url", (data) => { if (!urlEditing.current) setAddress(data.url === "about:blank" ? "" : data.url); });
+    listen("url", (data) => { if (typeof data.url === "string" && !urlEditing.current) setAddress(data.url === "about:blank" ? "" : data.url); });
     listen("status", (data) => {
       if (data.viewportWidth > 0 && data.viewportHeight > 0) setViewport({ width: data.viewportWidth, height: data.viewportHeight });
     });
@@ -123,6 +134,9 @@ export function LiveBrowser({ bot }: { bot: Bot }) {
       await queue?.drain();
       if (generation.current !== current || viewer.current !== expected) return;
       await action(body, expected);
+      // A halted queue silently drops input; restore the banner the
+      // setError("") above cleared so the view does not look interactive.
+      if (inputQueue.current?.stopped() && generation.current === current) setError(haltMessage.current);
       if (generation.current === current && body.type === "restart") reconnect();
     }
     catch (cause) { if (generation.current === current) setError(cause instanceof Error ? cause.message : String(cause)); }

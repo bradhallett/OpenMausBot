@@ -221,6 +221,14 @@ export async function assembleTurnIntegrations({
     if (!localVm.ready || !localVm.runtime) {
       throw new Error(`${localVm.problem ?? "the Local VM is not ready"} (App Settings → Computers)`);
     }
+    // The readiness walk can wait minutes for the desktop, and the group
+    // path re-validates its lease afterwards; the direct path needs the
+    // same guard so a turn never attaches MCP to a desktop another turn
+    // now owns.
+    const owner = localVmLeaseFor(localVmTarget).current(localVmOwnerBusy);
+    if (owner?.threadId !== claimThreadId || owner.botId !== bot.id) {
+      throw new Error("the Local VM lease expired while preparing the turn");
+    }
     // Same contract as the Box and VPS branches below: without this the
     // poller never starts, so the Local VM publishes no `screen` events
     // and every client that only has the stream (the phone) waits
@@ -458,4 +466,3 @@ export async function assembleTurnIntegrations({
   }
   return { integrations, previewCapture, computerKind, worksInWorkspace, privateWorkspace, skillInstructions, packagePlaybooks, cwd, checkpointCwd, teamComputer };
 }
-

@@ -5,7 +5,7 @@ import { setupModeActive } from "../../setup-mode.ts";
 import { buildSystemPrompt } from "../../system-prompt.ts";
 import { agentBrowserFrame } from "../../browser-engine.ts";
 import { guardTurnDispatch } from "../../turn-dispatch-guard.ts";
-import { directTurnBots, threadBusy } from "../../turn-admission.ts";
+import { claimTurnResource, directTurnBots, threadBusy, turnResourceOwners } from "../../turn-admission.ts";
 import { type BotRecord, type Store } from "../../store.ts";
 import {
   bindInternalCapabilityToProviderTurn,
@@ -103,7 +103,14 @@ export async function prepareTurnDispatch({
     if (browser) {
       const frame = { binaryPath: browser.spec.command, env: browser.spec.env };
       const session = browser.session;
-      browserCapture = () => browserRuntime.withAgentAction(session, () => agentBrowserFrame(frame));
+      // The preview shares the profile with tool calls: claim the same
+      // exclusive browser:<session> resource the tools/call path claims,
+      // and skip the frame while another thread holds it.
+      browserCapture = async () => {
+        const owner = turnResourceOwners.get(threadId);
+        if (!owner || !claimTurnResource(owner, `browser:${session}`)) throw new Error("another thread is using this browser");
+        return browserRuntime.withAgentAction(session, () => agentBrowserFrame(frame));
+      };
     }
   }
   // An Auto conversation remembers where its first turn landed, so later
