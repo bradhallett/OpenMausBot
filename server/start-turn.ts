@@ -833,6 +833,15 @@ export function createStartTurn(deps: StartTurnDeps) {
             dropLease();
             throw new Error(`${localVm.problem ?? "the Local VM is not ready"} (App Settings → Computers)`);
           }
+          // The readiness walk can wait minutes for the desktop, and the group
+          // path re-validates its lease afterwards; the direct path needs the
+          // same guard so a turn never attaches MCP to a desktop another turn
+          // now owns.
+          const owner = localVmLeaseFor(localVmTarget).current(localVmOwnerBusy);
+          if (owner?.threadId !== claimThreadId || owner.botId !== bot.id) {
+            dropLease();
+            throw new Error("the Local VM lease expired while preparing the turn");
+          }
           // Same contract as the Box and VPS branches below: without this the
           // poller never starts, so the Local VM publishes no `screen` events
           // and every client that only has the stream (the phone) waits
@@ -1230,7 +1239,14 @@ export function createStartTurn(deps: StartTurnDeps) {
           if (browser) {
             const frame = { binaryPath: browser.spec.command, env: browser.spec.env };
             const session = browser.session;
-            browserCapture = () => browserRuntime.withAgentAction(session, () => agentBrowserFrame(frame));
+            // The preview shares the profile with tool calls: claim the same
+            // exclusive browser:<session> resource the tools/call path claims,
+            // and skip the frame while another thread holds it.
+            browserCapture = async () => {
+              const owner = turnResourceOwners.get(threadId);
+              if (!owner || !claimTurnResource(owner, `browser:${session}`)) throw new Error("another thread is using this browser");
+              return browserRuntime.withAgentAction(session, () => agentBrowserFrame(frame));
+            };
           }
         }
         // An Auto conversation remembers where its first turn landed, so later
@@ -1455,4 +1471,3 @@ export function createStartTurn(deps: StartTurnDeps) {
 }
 
 export type StartTurn = ReturnType<typeof createStartTurn>;
-
