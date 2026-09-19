@@ -1378,5 +1378,6 @@
   "engines.icon.formatError": "Sube una imagen PNG, JPEG o WebP.",
   "engines.icon.sizeError": "Los iconos de proveedor deben ocupar como máximo 128 KB.",
   "engines.icon.invalidError": "Sube una imagen PNG, JPEG o WebP completa de hasta 128 KB y {dimension} × {dimension} píxeles.",
-  "engines.icon.dimensionError": "Los iconos de proveedor deben medir como máximo {dimension} × {dimension} píxeles."
+  "engines.icon.dimensionError": "Los iconos de proveedor deben medir como máximo {dimension} × {dimension} píxeles.",
+  "chat.sentViaApi": "Enviado mediante la API, no escrito aquí"
 }

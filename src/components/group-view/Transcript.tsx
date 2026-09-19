@@ -133,7 +133,7 @@ export const Transcript = memo(function Transcript({
               <ActivityRun messages={item.messages} forceOpen={item.messages.some((step) => step.id === focusedId)}>
                 {item.messages.map((step) => (
                   <div key={step.id} className="contents" data-mid={step.id}>
-                    <RoomToolChip message={step} />
+                    <RoomToolChip message={step} roomId={group.id} />
                   </div>
                 ))}
               </ActivityRun>
@@ -237,7 +237,7 @@ export const Transcript = memo(function Transcript({
                       {attachments && <AttachmentGallery images={attachments.images} files={attachments.files} message={{ threadId: group.threadId, messageId: m.id }} eager={m.id === newestMessageId || m.id === newestUserMessageId} className={!attachments.display ? "mb-0" : undefined} />}
                       <ThreadRefText text={attachments?.display ?? m.text ?? ""} peers={members} everyone={!group.dm} />
                       {m.via === "api" && (
-                        <div className="mt-1 text-[11px] text-ink-secondary">Sent through the API, not typed here</div>
+                        <div className="mt-1 text-[11px] text-ink-secondary">{t("chat.sentViaApi")}</div>
                       )}
                     </>
                   ) : (

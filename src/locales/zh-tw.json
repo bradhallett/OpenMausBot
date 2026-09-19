@@ -312,6 +312,7 @@
   "inspector.run.screen": "已觀察畫面",
   "inspector.run.response": "已記錄回應",
   "chat.copyMessage": "複製訊息",
+  "chat.sentViaApi": "透過 API 傳送，並非在此輸入",
   "chat.showRawMarkdown": "顯示原始 Markdown",
   "chat.showRenderedMarkdown": "顯示渲染後的 Markdown",
   "chat.retry": "重試",

@@ -1378,5 +1378,6 @@
   "engines.icon.formatError": "PNG、JPEG、WebP 画像をアップロードしてください。",
   "engines.icon.sizeError": "プロバイダーアイコンは 128 KB 以下にしてください。",
   "engines.icon.invalidError": "128 KB 以下、{dimension} × {dimension} ピクセル以下の完全な PNG、JPEG、WebP 画像をアップロードしてください。",
-  "engines.icon.dimensionError": "プロバイダーアイコンは {dimension} × {dimension} ピクセル以下にしてください。"
+  "engines.icon.dimensionError": "プロバイダーアイコンは {dimension} × {dimension} ピクセル以下にしてください。",
+  "chat.sentViaApi": "API経由で送信されました。ここで入力されたものではありません"
 }

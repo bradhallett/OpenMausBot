@@ -1378,5 +1378,6 @@
   "engines.icon.formatError": "请上传 PNG、JPEG 或 WebP 图片。",
   "engines.icon.sizeError": "提供商图标不得超过 128 KB。",
   "engines.icon.invalidError": "请上传完整的 PNG、JPEG 或 WebP 图片，大小不超过 128 KB，尺寸不超过 {dimension} × {dimension} 像素。",
-  "engines.icon.dimensionError": "提供商图标的尺寸不得超过 {dimension} × {dimension} 像素。"
+  "engines.icon.dimensionError": "提供商图标的尺寸不得超过 {dimension} × {dimension} 像素。",
+  "chat.sentViaApi": "通过 API 发送，非在此输入"
 }

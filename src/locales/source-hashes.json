@@ -1381,7 +1381,8 @@
       "engines.icon.formatError": "cac21e64a1b0dc3a421bd88e8d23ce185c76a2c4c78f465873f0f3cbcf928500",
       "engines.icon.sizeError": "4ad3162859ca86617999a6ee558f3095de4bb527dd28cb1b837032010a67d5db",
       "engines.icon.invalidError": "57ce920ff252ec0e89155c21acbb2d755994b17dc776dee89e61e31137876b9b",
-      "engines.icon.dimensionError": "d437467fed2405ebedf3d892c484ec1f2d024d7def8b953fd7d561c1ca3f324b"
+      "engines.icon.dimensionError": "d437467fed2405ebedf3d892c484ec1f2d024d7def8b953fd7d561c1ca3f324b",
+      "chat.sentViaApi": "a32ae46ee969ee152bcc00083013bb2563a8478dfabbd462f518fe70f35b227b"
     },
     "es": {
       "noEngines.title": "af88855a5f80377de709995229ba3907df9e8fb3b940fbf7c0d9cbe6eea54afe",
@@ -2763,7 +2764,8 @@
       "engines.icon.formatError": "cac21e64a1b0dc3a421bd88e8d23ce185c76a2c4c78f465873f0f3cbcf928500",
       "engines.icon.sizeError": "4ad3162859ca86617999a6ee558f3095de4bb527dd28cb1b837032010a67d5db",
       "engines.icon.invalidError": "57ce920ff252ec0e89155c21acbb2d755994b17dc776dee89e61e31137876b9b",
-      "engines.icon.dimensionError": "d437467fed2405ebedf3d892c484ec1f2d024d7def8b953fd7d561c1ca3f324b"
+      "engines.icon.dimensionError": "d437467fed2405ebedf3d892c484ec1f2d024d7def8b953fd7d561c1ca3f324b",
+      "chat.sentViaApi": "a32ae46ee969ee152bcc00083013bb2563a8478dfabbd462f518fe70f35b227b"
     },
     "fr": {
       "noEngines.title": "af88855a5f80377de709995229ba3907df9e8fb3b940fbf7c0d9cbe6eea54afe",
@@ -4145,7 +4147,8 @@
       "engines.icon.formatError": "cac21e64a1b0dc3a421bd88e8d23ce185c76a2c4c78f465873f0f3cbcf928500",
       "engines.icon.sizeError": "4ad3162859ca86617999a6ee558f3095de4bb527dd28cb1b837032010a67d5db",
       "engines.icon.invalidError": "57ce920ff252ec0e89155c21acbb2d755994b17dc776dee89e61e31137876b9b",
-      "engines.icon.dimensionError": "d437467fed2405ebedf3d892c484ec1f2d024d7def8b953fd7d561c1ca3f324b"
+      "engines.icon.dimensionError": "d437467fed2405ebedf3d892c484ec1f2d024d7def8b953fd7d561c1ca3f324b",
+      "chat.sentViaApi": "a32ae46ee969ee152bcc00083013bb2563a8478dfabbd462f518fe70f35b227b"
     },
     "hi": {
       "noEngines.title": "af88855a5f80377de709995229ba3907df9e8fb3b940fbf7c0d9cbe6eea54afe",
@@ -5527,7 +5530,8 @@
       "engines.icon.formatError": "cac21e64a1b0dc3a421bd88e8d23ce185c76a2c4c78f465873f0f3cbcf928500",
       "engines.icon.sizeError": "4ad3162859ca86617999a6ee558f3095de4bb527dd28cb1b837032010a67d5db",
       "engines.icon.invalidError": "57ce920ff252ec0e89155c21acbb2d755994b17dc776dee89e61e31137876b9b",
-      "engines.icon.dimensionError": "d437467fed2405ebedf3d892c484ec1f2d024d7def8b953fd7d561c1ca3f324b"
+      "engines.icon.dimensionError": "d437467fed2405ebedf3d892c484ec1f2d024d7def8b953fd7d561c1ca3f324b",
+      "chat.sentViaApi": "a32ae46ee969ee152bcc00083013bb2563a8478dfabbd462f518fe70f35b227b"
     },
     "ja": {
       "noEngines.title": "af88855a5f80377de709995229ba3907df9e8fb3b940fbf7c0d9cbe6eea54afe",
@@ -6909,7 +6913,8 @@
       "engines.icon.formatError": "cac21e64a1b0dc3a421bd88e8d23ce185c76a2c4c78f465873f0f3cbcf928500",
       "engines.icon.sizeError": "4ad3162859ca86617999a6ee558f3095de4bb527dd28cb1b837032010a67d5db",
       "engines.icon.invalidError": "57ce920ff252ec0e89155c21acbb2d755994b17dc776dee89e61e31137876b9b",
-      "engines.icon.dimensionError": "d437467fed2405ebedf3d892c484ec1f2d024d7def8b953fd7d561c1ca3f324b"
+      "engines.icon.dimensionError": "d437467fed2405ebedf3d892c484ec1f2d024d7def8b953fd7d561c1ca3f324b",
+      "chat.sentViaApi": "a32ae46ee969ee152bcc00083013bb2563a8478dfabbd462f518fe70f35b227b"
     },
     "pt-br": {
       "noEngines.title": "af88855a5f80377de709995229ba3907df9e8fb3b940fbf7c0d9cbe6eea54afe",
@@ -8298,7 +8303,8 @@
       "engines.icon.formatError": "cac21e64a1b0dc3a421bd88e8d23ce185c76a2c4c78f465873f0f3cbcf928500",
       "engines.icon.sizeError": "4ad3162859ca86617999a6ee558f3095de4bb527dd28cb1b837032010a67d5db",
       "engines.icon.invalidError": "57ce920ff252ec0e89155c21acbb2d755994b17dc776dee89e61e31137876b9b",
-      "engines.icon.dimensionError": "d437467fed2405ebedf3d892c484ec1f2d024d7def8b953fd7d561c1ca3f324b"
+      "engines.icon.dimensionError": "d437467fed2405ebedf3d892c484ec1f2d024d7def8b953fd7d561c1ca3f324b",
+      "chat.sentViaApi": "a32ae46ee969ee152bcc00083013bb2563a8478dfabbd462f518fe70f35b227b"
     },
     "zh": {
       "noEngines.title": "af88855a5f80377de709995229ba3907df9e8fb3b940fbf7c0d9cbe6eea54afe",
@@ -9680,7 +9686,8 @@
       "engines.icon.formatError": "cac21e64a1b0dc3a421bd88e8d23ce185c76a2c4c78f465873f0f3cbcf928500",
       "engines.icon.sizeError": "4ad3162859ca86617999a6ee558f3095de4bb527dd28cb1b837032010a67d5db",
       "engines.icon.invalidError": "57ce920ff252ec0e89155c21acbb2d755994b17dc776dee89e61e31137876b9b",
-      "engines.icon.dimensionError": "d437467fed2405ebedf3d892c484ec1f2d024d7def8b953fd7d561c1ca3f324b"
+      "engines.icon.dimensionError": "d437467fed2405ebedf3d892c484ec1f2d024d7def8b953fd7d561c1ca3f324b",
+      "chat.sentViaApi": "a32ae46ee969ee152bcc00083013bb2563a8478dfabbd462f518fe70f35b227b"
     },
     "zh-tw": {
       "noEngines.title": "af88855a5f80377de709995229ba3907df9e8fb3b940fbf7c0d9cbe6eea54afe",
@@ -9996,6 +10003,7 @@
       "inspector.run.screen": "dce10324392a6f7ff2345431ce5480c172e137758f18c3fb9a092040ea386355",
       "inspector.run.response": "b5fbf785bb07b7964da1172cc72515121575f28b287deff8696bf3c37b7988bc",
       "chat.copyMessage": "457efe538b254dfb95785ca0ef7a9c5f7ae3e1bfbe715e469de3d9dfcb7ad87e",
+      "chat.sentViaApi": "a32ae46ee969ee152bcc00083013bb2563a8478dfabbd462f518fe70f35b227b",
       "chat.showRawMarkdown": "ba45bec078076a894fe8bf051f0f1f604c31fad97e420121a815e3d4af562d25",
       "chat.showRenderedMarkdown": "c72efd91108e49de63696d6aff4be6089c0583e6966c21e57806bf92764e40bb",
       "chat.retry": "942087cc2d41e01304b7195558d093d10c72af8e838c7556d6a02d471ee71852",
@@ -11957,6 +11965,7 @@
       "inspector.run.screen": "dce10324392a6f7ff2345431ce5480c172e137758f18c3fb9a092040ea386355",
       "inspector.run.response": "b5fbf785bb07b7964da1172cc72515121575f28b287deff8696bf3c37b7988bc",
       "chat.copyMessage": "457efe538b254dfb95785ca0ef7a9c5f7ae3e1bfbe715e469de3d9dfcb7ad87e",
+      "chat.sentViaApi": "a32ae46ee969ee152bcc00083013bb2563a8478dfabbd462f518fe70f35b227b",
       "chat.showRawMarkdown": "ba45bec078076a894fe8bf051f0f1f604c31fad97e420121a815e3d4af562d25",
       "chat.showRenderedMarkdown": "c72efd91108e49de63696d6aff4be6089c0583e6966c21e57806bf92764e40bb",
       "chat.retry": "942087cc2d41e01304b7195558d093d10c72af8e838c7556d6a02d471ee71852",

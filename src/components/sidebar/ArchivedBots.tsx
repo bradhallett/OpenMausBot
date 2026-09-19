@@ -147,7 +147,7 @@ export function ArchivedBotsPanel({
     setRestoringAll(true);
     setError("");
     try {
-      const responses = await Promise.all(
+      const results = await Promise.allSettled(
         bots.map((bot) =>
           api(`/api/bots/${bot.id}`, {
             method: "PATCH",
@@ -155,7 +155,13 @@ export function ArchivedBotsPanel({
           }),
         ),
       );
-      for (const response of responses) dispatch({ type: "botPatched", bot: response.bot });
+      for (const result of results) {
+        if (result.status === "fulfilled") dispatch({ type: "botPatched", bot: result.value.bot });
+      }
+      const failure = results.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      if (failure) throw failure.reason;
       const first = bots[0];
       if (first) dispatch({ type: "select", id: first.id });
       onRestored(
@@ -261,4 +267,3 @@ export function ArchivedBotsPanel({
     document.body,
   );
 }
-

@@ -443,6 +443,7 @@
   "inspector.run.screen": "Screen observed",
   "inspector.run.response": "Response recorded",
   "chat.copyMessage": "Copy message",
+  "chat.sentViaApi": "Sent through the API, not typed here",
   "chat.showRawMarkdown": "Show raw markdown",
   "chat.showRenderedMarkdown": "Show rendered markdown",
   "chat.retry": "Retry",

@@ -340,6 +340,7 @@
   "inspector.run.screen": "Спостережено екран",
   "inspector.run.response": "Відповідь записано",
   "chat.copyMessage": "Копіювати повідомлення",
+  "chat.sentViaApi": "Надіслано через API, а не введено тут",
   "chat.showRawMarkdown": "Показати сирий markdown",
   "chat.showRenderedMarkdown": "Показати оброблений markdown",
   "chat.retry": "Повторити",

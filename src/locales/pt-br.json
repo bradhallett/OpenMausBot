@@ -1385,5 +1385,6 @@
   "engines.icon.formatError": "Envie uma imagem PNG, JPEG ou WebP.",
   "engines.icon.sizeError": "Os ícones de provedor devem ter no máximo 128 KB.",
   "engines.icon.invalidError": "Envie uma imagem PNG, JPEG ou WebP completa de até 128 KB e {dimension} × {dimension} pixels.",
-  "engines.icon.dimensionError": "Os ícones de provedor devem ter no máximo {dimension} × {dimension} pixels."
+  "engines.icon.dimensionError": "Os ícones de provedor devem ter no máximo {dimension} × {dimension} pixels.",
+  "chat.sentViaApi": "Enviado pela API, não digitado aqui"
 }

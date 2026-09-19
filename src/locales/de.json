@@ -1378,5 +1378,6 @@
   "engines.icon.formatError": "Lade ein PNG-, JPEG- oder WebP-Bild hoch.",
   "engines.icon.sizeError": "Anbietersymbole dürfen höchstens 128 KB groß sein.",
   "engines.icon.invalidError": "Lade ein vollständiges PNG-, JPEG- oder WebP-Bild mit höchstens 128 KB und {dimension} × {dimension} Pixeln hoch.",
-  "engines.icon.dimensionError": "Anbietersymbole dürfen höchstens {dimension} × {dimension} Pixel groß sein."
+  "engines.icon.dimensionError": "Anbietersymbole dürfen höchstens {dimension} × {dimension} Pixel groß sein.",
+  "chat.sentViaApi": "Über die API gesendet, nicht hier eingegeben"
 }

@@ -1378,5 +1378,6 @@
   "engines.icon.formatError": "PNG, JPEG या WebP छवि अपलोड करें।",
   "engines.icon.sizeError": "प्रदाता के आइकन का आकार 128 KB या उससे कम होना चाहिए।",
   "engines.icon.invalidError": "128 KB और {dimension} × {dimension} पिक्सेल तक की पूर्ण PNG, JPEG या WebP छवि अपलोड करें।",
-  "engines.icon.dimensionError": "प्रदाता के आइकन का आकार अधिकतम {dimension} × {dimension} पिक्सेल होना चाहिए।"
+  "engines.icon.dimensionError": "प्रदाता के आइकन का आकार अधिकतम {dimension} × {dimension} पिक्सेल होना चाहिए।",
+  "chat.sentViaApi": "API के माध्यम से भेजा गया, यहाँ टाइप नहीं किया गया"
 }
