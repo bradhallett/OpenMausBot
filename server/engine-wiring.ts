@@ -409,6 +409,7 @@ const {
     localVmImageBusy: () => deps.localVmImageBusy(),
     localVmModeChangeBusy: () => deps.localVmModeChangeBusy(),
     setLocalVmProvisionBusy: (value) => { deps.localVmProvisionBusy.set(value); },
+    isLocalVmProvisionBusy: () => deps.localVmProvisionBusy.get(),
     roomSetupPending: (group) => deps.roomSetupPending()(group),
     resolveReplyTarget: (threadId, value) => deps.resolveReplyTarget()(threadId, value),
     routines: () => deps.routines(),
