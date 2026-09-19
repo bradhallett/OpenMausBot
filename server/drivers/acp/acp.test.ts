@@ -1225,9 +1225,15 @@ describe("ACP turns (fake CLI)", () => {
       // for it rather than sleeping a fixed window past the idle deadline
       await new Promise<void>((resolve, reject) => {
         const deadline = Date.now() + 5_000;
+        const log = join(NATIVE_DIR, "t-pool-idle.ndjson");
         const check = () => {
-          if (readFileSync(join(NATIVE_DIR, "t-pool-idle.ndjson"), "utf8").includes('"close":"idle"')) return resolve();
           if (Date.now() > deadline) return reject(new Error("idle close was never logged"));
+          try {
+            if (readFileSync(log, "utf8").includes('"close":"idle"')) return resolve();
+          } catch (error) {
+            // appendNative() suppresses append errors, so the file may not exist yet
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") return reject(error);
+          }
           setTimeout(check, 25);
         };
         check();
