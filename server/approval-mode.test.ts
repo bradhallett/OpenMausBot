@@ -24,7 +24,7 @@ describe("approval modes", () => {
     expect(modelSwitchNeedsAsk("full", "codex", undefined)).toBe(true);
   });
   it("only exposes implemented provider capabilities", () => {
-    for (const driver of ["codex", "claudeAgent", "antigravityAgent", "cursorAgent", "grokAgent", "opencodeGo", "qwenAgent", "geminiAgent"]) {
+    for (const driver of ["codex", "claudeAgent", "antigravityAgent", "cursorAgent", "grokAgent", "opencodeGo", "qwenAgent", "geminiAgent", "openai-compat"]) {
       expect(supportsApprovalMode(driver, "full")).toBe(true);
       expect(supportsApprovalMode(driver, "custom")).toBe(driver === "codex");
       // Qwen's `--approval-mode auto` is an LLM classifier; Gemini has no reviewer
@@ -38,7 +38,7 @@ describe("approval modes", () => {
 
   it.each([
     "kimiAgent", "droidAgent", "hermesAgent", "customAcp",
-    "piAgent", "grok", "openai-compat", "boxAgent", "minimax", "unknown",
+    "piAgent", "grok", "boxAgent", "minimax", "unknown",
   ])("keeps %s on supported approval levels without claiming native Auto", (driver) => {
     expect(supportsApprovalMode(driver, "ask")).toBe(true);
     expect(supportsApprovalMode(driver, "auto")).toBe(true);
@@ -46,6 +46,14 @@ describe("approval modes", () => {
     expect(supportsApprovalMode(driver, "full")).toBe(false);
     expect(supportsApprovalMode(driver, "custom")).toBe(false);
     expect(hasNativeAutoReview(driver)).toBe(false);
+  });
+
+  it("keeps Full available for OpenAI-compatible engines (#1533)", () => {
+    // DeepSeek/GLM/OpenRouter ask through the app's own request plumbing,
+    // which a Full grant answers; leaving the kind off the whitelist
+    // silently downgraded every one of its turns to Ask.
+    expect(supportsApprovalMode("openai-compat", "full")).toBe(true);
+    expect(supportsApprovalMode("openai-compat", "custom")).toBe(false);
   });
   it("recognizes only the five durable values", () => {
     expect(APPROVAL_MODES).toEqual(["ask", "edits", "auto", "full", "custom"]);
