@@ -41,7 +41,7 @@ export function wireEnvironmentsDeps(reads) {
 
 // 127.0.0.1 explicitly — vite binds IPv4; a bare "localhost" here can
 // resolve to ::1 and paint a black window
-const DEV_URL = process.env.ELECTRON_START_URL ?? "http://127.0.0.1:5199";
+export const DEV_URL = process.env.ELECTRON_START_URL ?? "http://127.0.0.1:5199";
 
 export function rendererOrigin() {
   return new URL(app.isPackaged || deps.desktopRemoteAccess() ? `http://127.0.0.1:${SERVER_PORT}` : DEV_URL).origin;
