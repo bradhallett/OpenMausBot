@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, currentTaskBot, useStore, type Bot } from "@/state/store";
 import { effectivePlace } from "@/lib/place";
 import type { CloudBackend } from "../../../shared/wire";
@@ -38,7 +38,7 @@ export function useComputerSelection({
     ? autoSurfaceCurrent ? autoSurface.surface : undefined : livePlace };
   const viewerConnectionKey = `${bot.id}:${bot.threadId}:${bot.computer}:${bot.cloudBackend ?? "box"}`;
   const viewerConnection = useRef(viewerConnectionKey);
-  viewerConnection.current = viewerConnectionKey;
+  useLayoutEffect(() => { viewerConnection.current = viewerConnectionKey; }, [viewerConnectionKey]);
   const placeLive = Boolean(bot.busy);
   const threadPath = useCallback((suffix: string) =>
     `/api/bots/${profileBot.id}/${suffix}?threadId=${encodeURIComponent(profileBot.threadId)}`,
