@@ -34,6 +34,7 @@ import { cfg, store } from "./runtime.ts";
 export interface LocalVmTurnPrepDeps {
   lateBound: {
     broadcast(payload: Record<string, unknown>): void;
+    localVmProvisionBusy(): boolean;
     setLocalVmProvisionBusy(value: boolean): void;
   };
   lifecycle: {
@@ -46,7 +47,7 @@ export interface LocalVmTurnPrepDeps {
 }
 
 export function createLocalVmTurnPrep(deps: LocalVmTurnPrepDeps) {
-  const { broadcast, setLocalVmProvisionBusy } = deps.lateBound;
+  const { broadcast, localVmProvisionBusy, setLocalVmProvisionBusy } = deps.lateBound;
   const {
     localVmLifecycleBusy, LOCAL_VM_IDLE_MS, LOCAL_VM_DESKTOP_WAIT_MS, localVmIdleFor, noteLocalVmSeen,
   } = deps.lifecycle;
@@ -85,27 +86,45 @@ export function createLocalVmTurnPrep(deps: LocalVmTurnPrepDeps) {
    * refuses.
    */
   async function readyLocalVmForTurn(botId: string, target: LocalVmTarget, isCurrent = () => true) {
-    let status = await containerComputerStatus(undefined, undefined, target);
-    noteLocalVmSeen(target, status);
-    if (!isCurrent()) return status;
-    if (status.ready || !localVmRecreatableOnDemand(status)) return status;
-
-    if (target.key !== SHARED_LOCAL_VM_TARGET.key) {
-      const count = await existingPerBotLocalVmCount(status.runtime);
-      if (!isCurrent() || count >= localVmMaxInstances(cfg)) return status;
-    }
-
-    broadcast({ kind: "computer", botId, state: "provisioning" });
     localVmLifecycleBusy.add(target.key);
-    setLocalVmProvisionBusy(true);
+    // Fence this target, and the cross-target capacity decision for creates,
+    // before the first await — the same synchronous-fence-then-count shape
+    // the panel route uses — so two concurrent turns cannot both pass the
+    // per-bot limit between count and create.
+    const ownsProvision = localVmProvisionBusy();
+    if (ownsProvision) setLocalVmProvisionBusy(true);
+    let status: ContainerComputerStatus;
     try {
-      status = await containerComputerAction("run", undefined, undefined, target);
-    } catch {
-      // Keep the inspected status: its `problem` names the real obstacle, which
-      // is more use to the person than "podman run exited non-zero".
-      return status;
+      status = await containerComputerStatus(undefined, undefined, target);
+      noteLocalVmSeen(target, status);
+      if (!isCurrent()) return status;
+      if (status.ready || !localVmRecreatableOnDemand(status)) return status;
+      // Another creation is already mid-flight and its container is not yet
+      // visible to a count, so the safe answer is the inspected status —
+      // exactly what the over-cap path below returns.
+      if (!ownsProvision) return status;
+
+      if (target.key !== SHARED_LOCAL_VM_TARGET.key) {
+        const count = await existingPerBotLocalVmCount(status.runtime);
+        if (!isCurrent() || count >= localVmMaxInstances(cfg)) return status;
+      }
+
+      broadcast({ kind: "computer", botId, state: "provisioning" });
+      try {
+        status = await containerComputerAction("run", undefined, undefined, target);
+      } catch {
+        // Keep the inspected status: its `problem` names the real obstacle,
+        // which is more use to the person than "podman run exited non-zero".
+        // `run` can throw after the container exists, so arm the idle
+        // backstop anyway — expiry defers while the target is busy and its
+        // remove step no-ops unless a fresh probe sees a running container.
+        // The problem text stays as inspected: cheaply telling a half-created
+        // container from none here would need another container probe.
+        localVmIdleFor(target).touch();
+        return status;
+      }
     } finally {
-      setLocalVmProvisionBusy(false);
+      if (ownsProvision) setLocalVmProvisionBusy(false);
       localVmLifecycleBusy.delete(target.key);
     }
     localVmIdleFor(target).touch();
