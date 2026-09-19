@@ -102,6 +102,7 @@ export function patchGroup(ctx: StoreContext, id: string, patch: Partial<Pick<Gr
 }
 
 export function deleteGroup(ctx: StoreContext, id: string): boolean {
+  flushPendingThreadDeletions(ctx, id);
   const record = ctx.group(id);
   if (!record) return false;
   const index = ctx.groups.indexOf(record);
@@ -109,6 +110,7 @@ export function deleteGroup(ctx: StoreContext, id: string): boolean {
   // partway failure can restore the full retryable state.
   const ownedThreads = [...new Set([record.threadId, ...(record.tasks ?? []).map((task) => task.threadId)])];
   const snapshots = ownedThreads.map((threadId) => ({ threadId, state: ctx.threads.get(threadId) }));
+  stagePendingThreadDeletions(id, ownedThreads);
   // Phase 2: only now unlink transcripts, and never remove the group until
   // every thread deletion has succeeded.
   try {
@@ -126,6 +128,7 @@ export function deleteGroup(ctx: StoreContext, id: string): boolean {
   ctx.groups = ctx.groups.filter((g) => g.id !== id);
   try {
     ctx.saveGroups();
+    clearPendingThreadDeletions(id, ownedThreads);
   } catch (error) {
     // The in-memory group is restored so groups.json stays authoritative and a
     // retry can find it.

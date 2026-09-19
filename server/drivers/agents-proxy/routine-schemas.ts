@@ -225,7 +225,7 @@ function normalizeScheduleInput(args: Json): NormalizedSchedule {
     let intervalWeekdays: string[] | null | undefined;
     if (raw.every_day === true) {
       intervalWeekdays = null;
-    } else if (raw.weekdays !== undefined) {
+    } else if (raw.weekdays != null) {
       if (!Array.isArray(raw.weekdays) || raw.weekdays.length === 0) {
         return { error: 'Interval "weekdays" must contain at least one full weekday name.' };
       }

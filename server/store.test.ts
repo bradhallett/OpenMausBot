@@ -1338,12 +1338,19 @@ describe("Store change stream", () => {
     };
     expect(() => store.deleteGroup(g3.id)).toThrow("second thread deletion failed");
     store.deleteThreadRecord = realTwoPhaseDelete;
+    expect(pendingThreadDeletions()[g3.id]).toEqual([g3.threadId, channel.threadId]);
     expect(store.group(g3.id)?.id).toBe(g3.id);
     expect(store.messagesFor(g3.threadId)).toHaveLength(1);
     expect(store.messagesFor(channel.threadId)).toHaveLength(1);
+    // durable staging — the transcript SQLite already dropped before the later
+    // failure stays deleted in a fresh Store; only the channel is still retryable
+    const reloaded = new Store(selection);
+    expect(reloaded.messagesFor(g3.threadId)).toHaveLength(0);
+    expect(reloaded.messagesFor(channel.threadId)).toHaveLength(1);
     expect(store.deleteGroup(g3.id)).toBe(true);
     expect(store.messagesFor(g3.threadId)).toHaveLength(0);
     expect(store.messagesFor(channel.threadId)).toHaveLength(0);
+    expect(pendingThreadDeletions()[g3.id]).toBeUndefined();
     const g2 = store.createGroup("ops-2", [a.id, b.id]);
     const persistable = store as unknown as { saveGroups: () => void };
     const realSaveGroups = persistable.saveGroups.bind(store);

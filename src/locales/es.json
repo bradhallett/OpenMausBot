@@ -103,6 +103,7 @@
   "sidebar.section.bots": "Bots",
   "sidebar.section.moved": "{name} movido a la posición {position} de {count}",
   "sidebar.room.renameAria": "Cambiar el nombre de {name}",
+  "sidebar.room.menuAria": "Acciones de la sala",
   "sidebar.room.saveChatName": "Guardar nombre del hilo",
   "sidebar.room.cancelChatRename": "Cancelar cambio de nombre del hilo",
   "sidebar.room.renameChat": "Renombrar hilo",

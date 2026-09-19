@@ -49,7 +49,7 @@ const OVERLAY_EXCLUDES: Record<OverlayKind, readonly OverlayKind[]> = {
   newBot: ["settings", "appSettings", "plugins", "shortcuts"],
   computer: ["settings", "inspector", "appSettings"],
   inspector: ["settings", "computer", "appSettings"],
-  appSettings: ["settings", "computer", "inspector", "plugins", "newBot"],
+  appSettings: ["settings", "computer", "inspector", "plugins", "newBot", "tour"],
   shortcuts: [],
   tour: ["appSettings"],
   welcome: ["appSettings", "shortcuts"],

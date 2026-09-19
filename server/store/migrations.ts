@@ -278,15 +278,17 @@ export function migrateBotTaskBackfill(bots: BotRecord[], deps: MigrationDeps): 
     }
     for (const task of b.tasks) {
       if (task.modelSelection === undefined) {
-        task.modelSelection = structuredClone(b.modelSelection);
-        changed = true;
+        if (b.modelSelection !== undefined) {
+          task.modelSelection = structuredClone(b.modelSelection);
+          changed = true;
+        }
       }
       if (!task.resumeCursors) {
         task.resumeCursors = task === active ? (b.resumeCursors ?? {}) : {};
         changed = true;
       }
       if (task.unread === undefined) {
-        task.unread = task === active && b.unread;
+        task.unread = task === active && b.unread === true;
         changed = true;
       }
       if (task === active) {

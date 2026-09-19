@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ClipboardCopy, FolderPlus, Pencil, Trash2, X } from "lucide-react";
 import { useStore } from "@/state/store";
@@ -19,6 +19,26 @@ export function RoomContextMenu({
   const group = state.groups.find((g) => g.id === menu.groupId);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(group?.name ?? "");
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [measured, setMeasured] = useState<{ top: number; left: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const element = menuRef.current;
+    if (!element) return;
+    const { width, height } = element.getBoundingClientRect();
+    setMeasured({
+      top: Math.max(8, Math.min(menu.y, window.innerHeight - height - 8)),
+      left: Math.max(8, Math.min(menu.x, window.innerWidth - width - 8)),
+    });
+  }, [menu.x, menu.y]);
+
+  useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    menuRef.current?.querySelector<HTMLButtonElement>("button[role='menuitem']:not([disabled])")?.focus();
+    return () => {
+      if (opener?.isConnected) opener.focus();
+    };
+  }, []);
 
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
@@ -42,13 +62,27 @@ export function RoomContextMenu({
     if (name) dispatch({ type: "patchGroup", groupId: group.id, patch: { name } });
     onClose();
   };
-  const top = Math.min(menu.y, window.innerHeight - 204);
-  const left = Math.min(menu.x, window.innerWidth - 240);
+  const top = measured?.top ?? Math.min(menu.y, window.innerHeight - 204);
+  const left = measured?.left ?? Math.min(menu.x, window.innerWidth - 240);
   return createPortal(
     <div
       data-room-menu
       data-sidebar
+      ref={menuRef}
+      role="menu"
+      aria-label={t("sidebar.room.menuAria")}
       style={{ top, left }}
+      onKeyDown={(event) => {
+        if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+        const buttons = Array.from(
+          event.currentTarget.querySelectorAll<HTMLButtonElement>("button[role='menuitem']:not([disabled])"),
+        );
+        if (buttons.length === 0) return;
+        event.preventDefault();
+        const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+        const next = (index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+        buttons[next].focus();
+      }}
       className="fixed z-40 w-[228px] overflow-hidden rounded-xl border border-hairline/50 bg-menu py-1.5 shadow-2xl shadow-black/60"
     >
       {!remoteClient && (renaming ? (
@@ -93,6 +127,7 @@ export function RoomContextMenu({
         </div>
       ) : (
         <button
+          role="menuitem"
           onClick={() => {
             setDraft(group.name);
             setRenaming(true);
@@ -105,6 +140,7 @@ export function RoomContextMenu({
       ))}
       {!remoteClient && !isBotChat && (
         <button
+          role="menuitem"
           onClick={() => {
             onClose();
             onMoveToSection(group.id);
@@ -116,6 +152,7 @@ export function RoomContextMenu({
         </button>
       )}
       <button
+        role="menuitem"
         onClick={() => {
           void navigator.clipboard?.writeText(group.threadId);
           onClose();
@@ -126,6 +163,7 @@ export function RoomContextMenu({
         {t("sidebar.copyConversationId")}
       </button>
       {!remoteClient && <button
+        role="menuitem"
         onClick={() => {
           dispatch({ type: "deleteGroup", groupId: group.id });
           onClose();

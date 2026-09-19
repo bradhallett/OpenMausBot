@@ -18,6 +18,9 @@ export const handlers = {
   async shared_computer(args: Json, ctx: ToolContext): Promise<ToolOutcome> {
     if (!ctx.computerSharingEnabled) return sharingOff();
     const response = await ctx.api("/api/internal/shared-computers", { method: "POST", body: JSON.stringify(args) });
+    if (response.result === undefined) {
+      return { text: `The shared-computer request returned no result: ${JSON.stringify(response)}`, isError: true };
+    }
     const result = response.result as Json;
     if (Array.isArray(result?.content)) return { result };
     return { text: JSON.stringify(result) };
