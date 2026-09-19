@@ -7003,6 +7003,10 @@ describe("harness HTTP API", () => {
           OMB_PORT: String(isolatedPort),
           OMB_WEBHOOK_PORT: String(isolatedPort + 1),
           OMB_STATIC_DIR: isolatedStatic,
+          // A developer machine with agent-browser on PATH must not leak
+          // into this fixture: a "ready" engine makes the boot replay run
+          // the real binary, so the journal never ACKs within the poll.
+          OMB_AGENT_BROWSER_PATH: join(isolatedHome, "no-agent-browser"),
           FAKE_CLAUDE_MODE: "hang",
           FAKE_CLAUDE_DUMP: join(isolatedHome, "fake-claude-dump.json"),
         },
