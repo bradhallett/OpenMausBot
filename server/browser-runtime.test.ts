@@ -190,37 +190,16 @@ describe("server-owned browser MCP runtime", () => {
     await value.take("s", "owner");
     expect(value.canControl("s", "owner")).toBe(true);
   });
-  it("recovers by itself after a request timeout kills the browser, without a human takeover", async () => {
-    // Reported from the field: a fill mid-MFA timed out, and from then on every
-    // call on that session answered "A browser action was interrupted", through
-    // reconnects, deleting and recreating the browser in Settings, remounting
-    // the conversation's tools, and restarting the app. Nothing an agent can
-    // call clears it, because every tool call passes the same gate.
-    const value = runtime({ requestTimeoutMs: 2_000 });
+  it("does not assume an MCP timeout stopped an accepted daemon action", async () => {
+    const value = runtime({ requestTimeoutMs: 60 });
     await expect(value.agentRpc("s", spec(), "tools/call", { name: "hang" })).rejects.toThrow(/timed out/);
-    // The timeout stopped the transport, which SIGKILLs the child, so nothing
-    // is left running and the next call must be allowed to start a browser.
-    // The budget has to fit a cold engine spawn on a loaded runner: a tiny
-    // one that still fires on the eternally hanging call would also cut down
-    // every recovery attempt, because each timed-out attempt kills only its
-    // own fresh transport. Keep a bounded retry for transport-level timeouts; any
-    // other error (the wedged browser-action-interrupted state this test
-    // guards against) still fails immediately.
-    const deadline = Date.now() + 10_000;
-    let recovered: unknown;
-    let lastTimeout: unknown;
-    for (;;) {
-      if (lastTimeout && Date.now() > deadline) throw lastTimeout;
-      try {
-        recovered = await value.agentRpc("s", spec(), "tools/call", { name: "echo", arguments: { text: "back" } });
-        break;
-      } catch (error) {
-        if (!(error instanceof TransportError) || !/timed out/.test(String(error))) throw error;
-        lastTimeout = error;
-      }
-    }
-    expect(recovered).toMatchObject({ content: [{ text: expect.stringContaining("back") }] });
-    // and a person can still take control afterwards
+    // The real daemon detaches from its MCP parent. Transport exit is not
+    // proof that a navigation or submission stopped; do not replay it.
+    await expect(value.agentRpc("s", spec(), "tools/call", { name: "echo" })).rejects.toThrow(/Restart/);
+    await expect(value.take("s", "owner")).rejects.toThrow(/Restart/);
+    await value.restart("s", "owner", async () => {});
+    await expect(value.agentRpc("s", spec(), "tools/call", { name: "echo", arguments: { text: "back" } }))
+      .resolves.toMatchObject({ content: [{ text: expect.stringContaining("back") }] });
     await value.take("s", "owner");
     expect(value.canControl("s", "owner")).toBe(true);
   });
