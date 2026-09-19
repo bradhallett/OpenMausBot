@@ -656,6 +656,7 @@ const handleComputers = createComputersRoutes({
   existingPerBotLocalVmCount,
   localVmImageBusy,
   localVmModeChangeBusy: () => localVmModeChangeBusy.get(),
+  localVmActiveThreads,
   localVmProvisionBusy,
 });
 const handleBotCards = createBotCardsRoutes({

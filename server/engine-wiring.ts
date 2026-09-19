@@ -408,6 +408,7 @@ const {
     followupsReady: () => followupsReady.get(),
     localVmImageBusy: () => deps.localVmImageBusy(),
     localVmModeChangeBusy: () => deps.localVmModeChangeBusy(),
+    localVmProvisionBusy: () => deps.localVmProvisionBusy.get(),
     setLocalVmProvisionBusy: (value) => { deps.localVmProvisionBusy.set(value); },
     roomSetupPending: (group) => deps.roomSetupPending()(group),
     resolveReplyTarget: (threadId, value) => deps.resolveReplyTarget()(threadId, value),
