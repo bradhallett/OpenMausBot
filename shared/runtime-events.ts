@@ -137,8 +137,19 @@ export type RuntimeEvent = RuntimeEventBase &
     // configuring something, not by retrying — the UI offers setup instead.
     // `terminal: true` records failure of the complete turn, rather than a
     // transient error or a legacy provider's diagnostic during cancellation.
+    | {
+        /** The opt-in decision model answered a computer-use step (#1630).
+         * `acted` steps skipped a screenshot and an LLM turn; every other
+         * outcome silently fell back to the normal loop. */
+        type: "decision.chooser";
+        outcome: "acted" | "abstained" | "reobserve" | "below-threshold" | "error";
+        selectedId?: string;
+        confidence?: number;
+        model?: string;
+        flow?: string;
+        detail?: string;
+      }
     | { type: "runtime.error"; message: string; setup?: boolean; terminal?: boolean }
   );
 
 export type RuntimeEventListener = (event: RuntimeEvent) => void;
-
