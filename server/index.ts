@@ -357,6 +357,12 @@ import {
 } from "./system-prompt.ts";
 import { readCuaConnection, gatedLocalComputer } from "./local-computer.ts";
 import {
+  decisionModelBaseUrl,
+  decisionModelConfigured,
+  decisionThreshold,
+  probeDecisionModel,
+} from "./decision-model.ts";
+import {
   discoverExistingPerBotLocalVms,
   localVmInventoryEntry,
   shouldArmLocalVmIdle,
@@ -11674,6 +11680,15 @@ function configStatus() {
     decisions: { retentionDays: decisionRetentionDays(cfg.decisions?.retentionDays) },
     // the base URL is a setting, not a secret; the key stays write-only
     openaiCompat: { configured: Boolean(cfg.openaiCompat?.key), url: cfg.openaiCompat?.url ?? "" },
+    // the decision-model connection (#1630): routing settings only, never
+    // the key; incomplete = the chooser stays off
+    decisionModel: {
+      configured: decisionModelConfigured(cfg.decisionModel),
+      ...(cfg.decisionModel?.provider ? { provider: cfg.decisionModel.provider } : {}),
+      url: decisionModelBaseUrl(cfg.decisionModel ?? {}) ?? "",
+      model: cfg.decisionModel?.model ?? "",
+      threshold: decisionThreshold(cfg.decisionModel),
+    },
     composio: {
       configured: composio.configured(cfg),
       mode: composio.connectionMode(cfg),
@@ -18299,6 +18314,29 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     if (method === "POST" && path === "/api/keys/test") {
       const body = await readBody(req, 8192);
       const provider = body?.provider;
+      // The decision-model row's Test button is a calibration probe, not a
+      // key check: two identical canary decisions, an obviously-right
+      // answer, probabilities that sum to one (#1630). Routing comes from
+      // the saved connection; the key may be a draft.
+      if (provider === "decisionModel") {
+        if (body?.key !== undefined && typeof body.key !== "string") {
+          return json(res, 400, { error: "key must be a string" });
+        }
+        const key = typeof body?.key === "string" ? body.key.trim() : cfg.decisionModel?.apiKey?.trim() || "";
+        if (!key && cfg.decisionModel?.provider !== "custom") {
+          return json(res, 400, { error: "No key to test. Paste one or save one first." });
+        }
+        if (key.length > 512) return json(res, 400, { error: "That does not look like an API key." });
+        const connection = {
+          ...cfg.decisionModel,
+          ...(key ? { apiKey: key } : {}),
+        };
+        if (!decisionModelConfigured(connection)) {
+          return json(res, 400, { error: "Save the lane, model and key first: the probe needs a complete connection." });
+        }
+        res.setHeader("cache-control", "no-store");
+        return json(res, 200, await probeDecisionModel(connection));
+      }
       if (!PROVIDER_KEY_KINDS.includes(provider as ProviderKeyKind)) {
         return json(res, 400, { error: `provider must be one of ${PROVIDER_KEY_KINDS.join(", ")}` });
       }
@@ -18776,7 +18814,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     }
     if ((method === "PUT" || method === "PATCH") && path === "/api/config") {
       const body = await readBody(req);
-      if (hostedModels && ["instances", "anthropic", "openaiCompat", "xai", "opencodeGo"].some(key => Object.hasOwn(body, key))) return json(res, 403, { error: HOSTED_PROVIDER_SETTINGS_ERROR });
+      if (hostedModels && ["instances", "anthropic", "openaiCompat", "decisionModel", "xai", "opencodeGo"].some(key => Object.hasOwn(body, key))) return json(res, 403, { error: HOSTED_PROVIDER_SETTINGS_ERROR });
       const patch = parseConfigPatch(body);
       if (hostedModels && patch.defaultModelSelection) {
         const checked = checkedModelSelection(patch.defaultModelSelection);
