@@ -94,7 +94,7 @@ beforeAll(async () => {
 
     const apiKey = String(req.headers["x-api-key"] ?? "");
     if (!["ak_test", "ak_catalog_a", "ak_catalog_b", "ak_catalog_pages", "ak_catalog_partial", "ak_catalog_stuck",
-        "ak_catalog_page_stuck", "ak_catalog_exhausted", "ak_catalog_stalled_total"].includes(apiKey)) {
+        "ak_catalog_page_stuck", "ak_catalog_exhausted", "ak_catalog_stalled_total", "ak_catalog_end_short"].includes(apiKey)) {
       res.writeHead(401, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { message: "invalid project key" } }));
     }
@@ -117,6 +117,7 @@ beforeAll(async () => {
         || apiKey === "ak_catalog_page_stuck"
         || apiKey === "ak_catalog_exhausted"
         || apiKey === "ak_catalog_stalled_total"
+        || apiKey === "ak_catalog_end_short"
       )
     ) {
       if (apiKey === "ak_catalog_stuck") {
@@ -163,6 +164,16 @@ beforeAll(async () => {
           current_page: 1,
           total_pages: 4,
           total_items: 1540,
+        }));
+      }
+      if (apiKey === "ak_catalog_end_short") {
+        // Page counts say more pages exist, but no cursor and no total_items
+        // arrive, so only the page metadata can flag the partial catalog.
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({
+          items: [{ slug: "gmail", name: "Gmail" }],
+          current_page: 1,
+          total_pages: 4,
         }));
       }
       // Mirrors the real marketplace: a usage-sorted head, then an alphabetical
@@ -419,6 +430,17 @@ describe.sequential("Composio Sessions", () => {
     try {
       const { pagination } = await listToolkits({ composio: { apiKey: "ak_catalog_stalled_total" } });
       expect(pagination).toEqual({ items: 1, totalItems: 1540, stalled: true });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("partial marketplace"));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("flags a partial catalog that ends early with only page counts to reveal it", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { pagination } = await listToolkits({ composio: { apiKey: "ak_catalog_end_short" } });
+      expect(pagination).toEqual({ items: 1, stalled: true });
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("partial marketplace"));
     } finally {
       warn.mockRestore();

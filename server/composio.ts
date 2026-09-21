@@ -1127,8 +1127,9 @@ export async function listToolkits(cfg: AppConfig): Promise<{ cards: ToolkitCard
           (card, index) => card.slug && cards.findIndex((candidate) => candidate.slug === card.slug) === index,
         );
         const shortOfReportedTotal = reportedTotalItems !== undefined && uniqueCards.length < reportedTotalItems;
-        const pagingStoppedEarly = stop !== "end" && stop !== "total-reached"
-          && lastReportedPage !== undefined
+        // Trust reported page counts even when the walk ends "cleanly": an
+        // endpoint that stops at page 1 of 4 without a cursor is still partial.
+        const pagingStoppedEarly = lastReportedPage !== undefined
           && reportedTotalPages !== undefined
           && lastReportedPage < reportedTotalPages;
         const pagination: CatalogPagination = { items: uniqueCards.length, stalled: shortOfReportedTotal || pagingStoppedEarly };
