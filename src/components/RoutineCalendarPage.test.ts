@@ -75,14 +75,14 @@ afterAll(() => vi.unstubAllGlobals());
 describe("routine failure indicators", () => {
   it("shows the errors pill and mark-all control only while failures are unread", () => {
     const buttons = page();
-    expect(textOf(buttons.get("Open failed run logs")!.children)).toBe("2");
+    expect(textOf(buttons.get("Open problem run logs")!.children)).toBe("2");
     expect(buttons.has("Mark all as read")).toBe(true);
 
     fixture.state = { ...initialState, bots: [bot], routineRuns: [
       { ...failed, seenAt: 1 }, { ...missed, seenAt: 1 }, completed,
     ] };
     const read = markupOf();
-    expect(read).not.toContain('aria-label="Open failed run logs"');
+    expect(read).not.toContain('aria-label="Open problem run logs"');
     expect(read).not.toContain('aria-label="Mark all as read"');
   });
 
@@ -92,7 +92,7 @@ describe("routine failure indicators", () => {
   });
 
   it("opens the logs on the shared problems set from the errors pill", () => {
-    page().get("Open failed run logs")!.onClick!();
+    page().get("Open problem run logs")!.onClick!();
     expect(fixture.dispatch).toHaveBeenCalledExactlyOnceWith({ type: "showRoutines", section: "logs", runStatus: "problems" });
   });
 

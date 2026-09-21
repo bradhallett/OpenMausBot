@@ -2579,6 +2579,36 @@ describe("RoutineManager", () => {
     expect(reloadedByName.get("Stale check")!.seenAt).toBe(stampAt);
   });
 
+  it("rolls the mark-all sweep back when its save fails", async () => {
+    const h = harness();
+    const routine = h.manager.create({
+      name: "Broken report",
+      prompt: "Write the report",
+      botId: "maus-1",
+      schedule: { type: "once", at: new Date(2026, 7, 17, 8, 1).getTime() },
+    });
+    h.setNow(routine.nextRunAt!);
+    await h.manager.tick();
+    h.manager.handleRuntimeEvent({
+      eventId: "broken", provider: "fake", threadId: "thread-1",
+      createdAt: new Date().toISOString(), type: "turn.completed", ok: false, stopReason: "provider crashed",
+    });
+    expect(h.manager.listRuns()[0]).toMatchObject({ status: "failed" });
+
+    h.emitted.length = 0;
+    const save = vi.spyOn(h.manager as unknown as { save(): void }, "save").mockImplementationOnce(() => { throw new Error("fixture disk full"); });
+    expect(() => h.manager.markAllSeen()).toThrow("fixture disk full");
+    expect(h.manager.listRuns()[0].seenAt).toBeUndefined();
+    expect(h.emitted).toHaveLength(0);
+    const persisted = new RoutineManager(h.options).listRuns().find((run) => run.routineName === routine.name);
+    expect(persisted!.seenAt).toBeUndefined();
+
+    save.mockRestore();
+    const stampAt = new Date(2026, 7, 18, 8, 0).getTime();
+    h.setNow(stampAt);
+    expect(h.manager.markAllSeen()).toMatchObject([{ routineName: routine.name, seenAt: stampAt }]);
+  });
+
   it("keeps recurring history while advancing the definition", async () => {
     const h = harness();
     const routine = h.manager.create({
