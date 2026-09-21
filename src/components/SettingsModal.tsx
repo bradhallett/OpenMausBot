@@ -30,6 +30,7 @@ import { WorkspacesSection, workspacesAvailable } from "./WorkspacesSection";
 import { SkinPicker } from "./SkinPicker";
 import { RoomTurnTimeoutSettings } from "./RoomTurnTimeoutSettings";
 import { ThreadConcurrencySettings } from "./ThreadConcurrencySettings";
+import { ThreadCleanupSettings } from "./ThreadCleanupSettings";
 import { WorkspaceBackupSettings } from "./WorkspaceBackupSettings";
 import { CompanyBackupSettings } from "./CompanyBackupSettings";
 import { cn } from "@/lib/cn";
@@ -641,6 +642,7 @@ export function SettingsModal() {
                   <RoomTurnTimeoutSettings />
                 </Card>
                 <ThreadConcurrencySettings />
+                <ThreadCleanupSettings />
                 <div>
                   {!remoteActive && <ReplayTourRow />}
                   <UpdatesRow />
