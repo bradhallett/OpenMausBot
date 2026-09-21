@@ -10,6 +10,7 @@ import { redactSecretsInText } from "./redact.ts";
 import type { GroupGoalRunStatus } from "../shared/group-goal-run.ts";
 import type { RoutineRequestOperation } from "../shared/routine-request.ts";
 import { normalizeCronSchedule, nextCronRuns, type RoutineCronSchedule } from "../shared/routine-schedule.ts";
+import { isRoutineProblemRun } from "../shared/routines.ts";
 
 export interface RoutineIntervalWindow {
   start: string;
@@ -1347,6 +1348,23 @@ export class RoutineManager {
       this.emitRun(run);
     }
     return cloneRun(run);
+  }
+
+  /** Clear every failure indicator at once: stamp seenAt on each unseen
+   * failed/missed run in one save, then emit the updated runs so connected
+   * clients drop their dots immediately. */
+  markAllSeen(): RoutineRun[] {
+    const stampAt = this.now();
+    const updated: RoutineRun[] = [];
+    for (const run of this.runs) {
+      if (run.seenAt || !isRoutineProblemRun(run)) continue;
+      run.seenAt = stampAt;
+      updated.push(run);
+    }
+    if (updated.length === 0) return [];
+    this.save();
+    for (const run of updated) this.emitRun(run);
+    return updated.map(cloneRun);
   }
 
   get isTicking(): boolean { return this.ticking; }
