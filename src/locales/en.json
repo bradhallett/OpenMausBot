@@ -1309,7 +1309,7 @@
   "keys.xai.link": "xAI console",
   "keys.decisionModel.label": "Decision model key",
   "keys.decisionModel.placeholder": "Paste a decision-model API key",
-  "keys.decisionModel.desc": "Optional. A calibrated choice model that answers simple computer-use steps directly, skipping the screenshot and LLM turn. Configuring and probe-passing a connection is what turns it on.",
+  "keys.decisionModel.desc": "Optional. A calibrated choice model that answers simple computer-use steps directly, skipping the screenshot and LLM turn. When it runs, this turn's goal text and on-screen labels are sent to the configured provider. Configuring and probe-passing a connection is what turns it on.",
   "keys.decisionModel.link": "TypeSafe",
   "keys.decisionModel.routingHint": "Routing for the decision model. Not an engine: it never appears in the bot model picker, and only acts when its calibration probe passes.",
   "keys.decisionModel.lane": "Lane",

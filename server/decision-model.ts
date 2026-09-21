@@ -257,6 +257,10 @@ export async function probeDecisionModel(
  * URL change re-probes; failures back off for a minute before retrying. */
 export interface CalibrationGate {
   fingerprint(config: DecisionModelConfig): string;
+  /** Synchronous: true only when a probe already passed for this exact
+   * connection. Mounts consult this so enabling the chooser never adds
+   * turn-start latency. */
+  cached(config: DecisionModelConfig): boolean;
   calibrated(config: DecisionModelConfig): Promise<boolean>;
   probe(config: DecisionModelConfig): Promise<DecisionModelVerdict>;
 }
@@ -264,6 +268,7 @@ export interface CalibrationGate {
 export function createCalibrationGate(probe: (config: DecisionModelConfig) => Promise<DecisionModelVerdict> = probeDecisionModel): CalibrationGate {
   type Entry = { verdict: DecisionModelVerdict; at: number };
   const cache = new Map<string, Promise<Entry | null>>();
+  const settled = new Map<string, Entry>();
   const fingerprintOf = (config: DecisionModelConfig) => {
     const provider = decisionModelProvider(config.provider) ?? "";
     const key = config.apiKey?.trim() ?? "";
@@ -273,6 +278,9 @@ export function createCalibrationGate(probe: (config: DecisionModelConfig) => Pr
   // a minute so a flaky network cannot permanently disarm the chooser.
   return {
     fingerprint: fingerprintOf,
+    cached(config) {
+      return settled.get(fingerprintOf(config))?.verdict.ok === true;
+    },
     probe(config) {
       const fingerprint = fingerprintOf(config);
       const inFlight = cache.get(fingerprint);
@@ -291,8 +299,17 @@ export function createCalibrationGate(probe: (config: DecisionModelConfig) => Pr
 
   function reprobe(fingerprint: string, config: DecisionModelConfig): Promise<DecisionModelVerdict> {
     const pending = probe(config)
-      .then((verdict): Entry => ({ verdict, at: Date.now() }))
-      .catch((): Entry => ({ verdict: { ok: false, reason: "unreachable" }, at: Date.now() }));
+      .then((verdict): Entry => {
+        const entry = { verdict, at: Date.now() };
+        settled.set(fingerprint, entry);
+        return entry;
+      })
+      .catch((): Entry => {
+        const verdict: DecisionModelVerdict = { ok: false, reason: "unreachable" };
+        const entry = { verdict, at: Date.now() };
+        settled.set(fingerprint, entry);
+        return entry;
+      });
     cache.set(fingerprint, pending);
     return pending.then((entry) => entry.verdict);
   }
