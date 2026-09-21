@@ -18,11 +18,14 @@ function parseDays(value: string): number | null {
   return Number.isInteger(days) && days >= MIN_RETENTION_DAYS && days <= MAX_RETENTION_DAYS ? days : null;
 }
 
-function parseCapMib(value: string): number | null {
+export function parseCapMib(value: string): number | null {
   const mib = Number(value);
   if (!Number.isFinite(mib)) return null;
   const bytes = Math.round(mib * MIB);
-  return bytes >= MIN_CAP_BYTES && bytes <= MAX_CAP_BYTES ? bytes : null;
+  // mibText shows at most two decimals, so accept only exact 0.25 MiB steps:
+  // 0.251 would persist as 263193 bytes, redisplay as 0.25, and silently
+  // shrink to 262144 on the next save.
+  return bytes >= MIN_CAP_BYTES && bytes <= MAX_CAP_BYTES && bytes % MIN_CAP_BYTES === 0 ? bytes : null;
 }
 
 /** 52428800 → "50", 262144 → "0.25" — the input shows whole MiB when it can. */

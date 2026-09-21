@@ -979,6 +979,10 @@ export function saveConfig(
     if (!section) continue;
     const current = jsonObjectSchema.safeParse(disk[key]);
     const merged: JsonObject = current.success ? { ...current.data } : {};
+    // parseStoredConfig requires threads.maxConcurrentPerBot, so creating
+    // the section with only an event-log knob must still persist a valid
+    // concurrency default.
+    if (key === "threads" && !current.success) merged.maxConcurrentPerBot = DEFAULT_MAX_CONCURRENT_BOT_THREADS;
     Object.assign(merged, section);
     // null is the patch's explicit "remove this key" marker (today only the
     // threads event-log knobs use it); a key the patch omits keeps its value.

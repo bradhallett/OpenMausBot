@@ -571,6 +571,21 @@ describe("saving the newer sections", () => {
       rmSync(path, { force: true });
     }
   });
+
+  it("seeds the concurrency default when the first threads save is an event-log knob", () => {
+    const path = join(DATA_DIR, "config.json");
+    mkdirSync(DATA_DIR, { recursive: true });
+    writeFileSync(path, JSON.stringify({}));
+    try {
+      saveConfig({ threads: { eventLogRetentionDays: 30 } });
+      const disk = JSON.parse(readFileSync(path, "utf8"));
+      expect(disk.threads).toEqual({ maxConcurrentPerBot: 3, eventLogRetentionDays: 30 });
+      // the persisted section must survive the stricter boot-time parse
+      expect(parseStoredConfig(disk).threads).toEqual({ maxConcurrentPerBot: 3, eventLogRetentionDays: 30 });
+    } finally {
+      rmSync(path, { force: true });
+    }
+  });
 });
 
 describe("default fleet", () => {
