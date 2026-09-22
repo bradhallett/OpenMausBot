@@ -64,6 +64,34 @@ describe("Store", () => {
     bindContentBoundaryAuditSink(undefined);
   });
 
+  it("scrubs content-bearing patches through the same boundary as appends", () => {
+    const store = new Store(selection);
+    const bot = store.createBot({}, { seedMessages: false });
+    store.patchBot(bot.id, { contentClasses: ["personal"] });
+    const events: unknown[] = [];
+    bindContentBoundaryAuditSink((event) => events.push(event));
+    const msg = store.appendMessage(bot.threadId, { role: "bot", kind: "text", text: "working" });
+    const patched = store.patchMessage(bot.threadId, msg.id, { text: "mail jane@example.com host corp.internal" });
+    expect(patched?.text).toContain("«redacted 16 chars»");
+    expect(patched?.text).toContain("corp.internal");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: "content.class-passed", classes: ["internal"], funnel: "transcript", botId: bot.id });
+    store.patchBot(bot.id, { contentClasses: undefined });
+    const key = "sk-ant-" + "b".repeat(90);
+    const sealed = store.patchMessage(bot.threadId, msg.id, { text: "key " + key });
+    expect(sealed?.text).not.toContain(key);
+    expect(sealed?.text).toContain("«redacted");
+    const theirs = store.appendMessage(bot.threadId, { role: "user", kind: "text", text: "mine" });
+    const kept = store.patchMessage(bot.threadId, theirs.id, { text: "my key " + key });
+    expect(kept?.text).toContain(key);
+    bindContentBoundaryAuditSink(undefined);
+    const reloaded = new Store(selection);
+    const stored = reloaded.messagesFor(bot.threadId).find((m) => m.id === msg.id);
+    expect(stored?.text).not.toContain(key);
+    expect(stored?.text).not.toContain("jane@example.com");
+    expect(reloaded.messagesFor(bot.threadId).find((m) => m.id === theirs.id)?.text).toContain(key);
+  });
+
   it.skipIf(process.platform === "win32")("writes the bot and group registries owner-only and tightens loose ones on load", () => {
     const mode = (name: string) => statSync(join(DATA_DIR, name)).mode & 0o777;
     const store = new Store(selection);

@@ -1424,7 +1424,11 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
     const t = this.thread(threadId);
     const idx = t.messages.findIndex((m) => m.id === messageId);
     if (idx === -1) return null;
-    const next = { ...t.messages[idx], ...patch, card: patch.card ?? t.messages[idx].card };
+    const merged = { ...t.messages[idx], ...patch, card: patch.card ?? t.messages[idx].card };
+    // The patch path feeds the same transcript the append path does, so it
+    // rides the same bot-authored scrub: a goal detail, tool output or held
+    // card patched in later must not be the hole secrets slip through.
+    const next = redactBotAuthored(merged, this.contentClassScrubber(threadId, merged));
     // SQLite is the durable source of truth. Persist before changing memory so
     // a failed write cannot make this process believe a card was answered
     // while a restart would still show it as pending.
