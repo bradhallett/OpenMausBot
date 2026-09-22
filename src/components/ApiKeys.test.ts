@@ -93,6 +93,7 @@ describe("decision model routing", () => {
     expect(html).toContain("Vercel AI Gateway");
     expect(html).toContain("OpenRouter");
     expect(html).toContain("Custom OpenAI-compatible endpoint");
+    expect(html).toContain('<option value="" selected="">Not configured</option>');
     expect(html).toContain('aria-label="Lane"');
     expect(html).toContain('aria-label="Model"');
     expect(html).toContain('aria-label="Base URL"');
@@ -110,5 +111,12 @@ describe("decision model routing", () => {
     expect(html).toContain('value="http://127.0.0.1:8787/v1"');
     expect(html).toContain('value="0.75"');
     expect(html).toContain("Use Test to run the calibration probe");
+  });
+
+  it("offers Not configured only before a lane is saved, so a saved route has no dead-end selection", () => {
+    mockStore({ configured: true, provider: "typesafe", url: "", model: "jev-latest", threshold: 0.9 });
+    const html = render(createElement(DecisionModelRouting));
+    expect(html).not.toContain('<option value="">');
+    expect(html).toContain('value="typesafe"');
   });
 });

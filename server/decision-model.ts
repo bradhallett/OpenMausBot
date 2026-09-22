@@ -276,25 +276,24 @@ export function createCalibrationGate(probe: (config: DecisionModelConfig) => Pr
   };
   // A pass stands until the fingerprint changes; a failure is retried after
   // a minute so a flaky network cannot permanently disarm the chooser.
+  const probeFor = (config: DecisionModelConfig): Promise<DecisionModelVerdict> => {
+    const fingerprint = fingerprintOf(config);
+    const inFlight = cache.get(fingerprint);
+    if (inFlight) {
+      return inFlight.then((entry) => {
+        if (entry && (entry.verdict.ok || Date.now() - entry.at < 60_000)) return entry.verdict;
+        return reprobe(fingerprint, config);
+      });
+    }
+    return reprobe(fingerprint, config);
+  };
   return {
     fingerprint: fingerprintOf,
     cached(config) {
       return settled.get(fingerprintOf(config))?.verdict.ok === true;
     },
-    probe(config) {
-      const fingerprint = fingerprintOf(config);
-      const inFlight = cache.get(fingerprint);
-      if (inFlight) {
-        return inFlight.then((entry) => {
-          if (entry && (entry.verdict.ok || Date.now() - entry.at < 60_000)) return entry.verdict;
-          return reprobe(fingerprint, config);
-        });
-      }
-      return reprobe(fingerprint, config);
-    },
-    calibrated(config) {
-      return this.probe(config).then((verdict) => verdict.ok);
-    },
+    probe: probeFor,
+    calibrated: (config) => probeFor(config).then((verdict) => verdict.ok),
   };
 
   function reprobe(fingerprint: string, config: DecisionModelConfig): Promise<DecisionModelVerdict> {

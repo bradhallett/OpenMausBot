@@ -7587,7 +7587,7 @@ function turnGoal(threadId: string): string | null {
  * crosses a serialization boundary — validate like any external payload
  * before it becomes a RuntimeEvent in a log people paste into reports. */
 function sanitizeDecisionReport(value: unknown): {
-  outcome: "acted" | "abstained" | "reobserve" | "below-threshold" | "error";
+  outcome: "acted" | "abstained" | "reobserve" | "below-threshold" | "superseded" | "error";
   selectedId?: string;
   confidence?: number;
   model?: string;
@@ -7598,7 +7598,7 @@ function sanitizeDecisionReport(value: unknown): {
   const v = value as Record<string, unknown>;
   const outcome = v.outcome;
   if (outcome !== "acted" && outcome !== "abstained" && outcome !== "reobserve" &&
-      outcome !== "below-threshold" && outcome !== "error") return null;
+      outcome !== "below-threshold" && outcome !== "superseded" && outcome !== "error") return null;
   const id = typeof v.selectedId === "string" ? v.selectedId.slice(0, 128) : undefined;
   const confidence =
     typeof v.confidence === "number" && Number.isFinite(v.confidence) && v.confidence >= 0 && v.confidence <= 1
@@ -7667,7 +7667,6 @@ async function startTurn(
   const profile = store.bot(botId);
   if (!profile) throw Object.assign(new Error("no such bot"), { status: 404 });
   const threadId = opts?.threadId ?? profile.threadId;
-  recordTurnGoal(threadId, text);
   const continuingRoutine = opts?.cardContinuation ? activeRoutineRunForThread(threadId) : null;
   if (continuingRoutine) {
     const onDispatchError = opts?.onDispatchError;
@@ -7711,6 +7710,10 @@ async function startTurn(
   if (botAtThreadCapacity(botId)) {
     throw Object.assign(new Error(`this bot has reached its limit of ${maxConcurrentBotThreads(cfg)} parallel threads — wait for one to finish`), { status: 409, code: "thread_limit" });
   }
+  // Only an admitted turn may own the goal slot: recording before the busy
+  // and capacity checks let a rejected call (a compact racing a live turn,
+  // say) overwrite the active turn's decision-model context (#1630).
+  recordTurnGoal(threadId, text);
   // Steering is never a cancel. A message sent while teammates are working
   // runs now, with their assignments still attached: they keep running and
   // their results still return here (outstandingAssignmentsPrompt tells this
