@@ -92,6 +92,25 @@ describe("Store", () => {
     expect(reloaded.messagesFor(bot.threadId).find((m) => m.id === theirs.id)?.text).toContain(key);
   });
 
+  it("resolves the busy group speaker when a group bot message lacks attribution", () => {
+    const store = new Store(selection);
+    const bot = store.createBot({}, { seedMessages: false });
+    store.patchBot(bot.id, { contentClasses: ["personal"] });
+    const group = store.createGroup("Team", [bot.id]);
+    store.patchGroup(group.id, { busyBotId: bot.id });
+    const events: unknown[] = [];
+    bindContentBoundaryAuditSink((event) => events.push(event));
+    const sent = store.appendMessage(group.threadId, { role: "bot", kind: "text", text: "mail jane@example.com host corp.internal" });
+    expect(sent.text).toContain("«redacted 16 chars»");
+    expect(sent.text).toContain("corp.internal");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: "content.class-passed", classes: ["internal"], funnel: "transcript", botId: bot.id });
+    store.patchGroup(group.id, { busyBotId: null });
+    const idle = store.appendMessage(group.threadId, { role: "bot", kind: "text", text: "idle jane@example.com" });
+    expect(idle.text).toBe("idle jane@example.com");
+    bindContentBoundaryAuditSink(undefined);
+  });
+
   it.skipIf(process.platform === "win32")("writes the bot and group registries owner-only and tightens loose ones on load", () => {
     const mode = (name: string) => statSync(join(DATA_DIR, name)).mode & 0o777;
     const store = new Store(selection);
