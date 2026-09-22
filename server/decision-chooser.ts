@@ -217,12 +217,19 @@ function elementBounds(element: JsonRecord): { x: number; y: number; width: numb
     const y = raw.y ?? raw.top;
     const { width, height } = raw;
     if ([x, y, width, height].every((n) => typeof n === "number" && Number.isFinite(n))) {
-      return {
+      const bounds = {
         x: Math.round(x as number),
         y: Math.round(y as number),
         width: Math.max(1, Math.round(width as number)),
         height: Math.max(1, Math.round(height as number)),
       };
+      // The wire contract requires non-negative x/y, but a window on a
+      // monitor left of or above the primary can still report global
+      // coordinates. Skip such an element — the screenshot loop carries
+      // it — instead of failing the whole request and burning the error
+      // budget on a legal observation.
+      if (bounds.x < 0 || bounds.y < 0) continue;
+      return bounds;
     }
   }
   return null;
@@ -355,7 +362,7 @@ export function decisionPayload(value: unknown): JsonRecord | null {
 }
 
 export type DecisionReport = {
-  outcome: "acted" | "abstained" | "reobserve" | "below-threshold" | "error";
+  outcome: "acted" | "abstained" | "reobserve" | "below-threshold" | "superseded" | "error";
   selectedId?: string;
   confidence?: number;
   model?: string;
@@ -382,6 +389,10 @@ export function createDecisionChooser(options: {
   goal: () => Promise<string | null>;
   report: (report: DecisionReport) => void;
   callDriver: (name: string, args: JsonRecord) => Promise<unknown>;
+  /** Re-checked immediately before a click. The gate cleared the frame
+   * before the decision started, but a human can take control while the
+   * model thinks; same contract as the gate's isHeld. */
+  isHeld: () => Promise<boolean>;
 }): DecisionChooser {
   const history: Array<{ selected_id?: string; outcome?: string }> = [];
   let consecutiveErrors = 0;
@@ -505,6 +516,26 @@ export function createDecisionChooser(options: {
         remember("below-threshold");
         options.report({
           outcome: "below-threshold",
+          selectedId: decision.selectedId,
+          confidence: decision.confidence,
+          ...(model ? { model } : {}),
+        });
+        return { handled: false };
+      }
+      // A hold acquired while the decision was in flight beats the
+      // decision: ownership is re-checked immediately before the click,
+      // and a check that cannot run is treated as a failure, never as
+      // permission. Either way the screenshot falls back to the loop.
+      let held = false;
+      try {
+        held = await options.isHeld();
+      } catch (error) {
+        return fail(`control ownership check failed: ${messageOf(error)}`);
+      }
+      if (held) {
+        remember("superseded");
+        options.report({
+          outcome: "superseded",
           selectedId: decision.selectedId,
           confidence: decision.confidence,
           ...(model ? { model } : {}),
