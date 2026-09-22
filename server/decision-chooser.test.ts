@@ -3,7 +3,7 @@
 // every bound, the strict ID grammar, the mandatory escapes — and the
 // runtime decision table: act at or above threshold, forward with a
 // report on every other outcome, and never let a failure break the run.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   MAX_CHOICE_BYTES,
@@ -178,6 +178,22 @@ describe("createDecisionChooser", () => {
     expect(h.driverCalls.map((c) => c.name)).toEqual(["get_window_state", "click"]);
     expect(h.driverCalls[1]!.args).toMatchObject({ x: 160, y: 220, capture_id: "cap-1", pid: 4242, window_id: 7 });
     expect(h.reports).toEqual([{ outcome: "acted", selectedId: "click:0", confidence: 0.95 }]);
+  });
+
+  it("clears the decision timeout once a fast decision lands", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness({});
+      const decision = await h.chooser.intercept(screenshot);
+      expect(decision.handled).toBe(true);
+      // the 12s race timer must not outlive the decision that beat it
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(13_000);
+      expect(h.reports).toEqual([{ outcome: "acted", selectedId: "click:0", confidence: 0.95 }]);
+      expect(h.driverCalls.map((call) => call.name)).toEqual(["get_window_state", "click"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("carries its own history into the next request", async () => {

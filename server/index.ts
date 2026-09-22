@@ -361,6 +361,7 @@ import {
   decisionModelBaseUrl,
   decisionModelConfigured,
   decisionThreshold,
+  keyOverInsecureTransport,
 } from "./decision-model.ts";
 import {
   discoverExistingPerBotLocalVms,
@@ -627,7 +628,7 @@ function warmDecisionGate() {
  * install, and for any connection that has not proved calibrated. */
 function decisionChooserEnv(flow: string): Record<string, string> | null {
   const section = cfg.decisionModel;
-  if (!section || !decisionModelConfigured(section) || !decisionGate.cached(section)) return null;
+  if (!section || !decisionModelConfigured(section) || keyOverInsecureTransport(section) || !decisionGate.cached(section)) return null;
   return {
     OMB_DECISION_PROVIDER: section.provider ?? "",
     OMB_DECISION_URL: decisionModelBaseUrl(section) ?? "",

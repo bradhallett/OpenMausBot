@@ -93,6 +93,20 @@ describe("probeDecisionModel (systemone lanes)", () => {
     });
   });
 
+  it("fails a wrapper whose confidence moves between identical requests", async () => {
+    let n = 0;
+    const fetchImpl = vi.fn(async () => {
+      n += 1;
+      return ok(systemOneBody({ choice: "two", confidence: n === 1 ? 0.97 : 0.42, probabilities: CANARY_PROBABILITIES }));
+    });
+    await expect(probeDecisionModel(config, fetchImpl as unknown as typeof fetch)).resolves.toMatchObject({
+      ok: false,
+      reason: "uncalibrated",
+      detail: expect.stringContaining("different confidence"),
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
   it("maps an auth failure to rejected without a second call", async () => {
     const fetchImpl = vi.fn(async () => status(401));
     await expect(probeDecisionModel(config, fetchImpl as unknown as typeof fetch)).resolves.toMatchObject({ ok: false, reason: "rejected", status: 401 });
@@ -136,6 +150,16 @@ describe("probeDecisionModel (custom lane)", () => {
   it("maps a dead endpoint to unreachable", async () => {
     const fetchImpl = vi.fn(async () => { throw new Error("connect ECONNREFUSED"); });
     await expect(probeDecisionModel(config, fetchImpl as unknown as typeof fetch)).resolves.toMatchObject({ ok: false, reason: "unreachable" });
+  });
+
+  it("refuses to send a configured key over an http: endpoint", async () => {
+    const fetchImpl = vi.fn();
+    await expect(probeDecisionModel({ ...config, apiKey: "sk-cleartext" }, fetchImpl as unknown as typeof fetch)).resolves.toMatchObject({
+      ok: false,
+      reason: "uncalibrated",
+      detail: expect.stringContaining("https"),
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
 
