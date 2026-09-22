@@ -89,7 +89,7 @@ export type DecisionChoice = {
 /** One bounded choice question, in the System One dialect every lane
  * speaks: {state, questions:{next_action:{type:"choice",…}}}. */
 export interface DecisionModelClient {
-  decide(request: { state: EntryType; criteria: Record<string, string>; instructions?: string }): Promise<DecisionChoice>;
+  decide(request: { state: EntryType; criteria: Record<string, string>; instructions?: string; signal?: AbortSignal }): Promise<DecisionChoice>;
 }
 
 function validateChoice(answer: { choice?: unknown; confidence?: unknown; probabilities?: unknown }, criteria: Record<string, string>): DecisionChoice | null {
@@ -119,13 +119,16 @@ function systemOneClient(options: { baseUrl: string; apiKey?: string; model: str
   });
   return {
     async decide(request) {
-      const response = await client.systemOne({
-        model: options.model,
-        state: request.state,
-        questions: {
-          next_action: choiceQuestion(request.instructions ?? null, request.criteria),
+      const response = await client.systemOne(
+        {
+          model: options.model,
+          state: request.state,
+          questions: {
+            next_action: choiceQuestion(request.instructions ?? null, request.criteria),
+          },
         },
-      });
+        request.signal ? { signal: request.signal } : undefined,
+      );
       const answer = (response.answers as Record<string, unknown>).next_action as Record<string, unknown>;
       if (answer?.type !== "choice") throw new Error("decision model returned a non-choice answer");
       const choice = validateChoice(answer as { choice?: unknown; confidence?: unknown; probabilities?: unknown }, request.criteria);
@@ -161,6 +164,7 @@ function chatCompletionsClient(options: { baseUrl: string; apiKey?: string; mode
     async decide(request) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 30_000);
+      const signal = request.signal ? AbortSignal.any([request.signal, controller.signal]) : controller.signal;
       try {
         const response = await fetchImpl(url, {
           method: "POST",
@@ -183,7 +187,7 @@ function chatCompletionsClient(options: { baseUrl: string; apiKey?: string; mode
             response_format: { type: "json_schema", json_schema: { name: "decision", strict: true, schema: CUSTOM_ENVELOPE } },
             temperature: 0,
           }),
-          signal: controller.signal,
+          signal,
         });
         if (!response.ok) throw Object.assign(new Error(`decision endpoint answered ${response.status}`), { status: response.status });
         const body: unknown = await response.json().catch(() => null);
