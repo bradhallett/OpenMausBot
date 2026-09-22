@@ -169,7 +169,7 @@ export type RuntimeEvent = RuntimeEventBase &
          * `acted` steps skipped a screenshot and an LLM turn; every other
          * outcome silently fell back to the normal loop. */
         type: "decision.chooser";
-        outcome: "acted" | "abstained" | "reobserve" | "below-threshold" | "error";
+        outcome: "acted" | "abstained" | "reobserve" | "below-threshold" | "superseded" | "error";
         selectedId?: string;
         confidence?: number;
         model?: string;
