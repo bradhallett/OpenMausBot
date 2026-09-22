@@ -523,7 +523,7 @@ export function DecisionModelRouting() {
             aria-label={t("keys.decisionModel.lane")}
             className="w-full rounded-lg border border-hairline/40 bg-inset px-3 py-2 text-[13px] text-ink focus:border-hairline focus:outline-none"
           >
-            <option value="">{t("keys.decisionModel.laneNone")}</option>
+            {!saved?.provider && <option value="">{t("keys.decisionModel.laneNone")}</option>}
             <option value="typesafe">TypeSafe</option>
             <option value="vercel">Vercel AI Gateway</option>
             <option value="openrouter">OpenRouter</option>

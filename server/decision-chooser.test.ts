@@ -98,6 +98,18 @@ describe("buildChoice", () => {
   it("returns null when nothing is activatable", () => {
     expect(buildChoice({ goal: "g", captureId: "c", elements: [{ role: "text", name: "hi", bounds: { x: 1, y: 1, width: 5, height: 5 } }], history: [] })).toBeNull();
   });
+
+  it("skips off-screen elements instead of failing the whole request", () => {
+    // A window on a monitor left of or above the primary reports negative
+    // global coordinates; the wire contract forbids them, so the builder
+    // must drop such elements rather than poison the request.
+    const offscreen = { role: "button", name: "Hidden", bounds: { x: -10, y: 20, width: 80, height: 24 } };
+    expect(buildChoice({ goal: "g", captureId: "c", elements: [offscreen], history: [] })).toBeNull();
+    const mixed = buildChoice({ goal: "g", captureId: "c", elements: [offscreen, button("OK")], history: [] });
+    expect(mixed!.request.candidates.map((candidate) => candidate.id)).toEqual(["click:0", "reobserve", "abstain"]);
+    expect(mixed!.request.regions).toHaveLength(1);
+    expect(mixed!.request.regions[0]).toMatchObject({ bounds: { x: 10, y: 20, width: 80, height: 24 } });
+  });
 });
 
 describe("decisionPayload", () => {
@@ -128,6 +140,7 @@ describe("createDecisionChooser", () => {
     goal?: string | null;
     windowState?: unknown;
     click?: unknown;
+    isHeld?: () => Promise<boolean>;
   }) {
     const reports: DecisionReport[] = [];
     const driverCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
@@ -149,6 +162,7 @@ describe("createDecisionChooser", () => {
         if (name === "get_window_state") return options.windowState ?? { structuredContent: snapshot };
         return options.click ?? { ok: true };
       },
+      isHeld: options.isHeld ?? (async () => false),
     });
     return { chooser, reports, driverCalls, decisions };
   }
@@ -240,6 +254,7 @@ describe("createDecisionChooser", () => {
         if (name === "get_window_state") throw new Error("driver call failed");
         return { ok: true };
       },
+      isHeld: async () => false,
     });
     for (let i = 0; i < 3; i += 1) await chooser.intercept({ id: i, name: "screenshot", arguments: {} });
     expect(reports).toHaveLength(3);
@@ -251,6 +266,45 @@ describe("createDecisionChooser", () => {
     const h = harness({ click: { isError: true } });
     expect(await h.chooser.intercept(screenshot)).toEqual({ handled: false });
     expect(h.reports[0]).toMatchObject({ outcome: "error", detail: expect.stringContaining("not confirmed") });
+  });
+
+  it("lets a human hold acquired mid-decision win: no click, a superseded report", async () => {
+    let release!: () => void;
+    const decided = new Promise<void>((resolve) => (release = resolve));
+    let held = false;
+    const reports: DecisionReport[] = [];
+    const driverCalls: string[] = [];
+    const chooser = createDecisionChooser({
+      client: {
+        decide: async () => {
+          await decided;
+          return { selectedId: "click:0", confidence: 0.99, probabilities: {} };
+        },
+      },
+      threshold: 0.9,
+      goal: async () => "Book the flight",
+      report: (report) => reports.push(report),
+      callDriver: async (name) => {
+        driverCalls.push(name);
+        if (name === "get_window_state") return { structuredContent: snapshot };
+        return { ok: true };
+      },
+      isHeld: async () => held,
+    });
+    const pending = chooser.intercept(screenshot);
+    // The human takes control while the decision is still in flight.
+    held = true;
+    release();
+    expect(await pending).toEqual({ handled: false });
+    expect(driverCalls).toEqual(["get_window_state"]);
+    expect(reports).toEqual([{ outcome: "superseded", selectedId: "click:0", confidence: 0.99 }]);
+  });
+
+  it("treats a failed ownership check as a no-click error", async () => {
+    const h = harness({ isHeld: async () => { throw new Error("control endpoint unreachable"); } });
+    expect(await h.chooser.intercept(screenshot)).toEqual({ handled: false });
+    expect(h.driverCalls.map((call) => call.name)).toEqual(["get_window_state"]);
+    expect(h.reports[0]).toMatchObject({ outcome: "error", detail: expect.stringContaining("ownership") });
   });
 });
 
