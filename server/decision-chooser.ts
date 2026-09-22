@@ -469,15 +469,20 @@ export function createDecisionChooser(options: {
       });
       let decision;
       let decisionTimeout: ReturnType<typeof setTimeout> | undefined;
+      const decisionAbort = new AbortController();
       try {
         decision = await Promise.race([
           options.client.decide({
             state: { goal: built.request.goal, observation },
             criteria,
             instructions: "Select exactly one supplied candidate ID for the next computer action.",
+            signal: decisionAbort.signal,
           }),
           new Promise<never>((_, reject) => {
-            decisionTimeout = setTimeout(() => reject(new Error("decision timed out")), DECIDE_TIMEOUT_MS);
+            decisionTimeout = setTimeout(() => {
+              decisionAbort.abort();
+              reject(new Error("decision timed out"));
+            }, DECIDE_TIMEOUT_MS);
             decisionTimeout.unref?.();
           }),
         ]);

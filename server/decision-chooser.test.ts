@@ -196,6 +196,43 @@ describe("createDecisionChooser", () => {
     }
   });
 
+  it("aborts the underlying decision when the chooser timeout fires", async () => {
+    vi.useFakeTimers();
+    try {
+      const reports: DecisionReport[] = [];
+      const driverCalls: string[] = [];
+      let aborted = false;
+      const chooser = createDecisionChooser({
+        // A decision that never settles: the abort signal is the only
+        // observable proof the chooser cancelled the in-flight request
+        // instead of leaking it past its own 12s budget.
+        client: {
+          decide: (request) =>
+            new Promise(() => {
+              request.signal?.addEventListener("abort", () => (aborted = true));
+            }),
+        },
+        threshold: 0.9,
+        goal: async () => "Book the flight",
+        report: (report) => reports.push(report),
+        callDriver: async (name) => {
+          driverCalls.push(name);
+          if (name === "get_window_state") return { structuredContent: snapshot };
+          return { ok: true };
+        },
+        isHeld: async () => false,
+      });
+      const pending = chooser.intercept(screenshot);
+      await vi.advanceTimersByTimeAsync(12_000);
+      expect(await pending).toEqual({ handled: false });
+      expect(aborted).toBe(true);
+      expect(reports[0]).toMatchObject({ outcome: "error", detail: expect.stringContaining("decision timed out") });
+      expect(driverCalls).toEqual(["get_window_state"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("carries its own history into the next request", async () => {
     const h = harness({});
     await h.chooser.intercept(screenshot);
