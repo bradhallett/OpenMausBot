@@ -41,7 +41,7 @@ export interface ControlClient {
 }
 
 export interface DecisionReportPayload {
-  outcome: "acted" | "abstained" | "reobserve" | "below-threshold" | "error";
+  outcome: "acted" | "abstained" | "reobserve" | "below-threshold" | "superseded" | "error";
   selectedId?: string;
   confidence?: number;
   model?: string;

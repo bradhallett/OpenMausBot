@@ -251,6 +251,7 @@ function isRuntimeEvent(value: unknown): value is RuntimeEvent {
           value.outcome === "abstained" ||
           value.outcome === "reobserve" ||
           value.outcome === "below-threshold" ||
+          value.outcome === "superseded" ||
           value.outcome === "error") &&
         stringOrMissing(value.selectedId) &&
         (value.confidence === undefined ||

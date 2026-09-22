@@ -363,6 +363,15 @@ export function runMcpBridge(options: BridgeOptions): void {
     ? createControlClient({ url: options.gate.url, token: options.gate.token })
     : null;
   let refusalReason: string | undefined;
+  // One ownership source for both layers: the gate refuses a held computer
+  // up front, and the chooser re-checks the same state immediately before
+  // acting on a decision — a hold acquired mid-decision still wins.
+  const isHeldByHuman = async () => {
+    refusalReason = undefined;
+    const state = await client!.state(true);
+    refusalReason = state.blockedReason;
+    return state.held;
+  };
 
   // The chooser's driver calls (get_window_state, click) ride the same
   // child under correlated string ids; their responses are routed back to
@@ -419,6 +428,7 @@ export function runMcpBridge(options: BridgeOptions): void {
             void client!.reportDecision({ ...report, flow: decision.flow });
           },
           callDriver,
+          isHeld: isHeldByHuman,
         })
       : null;
 
@@ -430,12 +440,7 @@ export function runMcpBridge(options: BridgeOptions): void {
     ...(options.gate
       ? {
           gate: {
-            isHeld: async () => {
-              refusalReason = undefined;
-              const state = await client!.state(true);
-              refusalReason = state.blockedReason;
-              return state.held;
-            },
+            isHeld: isHeldByHuman,
             getRefusalReason: () => refusalReason,
           },
         }
