@@ -15,6 +15,7 @@ import * as mdb from "./message-db.ts";
 import { peerAllowKey } from "./peer-approval-key.ts";
 import { canAccessTeam } from "./peer-roster.ts";
 import { Store, toWireTask, type BotRecord } from "./store.ts";
+import { bindContentBoundaryAuditSink } from "./content-boundary.ts";
 import type { TeamSetupRequest } from "../shared/team-setup.ts";
 import { SECTION_CONTEXTS_FILE } from "./section-context.ts";
 
@@ -42,6 +43,25 @@ describe("Store", () => {
     expect(JSON.stringify(reloaded.messagesFor(bot.threadId))).not.toContain(key);
     const wire = toWireTask(reloaded.taskByThread(bot.id, bot.threadId)!);
     for (const field of Object.keys(patch)) expect(wire).not.toHaveProperty(field);
+  });
+
+  it("applies configured content classes to bot-authored transcript fields only", () => {
+    const store = new Store(selection);
+    const bot = store.createBot({}, { seedMessages: false });
+    store.patchBot(bot.id, { contentClasses: ["personal"] });
+    const events: unknown[] = [];
+    bindContentBoundaryAuditSink((event) => events.push(event));
+    const sent = store.appendMessage(bot.threadId, { role: "bot", kind: "text", text: "ping jane@example.com from 10.0.0.5" });
+    expect(sent.text).toContain("«redacted 16 chars»");
+    expect(sent.text).toContain("10.0.0.5");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: "content.class-passed", classes: ["internal"], funnel: "transcript", botId: bot.id });
+    const user = store.appendMessage(bot.threadId, { role: "user", kind: "text", text: "my mail is jane@example.com" });
+    expect(user.text).toBe("my mail is jane@example.com");
+    store.patchBot(bot.id, { contentClasses: undefined });
+    const bare = store.appendMessage(bot.threadId, { role: "bot", kind: "text", text: "still jane@example.com" });
+    expect(bare.text).toBe("still jane@example.com");
+    bindContentBoundaryAuditSink(undefined);
   });
 
   it.skipIf(process.platform === "win32")("writes the bot and group registries owner-only and tightens loose ones on load", () => {

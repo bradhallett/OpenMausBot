@@ -18,6 +18,7 @@ import { workspaceDir } from "./workspace.ts";
 import { newId, type ModelSelection } from "./contracts.ts";
 import { pickBotName } from "./names.ts";
 import { redactSecretsInText } from "./redact.ts";
+import { applyContentClasses } from "./content-boundary.ts";
 import { botAvatarProfile } from "../shared/bot-avatar.ts";
 import { approvalModeFor, isApprovalMode } from "../shared/approval-mode.ts";
 import type { ProfileRequestChanges } from "../shared/profile-request.ts";
@@ -120,37 +121,40 @@ function persistedPin<T extends { pinned?: boolean }>(task: T): T {
  * is theirs and stays as typed. Stored, not just displayed: the transcript
  * is replayed into every rebuild, and a leaked key would otherwise be
  * permanent. */
-function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number }>(message: T): T {
+function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number }>(message: T, classScrubber?: (text: string) => string): T {
   if (message.role !== "bot") return message;
   const out = { ...message };
-  if (typeof out.text === "string") out.text = redactSecretsInText(out.text);
-  if (out.compaction) out.compaction = { ...out.compaction, summary: redactSecretsInText(out.compaction.summary) };
+  // The content-class pass rides the same walk; a missing scrubber keeps
+  // this byte-identical to the credential-only redaction.
+  const scrub = (value: string) => (classScrubber ? classScrubber(redactSecretsInText(value)) : redactSecretsInText(value));
+  if (typeof out.text === "string") out.text = scrub(out.text);
+  if (out.compaction) out.compaction = { ...out.compaction, summary: scrub(out.compaction.summary) };
   if (out.tool?.name) {
-    out.tool = { ...out.tool, name: redactSecretsInText(out.tool.name) };
-    if (out.tool.summary) out.tool.summary = redactSecretsInText(out.tool.summary);
+    out.tool = { ...out.tool, name: scrub(out.tool.name) };
+    if (out.tool.summary) out.tool.summary = scrub(out.tool.summary);
   }
   if (out.routineRun) {
     const routineRun = { ...out.routineRun };
-    routineRun.routineName = redactSecretsInText(routineRun.routineName);
-    if (routineRun.summary) routineRun.summary = redactSecretsInText(routineRun.summary);
-    if (routineRun.error) routineRun.error = redactSecretsInText(routineRun.error);
+    routineRun.routineName = scrub(routineRun.routineName);
+    if (routineRun.summary) routineRun.summary = scrub(routineRun.summary);
+    if (routineRun.error) routineRun.error = scrub(routineRun.error);
     out.routineRun = routineRun;
   }
   if (out.goalRun) {
     out.goalRun = {
       ...out.goalRun,
-      goal: redactSecretsInText(out.goalRun.goal),
-      coordinatorName: redactSecretsInText(out.goalRun.coordinatorName),
-      detail: out.goalRun.detail ? redactSecretsInText(out.goalRun.detail) : undefined,
+      goal: scrub(out.goalRun.goal),
+      coordinatorName: scrub(out.goalRun.coordinatorName),
+      detail: out.goalRun.detail ? scrub(out.goalRun.detail) : undefined,
     };
   }
   if (out.card) {
     const card = { ...out.card } as OptionCardData & { summary?: string };
-    card.title = redactSecretsInText(card.title);
-    if (typeof card.subtitle === "string") card.subtitle = redactSecretsInText(card.subtitle);
-    if (typeof card.summary === "string") card.summary = redactSecretsInText(card.summary);
-    if (typeof card.held === "string") card.held = redactSecretsInText(card.held);
-    if (typeof card.answeredText === "string") card.answeredText = redactSecretsInText(card.answeredText);
+    card.title = scrub(card.title);
+    if (typeof card.subtitle === "string") card.subtitle = scrub(card.subtitle);
+    if (typeof card.summary === "string") card.summary = scrub(card.summary);
+    if (typeof card.held === "string") card.held = scrub(card.held);
+    if (typeof card.answeredText === "string") card.answeredText = scrub(card.answeredText);
     // Bot-authored question text sits behind the subtitle the same way a
     // routine's instructions do, so it is scrubbed on the same boundary.
     if (card.questionRequest) {
@@ -158,12 +162,12 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
         ...card.questionRequest,
         questions: card.questionRequest.questions.map((question) => ({
           ...question,
-          question: redactSecretsInText(question.question),
-          ...(question.header ? { header: redactSecretsInText(question.header) } : {}),
+          question: scrub(question.question),
+          ...(question.header ? { header: scrub(question.header) } : {}),
           options: question.options.map((option) => ({
             ...option,
-            label: redactSecretsInText(option.label),
-            ...(option.description ? { description: redactSecretsInText(option.description) } : {}),
+            label: scrub(option.label),
+            ...(option.description ? { description: scrub(option.description) } : {}),
           })),
         })),
       };
@@ -180,8 +184,8 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
               ...operation,
               routine: {
                 ...operation.routine,
-                name: redactSecretsInText(operation.routine.name),
-                instructions: redactSecretsInText(operation.routine.instructions),
+                name: scrub(operation.routine.name),
+                instructions: scrub(operation.routine.instructions),
               },
             }
           : operation.action === "update"
@@ -190,10 +194,10 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
                 changes: {
                   ...operation.changes,
                   ...(typeof operation.changes.name === "string"
-                    ? { name: redactSecretsInText(operation.changes.name) }
+                    ? { name: scrub(operation.changes.name) }
                     : {}),
                   ...(typeof operation.changes.instructions === "string"
-                    ? { instructions: redactSecretsInText(operation.changes.instructions) }
+                    ? { instructions: scrub(operation.changes.instructions) }
                     : {}),
                 },
               }
@@ -204,7 +208,7 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
       const originalPreview = card.skillRequest.preview;
       const preview = originalPreview === undefined
         ? undefined
-        : redactSecretsInText(originalPreview);
+        : scrub(originalPreview);
       // Current skill proposals are scrubbed before staging and their digest
       // binds the card to the exact SKILL.md bytes that apply will install.
       // Keep that binding only when this store-wide safety pass is a no-op and
@@ -221,13 +225,13 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
         : undefined;
       card.skillRequest = {
         ...card.skillRequest,
-        gist: redactSecretsInText(card.skillRequest.gist),
+        gist: scrub(card.skillRequest.gist),
         source: card.skillRequest.source === undefined
           ? undefined
-          : redactSecretsInText(card.skillRequest.source),
+          : scrub(card.skillRequest.source),
         preview,
         sha256,
-        warnings: card.skillRequest.warnings.map((warning) => redactSecretsInText(warning)),
+        warnings: card.skillRequest.warnings.map((warning) => scrub(warning)),
       };
     }
     // A profile proposal's before/after text (and its reason) is hidden
@@ -238,14 +242,14 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
       const scrubChanges = (changes: ProfileRequestChanges): ProfileRequestChanges => {
         const out: ProfileRequestChanges = {};
         for (const [key, value] of Object.entries(changes)) {
-          out[key as keyof ProfileRequestChanges] = redactSecretsInText(value);
+          out[key as keyof ProfileRequestChanges] = scrub(value);
         }
         return out;
       };
       card.profileRequest = {
         ...card.profileRequest,
-        targetName: redactSecretsInText(card.profileRequest.targetName),
-        reason: redactSecretsInText(card.profileRequest.reason),
+        targetName: scrub(card.profileRequest.targetName),
+        reason: scrub(card.profileRequest.reason),
         before: scrubChanges(card.profileRequest.before),
         changes: scrubChanges(card.profileRequest.changes),
       };
@@ -255,17 +259,17 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
   if (out.connector) {
     out.connector = {
       ...out.connector,
-      label: redactSecretsInText(out.connector.label),
-      description: redactSecretsInText(out.connector.description),
-      error: out.connector.error ? redactSecretsInText(out.connector.error) : undefined,
+      label: scrub(out.connector.label),
+      description: scrub(out.connector.description),
+      error: out.connector.error ? scrub(out.connector.error) : undefined,
     };
   }
   if (out.secret) {
     out.secret = {
       ...out.secret,
-      label: redactSecretsInText(out.secret.label),
-      description: redactSecretsInText(out.secret.description),
-      error: out.secret.error ? redactSecretsInText(out.secret.error) : undefined,
+      label: scrub(out.secret.label),
+      description: scrub(out.secret.description),
+      error: out.secret.error ? scrub(out.secret.error) : undefined,
     };
   }
   return out;
@@ -1273,9 +1277,20 @@ export class Store {
     return null;
   }
 
+  /** Content-class redaction rides the same bot-authored scrub (#1670):
+resolved through the thread own bot, or the room member whose attribution
+says it spoke. Unconfigured bots keep the credential-only pass. */
+  private contentClassScrubber(threadId: string, message: Omit<Message, "id" | "at"> & { at?: number }): ((text: string) => string) | undefined {
+    if (message.role !== "bot") return undefined;
+    const owner = this.botByThread(threadId) ?? (message.from?.botId ? this.bot(message.from.botId) : null);
+    if (!owner?.contentClasses) return undefined;
+    const { id: botId, contentClasses } = owner;
+    return (text) => applyContentClasses(text, contentClasses, { botId, threadId, funnel: "transcript" });
+  }
+
   appendMessage(threadId: string, message: Omit<Message, "id" | "at"> & { at?: number }, command?: Command): Message {
     const t = this.thread(threadId);
-    const full: Message = { id: newId(), at: Date.now(), parentId: t.activeLeafId, ...redactBotAuthored(message) };
+    const full: Message = { id: newId(), at: Date.now(), parentId: t.activeLeafId, ...redactBotAuthored(message, this.contentClassScrubber(threadId, message)) };
     const persist = () => { mdb.appendMessage(threadId, full); return full; };
     const committed = command ? runCommand(command, persist) : persist();
     if (committed.id !== full.id) return committed;
@@ -1309,7 +1324,7 @@ export class Store {
     const t = this.thread(threadId);
     const anchorExists = anchorId !== undefined && t.messages.some((m) => m.id === anchorId);
     if (!anchorExists || t.activeLeafId === anchorId) return this.appendMessage(threadId, message);
-    const full: Message = { id: newId(), at: Date.now(), ...redactBotAuthored(message), parentId: anchorId };
+    const full: Message = { id: newId(), at: Date.now(), ...redactBotAuthored(message, this.contentClassScrubber(threadId, message)), parentId: anchorId };
     const children = t.messages.filter((m) => m.parentId === anchorId);
     t.messages.push(full);
     mdb.appendMessage(threadId, full);

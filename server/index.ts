@@ -396,6 +396,7 @@ import { createTeamManifest, importedMemberProfile, parseTeamManifest } from "./
 import { takeImportName } from "../shared/import-name.ts";
 import { readThreadEvents } from "./thread-events.ts";
 import { bindThreadLogCapProvider } from "./thread-log-rotation.ts";
+import { bindWorkspaceContentPolicy, redactForContentPolicy } from "./content-boundary.ts";
 import { listenWebhookIngress, webhookCredential, type WebhookIngress } from "./webhook-ingress.ts";
 import { assertModelVariantSupported, memberTurnSelection } from "./member-turn.ts";
 import { WebhookManager } from "./webhooks.ts";
@@ -1758,6 +1759,12 @@ function checkedMemberIds(value: unknown): { ok: true; memberIds: string[] } | {
 }
 let bootSelection = { instanceId: "", model: "" };
 const store = new Store(() => bootSelection);
+// The workspace write funnels are botId-addressed and cannot read the store
+// directly; resolve per write so a bot PATCH applies without a restart.
+bindWorkspaceContentPolicy((botId) => {
+  const bot = store.bot(botId);
+  return bot ? { classes: bot.contentClasses, threadId: bot.threadId } : null;
+});
 const teamComputers = new TeamComputers(join(DATA_DIR, "team-computers.json"), ENVIRONMENT_ID);
 let followupsReady = false;
 const sendSequencer = new SendSequencer();
@@ -11276,7 +11283,10 @@ const workspaceBackupRoutes = createWorkspaceBackupRoutes({
 // boot, after this line, so the dependency reads it per request.
 ROUTES.push(createHostedSlackRoutes({ bot: (id) => store.bot(id), hostedReady: () => Boolean(workspaceAccess) && entitled("admin") }));
 
-const toolResults = new ToolResults();
+// Content-class boundary (#1670): credentials always, the bot configured
+// classes at this same ingest point, audited when a loosened class passes.
+const toolResults = new ToolResults(undefined, (owner, text) =>
+  redactForContentPolicy(text, store.bot(owner.botId)?.contentClasses, { botId: owner.botId, threadId: owner.threadId, funnel: "tool-result" }));
 const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
   let url: URL;
   try {
@@ -15363,6 +15373,19 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (body.autoStartVps !== undefined) {
         if (typeof body.autoStartVps !== "boolean") return json(res, 400, { error: "autoStartVps must be true or false" });
         patch.autoStartVps = body.autoStartVps;
+      }
+      // Content classes to redact beyond the always-on credential pass.
+      // null restores the unset (credentials-only) behavior; [] is the
+      // audit-only escape hatch: every detected class passes, each use
+      // lands in the thread event log.
+      if (body.contentClasses !== undefined) {
+        if (body.contentClasses === null) {
+          patch.contentClasses = undefined;
+        } else if (!Array.isArray(body.contentClasses) || body.contentClasses.some((c: unknown) => c !== "personal" && c !== "internal")) {
+          return json(res, 400, { error: "contentClasses must be a list of classes (personal, internal), or null" });
+        } else {
+          patch.contentClasses = [...new Set(body.contentClasses)] as ("personal" | "internal")[];
+        }
       }
       if (body.chiefOfStaff !== undefined && typeof body.chiefOfStaff !== "boolean") {
         return json(res, 400, { error: "chiefOfStaff must be true or false" });

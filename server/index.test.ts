@@ -8726,6 +8726,13 @@ describe("harness HTTP API", () => {
     expect(autoStart.status).toBe(200);
     expect(autoStart.body.bot.autoStartVps).toBe(true);
     expect((await api("PATCH", `/api/bots/${bot.id}`, { autoStartVps: "yes" })).status).toBe(400);
+    const classes = await api("PATCH", `/api/bots/${bot.id}`, { contentClasses: ["personal"] });
+    expect(classes.status).toBe(200);
+    expect(classes.body.bot.contentClasses).toEqual(["personal"]);
+    expect((await api("PATCH", `/api/bots/${bot.id}`, { contentClasses: ["personal", "secret"] })).status).toBe(400);
+    const cleared = await api("PATCH", `/api/bots/${bot.id}`, { contentClasses: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.bot.contentClasses).toBeUndefined();
     const invalid = await api("PATCH", `/api/bots/${bot.id}`, { cloudBackend: "daytona" });
     expect(invalid.status).toBe(400);
     expect((await api("PATCH", "/api/config", { vps: { sshAlias: "" } })).status).toBe(200);
