@@ -32,7 +32,8 @@ export function bindContentBoundaryAuditSink(sink: AuditSink | undefined): void 
   auditSink = sink;
 }
 
-function auditContentClassPass(audit: ContentBoundaryAudit, classes: ContentClass[]): void {
+/** Returns the classes whose audit write failed, so the caller can enforce them instead: an unaudited loosening never ships. */
+function auditContentClassPass(audit: ContentBoundaryAudit, classes: ContentClass[]): ContentClass[] {
   const event: RuntimeEvent = {
     eventId: newId(),
     provider: "openmausbot",
@@ -50,10 +51,13 @@ function auditContentClassPass(audit: ContentBoundaryAudit, classes: ContentClas
   });
   try {
     sink(event);
+    return [];
   } catch (error) {
-    // The boundary decision is already made; a failed audit write must not
-    // take the write it guards down with it. The bus reports the same way.
-    console.error("content boundary: audit write failed", error);
+    // The escape hatch is only as good as its audit: when the record
+    // cannot be written the loosened class is enforced instead, so
+    // content never flows past this boundary unaudited.
+    console.error("content boundary: audit write failed; enforcing loosened classes", error);
+    return classes;
   }
 }
 
@@ -62,7 +66,11 @@ function auditContentClassPass(audit: ContentBoundaryAudit, classes: ContentClas
 export function applyContentClasses(text: string, classes: ContentClass[] | undefined, audit: ContentBoundaryAudit): string {
   if (!classes) return text;
   const result = redactContentClasses(text, classes);
-  if (result.passed.length) auditContentClassPass(audit, result.passed);
+  if (result.passed.length && auditContentClassPass(audit, result.passed).length) {
+    // The audit write failed: re-run with the loosened classes enforced,
+    // idempotently, so nothing passes this boundary unaudited.
+    return redactContentClasses(result.text, [...new Set([...classes, ...result.passed])]).text;
+  }
   return result.text;
 }
 

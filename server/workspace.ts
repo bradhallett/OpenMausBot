@@ -352,6 +352,7 @@ export function updateMemory(botId: string, update: MemoryUpdate, opts: MemoryUp
   // Scrubbed before it becomes an entry, so what the tool echoes back is
   // what landed in the file; writeMemoryFile scrubs again, harmlessly.
   const text = update.text === undefined ? undefined : redactWorkspaceText(botId, update.text);
+  const source = opts.source === undefined ? undefined : redactWorkspaceText(botId, opts.source);
   const dir = ensureWorkspace(botId);
   // Do not use readMemoryFile's editor-friendly missing/read-error fallback:
   // a failed read must never turn into a successful overwrite of old notes.
@@ -364,7 +365,7 @@ export function updateMemory(botId: string, update: MemoryUpdate, opts: MemoryUp
   let next: string;
   let entry: string | undefined;
   if (update.action === "append") {
-    entry = memoryEntry(text!, opts);
+    entry = memoryEntry(text!, { ...opts, source });
     next = appendEntry(current, entry);
   } else {
     const oldText = update.oldText!;
@@ -390,7 +391,7 @@ export function updateMemory(botId: string, update: MemoryUpdate, opts: MemoryUp
         return { ok: false, code: "conflict", error: "That entry is already struck through. Replace or remove it, or append the new fact on its own." };
       }
       const struck = `${parsed ? parsed.prefix : line === body ? "" : "- "}~~${body}~~${SEP}superseded ${today}`;
-      entry = memoryEntry(text!, opts);
+      entry = memoryEntry(text!, { ...opts, source });
       next = appendEntry(replaceLine(struck), entry);
     } else if (!parsed) {
       // A hand-written passage keeps the person's own shape: plain
@@ -450,7 +451,7 @@ export function appendMemoryLog(botId: string, text: string, opts: MemoryUpdateO
   }
   const now = opts.now ?? new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
-  const source = cleanSource(opts.source);
+  const source = cleanSource(opts.source === undefined ? undefined : redactWorkspaceText(botId, opts.source));
   const line = `- ${pad(now.getHours())}:${pad(now.getMinutes())}${SEP}${source ? `from ${source}${SEP}` : ""}${normaliseEntryText(redactWorkspaceText(botId, text))}`;
   const dir = join(ensureWorkspace(botId), "memory", MEMORY_LOG_DIR);
   mkdirSync(dir, { recursive: true, mode: 0o700 });

@@ -65,6 +65,17 @@ describe("content-class boundary", () => {
     }
   });
 
+  it("enforces a loosened class when the audit write fails", () => {
+    bindContentBoundaryAuditSink(() => {
+      throw new Error("audit disk full");
+    });
+    // personal is configured, internal is loosened; the failed audit must
+    // fail closed by masking the loosened class instead of passing it.
+    const out = redactForContentPolicy("mail jane@example.com host corp.internal", ["personal"], audit);
+    expect(out).not.toContain("jane@example.com");
+    expect(out).not.toContain("corp.internal");
+  });
+
   it("applies the bound workspace policy and audits to the policy thread", () => {
     const events: unknown[] = [];
     bindContentBoundaryAuditSink((event) => events.push(event));
