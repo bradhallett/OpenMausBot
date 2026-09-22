@@ -48,6 +48,19 @@ export function decisionModelBaseUrl(config: DecisionModelConfig): string | null
   }
 }
 
+/** A configured key must never travel in cleartext: an http: endpoint is
+ * only for the keyless custom lane on the operator's own machine. */
+export function keyOverInsecureTransport(config: DecisionModelConfig): boolean {
+  if (!config.apiKey?.trim()) return false;
+  const baseUrl = decisionModelBaseUrl(config);
+  if (!baseUrl) return false;
+  try {
+    return new URL(baseUrl).protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
 /** A connection is configured when it names a lane and a model and has a
  * key wherever the lane bills by one; the custom lane may run keyless on
  * the operator's own machine. */
@@ -224,6 +237,13 @@ export async function probeDecisionModel(
   config: DecisionModelConfig,
   fetchImpl?: typeof fetch,
 ): Promise<DecisionModelVerdict> {
+  if (keyOverInsecureTransport(config)) {
+    return {
+      ok: false,
+      reason: "uncalibrated",
+      detail: "an API key must not be sent over an http: endpoint — use https:, or remove the key (the custom lane runs keyless on your own machine)",
+    };
+  }
   const built = createDecisionModelClient(config, fetchImpl);
   if (!built) return { ok: false, reason: "uncalibrated", detail: "the connection is incomplete: provider, model and (outside the custom lane) key are required" };
   let first: DecisionChoice;
@@ -248,6 +268,9 @@ export async function probeDecisionModel(
   const keys = Object.keys(CANARY_CRITERIA);
   if (keys.some((key) => first.probabilities[key] !== second.probabilities[key])) {
     return { ok: false, reason: "uncalibrated", detail: "the same request twice returned different distributions (a generative wrapper, not a calibrated classifier)" };
+  }
+  if (first.confidence !== second.confidence) {
+    return { ok: false, reason: "uncalibrated", detail: "the same request twice returned different confidence (a generative wrapper, not a calibrated classifier)" };
   }
   return { ok: true, check: "calibration", model: first.model ?? built.model, confidence: first.confidence, deterministic: true };
 }
