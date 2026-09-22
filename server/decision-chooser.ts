@@ -468,6 +468,7 @@ export function createDecisionChooser(options: {
         history: built.request.history,
       });
       let decision;
+      let decisionTimeout: ReturnType<typeof setTimeout> | undefined;
       try {
         decision = await Promise.race([
           options.client.decide({
@@ -476,12 +477,14 @@ export function createDecisionChooser(options: {
             instructions: "Select exactly one supplied candidate ID for the next computer action.",
           }),
           new Promise<never>((_, reject) => {
-            const timer = setTimeout(() => reject(new Error("decision timed out")), DECIDE_TIMEOUT_MS);
-            timer.unref?.();
+            decisionTimeout = setTimeout(() => reject(new Error("decision timed out")), DECIDE_TIMEOUT_MS);
+            decisionTimeout.unref?.();
           }),
         ]);
       } catch (error) {
         return fail(`decision failed: ${messageOf(error)}`);
+      } finally {
+        if (decisionTimeout) clearTimeout(decisionTimeout);
       }
       const remember = (outcome: string) => {
         // Only a fully processed outcome clears the error budget: a
