@@ -122,10 +122,11 @@ function isInternalIpv6(groups: Uint16Array): boolean {
   return false;
 }
 
-/** Contiguous digit-group windows inside one card candidate, longest
- * first from each start, each 13-19 digits and Luhn-valid. The windows
- * let a real card inside a fused candidate ("card 1234") still be found
- * and masked when the candidate as a whole is not a card. */
+/** Merged union of every Luhn-valid 13-19 digit window inside one card
+ * candidate. Two overlapping cards can share a tail ("0006 4111 ... 1111"
+ * hides "4111 1111 ... 1111"), so collecting each valid window and merging
+ * overlaps keeps the shared digits masked instead of stranding them after
+ * the first match. */
 function cardSpans(candidate: string): Array<[number, number]> {
   const groups: Array<[number, number, number]> = [];
   const digits = /\d+/g;
@@ -133,23 +134,24 @@ function cardSpans(candidate: string): Array<[number, number]> {
     groups.push([match.index, match.index + match[0].length, match[0].length]);
   }
   const spans: Array<[number, number]> = [];
-  let start = 0;
-  while (start < groups.length) {
-    let matched = false;
-    for (let end = groups.length - 1; end >= start; end--) {
+  for (let start = 0; start < groups.length; start += 1) {
+    for (let end = start; end < groups.length; end += 1) {
       let total = 0;
-      for (let i = start; i <= end; i++) total += groups[i][2];
-      if (total > 19) continue;
+      for (let i = start; i <= end; i += 1) total += groups[i][2];
+      if (total > 19) break;
       if (total >= 13 && luhnPasses(candidate.slice(groups[start][0], groups[end][1]).replace(/\D/g, ""))) {
         spans.push([groups[start][0], groups[end][1]]);
-        start = end + 1;
-        matched = true;
-        break;
       }
     }
-    if (!matched) start += 1;
   }
-  return spans;
+  spans.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const merged: Array<[number, number]> = [];
+  for (const span of spans) {
+    const last = merged[merged.length - 1];
+    if (last !== undefined && span[0] <= last[1]) last[1] = Math.max(last[1], span[1]);
+    else merged.push([span[0], span[1]]);
+  }
+  return merged;
 }
 
 function maskCardCandidate(candidate: string): string {

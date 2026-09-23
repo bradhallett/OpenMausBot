@@ -52,6 +52,11 @@ describe("content-class classification", () => {
     expect(redactContentClasses(`${card} 1234`, ["internal"]).passed).toEqual(["personal"]);
   });
 
+  it("masks the union of overlapping Luhn-valid card windows", () => {
+    const fused = "0006 4111 1111 1111 1111";
+    expect(redactContentClasses(fused, ["personal"])).toEqual({ text: "«redacted 24 chars»", passed: [] });
+  });
+
   it("classifies complete IPv6 addresses, never an internal-looking fragment", () => {
     const text = "nat 2606:4700::fd00:1 edge; locals fd00::1 fc00::1 fe80::1 ::1 ::ffff:c0a8:0101 ::ffff:192.168.1.1";
     const { text: out, passed } = redactContentClasses(text, ["internal"]);
