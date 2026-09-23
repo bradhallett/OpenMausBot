@@ -363,7 +363,15 @@ export function createToolRouter(options: {
       let candidates = 0;
       try {
         const frameText = Buffer.from(responseBytes).toString("utf8");
-        const parsed = toolPayload(JSON.parse(frameText));
+        let frame: unknown;
+        try {
+          frame = JSON.parse(frameText);
+        } catch {
+          // Not a JSON-RPC frame (or a truncated one). Nothing to rank:
+          // the original bytes pass through without touching the breaker.
+          return null;
+        }
+        const parsed = toolPayload(frame);
         if (!parsed || parsed.isError === true) return null;
         const found = parseSearchToolsCandidates(parsed);
         candidates = found.length;
