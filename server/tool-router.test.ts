@@ -3,13 +3,15 @@
 // and every fallback path returns the original bytes without breaking the
 // relay. The decision client is faked at its exported seam; nothing here
 // mirrors the module's internals.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { DecisionChoice, DecisionModelClient } from "./decision-model.ts";
 import {
+  DECIDE_TIMEOUT_MS,
   TOOL_ROUTER_MAX_RANKING_BYTES,
   TOOL_ROUTER_MAX_WINNERS,
   buildRankingRequest,
   createToolRouter,
+  decodeJsonRpcFrame,
   jsonRpcToolCall,
   multiExecuteSlugs,
   oneLiner,
@@ -19,6 +21,7 @@ import {
   schemaFetchRequest,
   type ToolCandidate,
   type ToolRouterReport,
+  type ToolSchemaOutcome,
 } from "./tool-router.ts";
 
 const GOAL = "send a welcome email to the new hire";
@@ -59,10 +62,11 @@ function distribution(ids: string[], top: string): DecisionChoice {
 }
 
 function fixtureRouter(options: {
-  decide: (request: { criteria: Record<string, string> }) => Promise<DecisionChoice>;
+  decide: (request: { criteria: Record<string, string>; signal?: AbortSignal }) => Promise<DecisionChoice>;
   goal?: string | null;
   threshold?: number;
   schemaSlugs?: string[];
+  fetchSchemas?: (slugs: string[], transportSessionId?: string, signal?: AbortSignal) => Promise<ToolSchemaOutcome>;
 }) {
   const reports: ToolRouterReport[] = [];
   const decideRequests: Array<{ criteria: Record<string, string>; state: unknown }> = [];
@@ -77,26 +81,28 @@ function fixtureRouter(options: {
     client: () => client,
     threshold: () => options.threshold ?? 0.9,
     goal: () => (options.goal === undefined ? GOAL : options.goal),
-    fetchSchemas: async (slugs) => {
-      schemaRequests.push(slugs);
-      const granted = options.schemaSlugs ?? slugs;
-      const schemas = new Map(
-        slugs.map((slug) => [
-          slug,
-          granted.includes(slug)
-            ? { tool_slug: slug, toolkit: "kit", input_schema: { type: "object", properties: { hydrated: { type: "boolean" } } } }
-            : { tool_slug: slug, toolkit: "kit" },
-        ]),
-      );
-      return { schemas, missing: slugs.filter((slug) => !granted.includes(slug)) };
-    },
+    fetchSchemas:
+      options.fetchSchemas ??
+      (async (slugs) => {
+        schemaRequests.push(slugs);
+        const granted = options.schemaSlugs ?? slugs;
+        const schemas = new Map(
+          slugs.map((slug) => [
+            slug,
+            granted.includes(slug)
+              ? { tool_slug: slug, toolkit: "kit", input_schema: { type: "object", properties: { hydrated: { type: "boolean" } } } }
+              : { tool_slug: slug, toolkit: "kit" },
+          ]),
+        );
+        return { schemas, missing: slugs.filter((slug) => !granted.includes(slug)) };
+      }),
     report: (_threadId, report) => reports.push(report),
   });
   return { router, reports, decideRequests, schemaRequests };
 }
 
 describe("catalog adapter", () => {
-  it("reads candidates from every known backend spelling and ignores unknown shapes", () => {
+  it("reads candidates from keyed schema maps and passes other shapes through", () => {
     const fromMap = parseSearchToolsCandidates({
       tool_schemas: { GMAIL_SEND: { description: "Send mail.\nMore detail." }, SLACK_POST: { description: "Post a message." } },
     });
@@ -104,8 +110,11 @@ describe("catalog adapter", () => {
     expect(fromMap[0].description).toBe("Send mail.");
     const fromCamel = parseSearchToolsCandidates({ toolSchemas: { A: { description: "First." }, B: { description: "Second." } } });
     expect(fromCamel).toHaveLength(2);
-    const fromArray = parseSearchToolsCandidates({ tools: [{ name: "A", description: "First." }, { tool_slug: "B", description: "Second." }] });
-    expect(fromArray.map((candidate) => candidate.name)).toEqual(["A", "B"]);
+    // A non-record snake_case key must not shadow a usable camelCase map.
+    const shadowed = parseSearchToolsCandidates({ tool_schemas: "broken", toolSchemas: { A: { description: "First." } } });
+    expect(shadowed.map((candidate) => candidate.name)).toEqual(["A"]);
+    // Array-shaped catalogs cannot be stripped in place, so they never rank.
+    expect(parseSearchToolsCandidates({ tools: [{ name: "A", description: "First." }, { tool_slug: "B", description: "Second." }] })).toEqual([]);
     expect(parseSearchToolsCandidates({ unexpected: true })).toEqual([]);
   });
 
@@ -142,6 +151,14 @@ describe("catalog adapter", () => {
     expect(ranking!.state.catalog.at(-1)!.name).toBe(huge[ranking!.state.catalog.length - 1].name);
   });
 
+  it("refuses to rank when even two candidates overflow the wire cap", () => {
+    const huge = [
+      { name: "A", description: "a".repeat(40_000) },
+      { name: "B", description: "b".repeat(40_000) },
+    ];
+    expect(buildRankingRequest(GOAL, huge)).toBeNull();
+  });
+
   it("refuses to rank fewer than two candidates", () => {
     expect(buildRankingRequest(GOAL, catalog(1))).toBeNull();
   });
@@ -161,6 +178,39 @@ describe("catalog adapter", () => {
     const outcome = parseSchemaResponse(envelope);
     expect([...outcome.schemas.keys()]).toEqual(["A"]);
     expect(outcome.missing).toEqual(["B"]);
+  });
+
+  it("parses a camelCase schema map wrapped in data", () => {
+    const outcome = parseSchemaResponse({ data: { toolSchemas: { A: { input_schema: { type: "object" } } } } });
+    expect([...outcome.schemas.keys()]).toEqual(["A"]);
+  });
+});
+
+describe("relay answer decoding", () => {
+  const frame = { jsonrpc: "2.0" as const, id: 7, result: { content: [{ type: "text", text: "{}" }] } };
+
+  it("returns the JSON frame for JSON answers", () => {
+    expect(decodeJsonRpcFrame(Buffer.from(JSON.stringify(frame), "utf8"), "application/json")).toEqual(frame);
+  });
+
+  it("extracts the answer from SSE data lines after streamed notifications", () => {
+    const notification = { jsonrpc: "2.0", method: "notifications/progress", params: {} };
+    const sse = [
+      "event: message",
+      "data: " + JSON.stringify(notification),
+      "",
+      ": keep-alive comment",
+      "",
+      "data:" + JSON.stringify(frame),
+      "",
+    ].join("\r\n");
+    // The content type may carry parameters; both data spellings must parse.
+    expect(decodeJsonRpcFrame(Buffer.from(sse, "utf8"), "text/event-stream; charset=utf-8")).toEqual(frame);
+  });
+
+  it("throws when an SSE answer carries no JSON-RPC frame", () => {
+    expect(() => decodeJsonRpcFrame(Buffer.from(": ping\r\n\r\n", "utf8"), "text/event-stream")).toThrow();
+    expect(() => decodeJsonRpcFrame(Buffer.from("data: {broken\r\n\r\n", "utf8"), "text/event-stream")).toThrow();
   });
 });
 
@@ -295,6 +345,164 @@ describe("createToolRouter", () => {
     expect(json.reports).toHaveLength(0);
   });
 
+  it("passes an array-shaped catalog through untouched without a decision", async () => {
+    const payload = { success: true, tools: [{ name: "A", description: "First." }, { name: "B", description: "Second." }] };
+    const frame = Buffer.from(
+      JSON.stringify({ jsonrpc: "2.0", id: 42, result: { content: [{ type: "text", text: JSON.stringify(payload) }] } }),
+      "utf8",
+    );
+    const { router, reports, decideRequests, schemaRequests } = fixtureRouter({
+      decide: async (request) => distribution(Object.keys(request.criteria), "A"),
+    });
+    expect(await router.routeSearch({ threadId: "t9", responseBytes: frame, contentType: "application/json" })).toBeNull();
+    expect(decideRequests).toHaveLength(0);
+    expect(schemaRequests).toHaveLength(0);
+    expect(reports).toHaveLength(0);
+    expect(router.breakerOpen()).toBe(false);
+  });
+
+  it("counts a timed-out decision toward the breaker even when the client rejects on abort", async () => {
+    vi.useFakeTimers();
+    try {
+      const { router, reports, schemaRequests } = fixtureRouter({
+        decide: (request) =>
+          new Promise<DecisionChoice>((_, reject) => {
+            request.signal?.addEventListener("abort", () => reject(new Error("client aborted the request")), { once: true });
+          }),
+      });
+      const routing = router.routeSearch({ threadId: "t10", responseBytes: searchFrame(["A", "B"]), contentType: "application/json" });
+      await vi.advanceTimersByTimeAsync(DECIDE_TIMEOUT_MS + 1);
+      expect(await routing).toBeNull();
+      expect(schemaRequests).toHaveLength(0);
+      expect(reports).toHaveLength(1);
+      expect(reports[0].outcome).toBe("error");
+      expect(reports[0].detail).toMatch(/decision failed/);
+      expect(reports[0].breakerOpen).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a caller cancellation breaker-free even when the client ignores its signal", async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const { router, reports, schemaRequests } = fixtureRouter({
+        decide: () => new Promise<DecisionChoice>(() => {}),
+      });
+      const routing = router.routeSearch({
+        threadId: "t11",
+        responseBytes: searchFrame(["A", "B"]),
+        contentType: "application/json",
+        signal: controller.signal,
+      });
+      controller.abort(new Error("caller closed"));
+      await vi.advanceTimersByTimeAsync(DECIDE_TIMEOUT_MS + 1);
+      expect(await routing).toBeNull();
+      expect(schemaRequests).toHaveLength(0);
+      expect(reports).toHaveLength(1);
+      expect(reports[0].outcome).toBe("error");
+      expect(reports[0].detail).toMatch(/ranking aborted/);
+      expect(reports[0].breakerOpen).toBe(false);
+      expect(router.breakerOpen()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("abandons a hanging schema fetch promptly when the caller aborts during hydration", async () => {
+    const controller = new AbortController();
+    const { router, reports, decideRequests } = fixtureRouter({
+      decide: async (request) => distribution(Object.keys(request.criteria), "A"),
+      fetchSchemas: () => new Promise<ToolSchemaOutcome>(() => {}),
+    });
+    const routing = router.routeSearch({
+      threadId: "t12",
+      responseBytes: searchFrame(["A", "B"]),
+      contentType: "application/json",
+      signal: controller.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    controller.abort(new Error("caller closed"));
+    expect(await routing).toBeNull();
+    expect(decideRequests).toHaveLength(1);
+    expect(reports).toHaveLength(1);
+    expect(reports[0].outcome).toBe("error");
+    expect(reports[0].detail).toMatch(/ranking aborted/);
+    expect(reports[0].breakerOpen).toBe(false);
+    expect(router.breakerOpen()).toBe(false);
+  });
+
+  it("bounds a stalled schema hydration by the decide deadline and falls back to the original bytes", async () => {
+    vi.useFakeTimers();
+    try {
+      const { router, reports } = fixtureRouter({
+        decide: async (request) => distribution(Object.keys(request.criteria), "A"),
+        fetchSchemas: () => new Promise<ToolSchemaOutcome>(() => {}),
+      });
+      const bytes = searchFrame(["A", "B"]);
+      const routing = router.routeSearch({ threadId: "t14", responseBytes: bytes, contentType: "application/json" });
+      await vi.advanceTimersByTimeAsync(DECIDE_TIMEOUT_MS + 1);
+      expect(await routing).toBeNull();
+      expect(reports).toHaveLength(1);
+      expect(reports[0].outcome).toBe("error");
+      expect(reports[0].detail).toMatch(/schema fetch failed: schema hydration timed out/);
+      // A stalled upstream is a malfunction, so the breaker ticks once —
+      // but one expiry must not disable the router on its own.
+      expect(reports[0].breakerOpen).toBe(false);
+      expect(router.breakerOpen()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still rewrites when the schema fetch lands inside the deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      let settle: ((outcome: ToolSchemaOutcome) => void) | undefined;
+      const { router, reports } = fixtureRouter({
+        decide: async (request) => distribution(Object.keys(request.criteria), "A"),
+        fetchSchemas: (_slugs) =>
+          new Promise<ToolSchemaOutcome>((resolve) => {
+            settle = resolve;
+          }),
+      });
+      const routing = router.routeSearch({ threadId: "t15", responseBytes: searchFrame(["A", "B"]), contentType: "application/json" });
+      await vi.advanceTimersByTimeAsync(DECIDE_TIMEOUT_MS - 1);
+      settle!({
+        schemas: new Map([
+          ["A", { tool_slug: "A", toolkit: "kit", input_schema: { type: "object" } }],
+          ["B", { tool_slug: "B", toolkit: "kit", input_schema: { type: "object" } }],
+        ]),
+        missing: [],
+      });
+      expect(await routing).not.toBeNull();
+      expect(reports).toHaveLength(1);
+      expect(reports[0].outcome).toBe("acted");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("forgets the previous winner set as soon as a new search starts ranking", async () => {
+    let calls = 0;
+    const { router, reports } = fixtureRouter({
+      decide: async (request) => {
+        calls += 1;
+        return calls === 1
+          ? distribution(Object.keys(request.criteria), "A")
+          : { selectedId: "abstain", confidence: 0.99, probabilities: { abstain: 0.99 }, model: "fixture-router" };
+      },
+    });
+    const bytes = searchFrame(["A", "B"]);
+    expect(await router.routeSearch({ threadId: "t13", responseBytes: bytes, contentType: "application/json" })).not.toBeNull();
+    expect(await router.routeSearch({ threadId: "t13", responseBytes: bytes, contentType: "application/json" })).toBeNull();
+    expect(reports.at(-1)?.outcome).toBe("abstained");
+    // The abstained search replaced the catalog: stale winners must not
+    // produce outside-winner telemetry for the fallback list.
+    expect(router.observeExecute("t13", ["A", "B"])).toBeNull();
+  });
+
   it("logs an execute outside the verified winner set and relays within it", async () => {
     const slugs = catalog(40).map((candidate) => candidate.name);
     const { router, reports } = fixtureRouter({
@@ -305,6 +513,10 @@ describe("createToolRouter", () => {
     const outside = router.observeExecute("t8", ["TOOL_0000", "TOOL_0039"]);
     expect(outside?.outcome).toBe("abstained");
     expect(outside?.detail).toContain("TOOL_0039");
+    expect(outside?.winnerCount).toBe(1);
+    const skewed = router.observeExecute("t8", ["TOOL_0001", "X1", "X2", "X3"]);
+    expect(skewed?.winnerCount).toBe(1);
+    expect(skewed?.detail).toContain("X3");
     expect(router.observeExecute("unknown-thread", ["TOOL_0000"])).toBeNull();
     expect(reports.filter((report) => report.outcome === "abstained").length).toBe(0);
   });
@@ -324,6 +536,22 @@ describe("rewriteSearchResult", () => {
     expect(viaStructured.tool_schemas.B.schema_omitted).toBe(true);
     expect(viaStructured.tool_schemas.B.input_schema).toBeUndefined();
     expect(viaStructured.tool_router.schema_omitted_count).toBe(1);
+  });
+
+  it("rewrites only the text item that carried the payload", () => {
+    const payload = { success: true, tool_schemas: { A: { description: "First." }, B: { description: "Second." } } };
+    const unrelated = { note: "unrelated json item" };
+    const frame = {
+      jsonrpc: "2.0",
+      id: 7,
+      result: { content: [{ type: "text", text: JSON.stringify(payload) }, { type: "text", text: JSON.stringify(unrelated) }] },
+    };
+    const schemas = new Map([["A", { input_schema: { type: "object" } }]]);
+    const rewritten = rewriteSearchResult(JSON.stringify(frame), ["A"], schemas);
+    expect(rewritten).not.toBeNull();
+    const parsed = JSON.parse(rewritten!);
+    expect(parsed.result.content[0].text).toContain("rank_verified");
+    expect(JSON.parse(parsed.result.content[1].text)).toEqual(unrelated);
   });
 });
 

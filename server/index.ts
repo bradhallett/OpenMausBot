@@ -366,6 +366,7 @@ import {
 } from "./decision-model.ts";
 import {
   createToolRouter,
+  decodeJsonRpcFrame,
   jsonRpcToolCall,
   multiExecuteSlugs,
   parseSchemaResponse,
@@ -670,9 +671,15 @@ const toolRouter = createToolRouter({
   },
   threshold: () => decisionThreshold(cfg.decisionModel),
   goal: (threadId) => (decisionModelConfigured(cfg.decisionModel) ? turnGoal(threadId) : null),
-  fetchSchemas: async (slugs, transportSessionId) => {
+  fetchSchemas: async (slugs, transportSessionId, signal) => {
+    // relayMcp has no AbortSignal support today, so the router races the
+    // caller's signal around this call and abandons the wait; the relay
+    // request finishes and its answer is discarded.
+    void signal;
     const upstream = await composio.relayMcp(cfg, schemaFetchRequest(slugs), transportSessionId);
-    return parseSchemaResponse(JSON.parse(Buffer.from(upstream.bytes).toString("utf8")));
+    // The relay accepts JSON and SSE answers and returns the upstream bytes
+    // unchanged, so the frame is decoded according to the content type.
+    return parseSchemaResponse(decodeJsonRpcFrame(upstream.bytes, upstream.contentType));
   },
   report: publishToolRouterReport,
 });

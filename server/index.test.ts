@@ -117,6 +117,9 @@ let fakeDecisionStatus = 200;
 const fakeMcpCalls: Array<{ name: string; arguments: unknown }> = [];
 let fakeSearchTools: (() => Record<string, unknown>) | null = null;
 let fakeSchemaTools: ((slugs: string[]) => { tool_schemas: Record<string, unknown>; not_found?: string[] }) | null = null;
+// When set, the stub answers COMPOSIO_GET_TOOL_SCHEMAS over SSE, the shape
+// a streamed MCP transport produces and the relay passes through unchanged.
+let fakeSchemaSse = false;
 /** One MCP result frame, shared by the stub and the byte-parity asserts so
  * both sides stringify the exact same object. */
 const mcpResultFrame = (id: unknown, payload: Record<string, unknown>): string =>
@@ -837,6 +840,10 @@ beforeAll(async () => {
         payload = { data: fakeSchemaTools?.(slugs) ?? { tool_schemas: {} } };
       } else {
         payload = { success: true };
+      }
+      if (name === "COMPOSIO_GET_TOOL_SCHEMAS" && fakeSchemaSse) {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        return res.end("event: message\r\ndata: " + mcpResultFrame(frame.id, payload) + "\r\n\r\n");
       }
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(mcpResultFrame(frame.id, payload));
@@ -8974,6 +8981,7 @@ describe("harness HTTP API", () => {
       fakeMcpCalls.length = 0;
       fakeSearchTools = null;
       fakeSchemaTools = null;
+      fakeSchemaSse = false;
     };
     const routerBot = async () => {
       const created = await api("POST", "/api/bots", {
@@ -9094,6 +9102,34 @@ describe("harness HTTP API", () => {
         expect(executed.status).toBe(200);
         await expect.poll(async () =>
           (await chooserEvents(bot.threadId)).some((event) => event.outcome === "abstained" && String(event.detail).includes("TOOL_0035"))
+        ).toBe(true);
+      } finally {
+        await cleanup(bot.id);
+      }
+    });
+
+    it("hydrates winners from an SSE-framed schema answer", async () => {
+      // The calibrated decision model and its warmed gate come from the
+      // ranking test above, as in the abstain case; only the schema
+      // endpoint's framing changes here.
+      resetRouterFixtures();
+      fakeSearchTools = () => searchCatalog(36);
+      fakeDecisionAnswer = (request) => fullDistribution(request, "TOOL_0000");
+      fakeSchemaTools = hydratedSchemas;
+      fakeSchemaSse = true;
+      const bot = await routerBot();
+      try {
+        await startGoalTurn(bot.id, "send a welcome email to the new hire");
+        const token = await mintTestCapability(BASE, bot.id, bot.threadId, { kind: "connectors" });
+        const relayed = await relay(token, searchRequest);
+        expect(relayed.status).toBe(200);
+        const payload = JSON.parse(relayed.text).result.structuredContent;
+        expect(schemaCalls()).toHaveLength(1);
+        expect(payload.tool_schemas.TOOL_0000.rank_verified).toBe(true);
+        expect(payload.tool_schemas.TOOL_0000.input_schema.properties).toEqual({ hydrated: { type: "boolean" } });
+        expect(payload.tool_schemas.TOOL_0035.schema_omitted).toBe(true);
+        await expect.poll(async () =>
+          (await chooserEvents(bot.threadId)).some((event) => event.outcome === "acted")
         ).toBe(true);
       } finally {
         await cleanup(bot.id);
