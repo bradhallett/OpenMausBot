@@ -17,6 +17,7 @@
 // populations stay separable. A router failure must never break a
 // connected-app call: every failure path returns the original bytes.
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { DecisionModelClient } from "./decision-model.ts";
 
 export const TOOL_ROUTER_FLOW = "tool-router";
@@ -26,7 +27,7 @@ export const TOOL_ROUTER_MAX_WINNERS = 32;
 /** The ranking request's wire cap. Goal text plus names and one-liners —
  * the bytes that decide rank — never schemas or full descriptions. */
 export const TOOL_ROUTER_MAX_RANKING_BYTES = 65_536;
-const DECIDE_TIMEOUT_MS = 12_000;
+export const DECIDE_TIMEOUT_MS = 12_000;
 const ERROR_BUDGET = 3;
 const MIN_CANDIDATES = 2;
 const ONE_LINER_MAX = 160;
@@ -74,38 +75,30 @@ function candidateFromEntry(name: string, entry: unknown): ToolCandidate | null 
   return name.trim() && description ? { name: name.trim(), description } : null;
 }
 
+/** The keyed schema map a search payload carries, in the spelling the
+ * rewrite reuses. Only a keyed map can be stripped in place: an
+ * array-shaped catalog has no per-tool entry to rewrite, so it is not
+ * routable at all and the caller passes those bytes through untouched. */
+function schemasMapOf(payload: JsonRecord): { key: "tool_schemas" | "toolSchemas"; map: Record<string, unknown> } | null {
+  if (isRecord(payload.tool_schemas)) return { key: "tool_schemas", map: payload.tool_schemas };
+  if (isRecord(payload.toolSchemas)) return { key: "toolSchemas", map: payload.toolSchemas };
+  return null;
+}
+
 /** Candidates from a COMPOSIO_SEARCH_TOOLS payload. The backend owns this
- * shape and has changed it across versions, so every known spelling is
- * accepted — keyed schema maps (snake or camel), or flat tool arrays —
- * and an unknown shape yields nothing, which passes the response through
- * untouched. */
+ * shape and has changed it across versions, so both keyed schema-map
+ * spellings are accepted; anything else yields nothing, which passes the
+ * response through untouched — no decision call, no event. */
 export function parseSearchToolsCandidates(payload: unknown): ToolCandidate[] {
   if (!isRecord(payload)) return [];
-  const map = payload.tool_schemas ?? payload.toolSchemas;
-  if (isRecord(map)) {
-    const candidates: ToolCandidate[] = [];
-    for (const [name, entry] of Object.entries(map)) {
-      const candidate = candidateFromEntry(name, entry);
-      if (candidate) candidates.push(candidate);
-    }
-    return candidates;
+  const map = schemasMapOf(payload)?.map;
+  if (!map) return [];
+  const candidates: ToolCandidate[] = [];
+  for (const [name, entry] of Object.entries(map)) {
+    const candidate = candidateFromEntry(name, entry);
+    if (candidate) candidates.push(candidate);
   }
-  for (const key of ["tools", "results", "data"]) {
-    const list = payload[key];
-    if (!Array.isArray(list)) continue;
-    const candidates: ToolCandidate[] = [];
-    for (const item of list) {
-      if (!isRecord(item)) continue;
-      const name = [item.name, item.tool_slug, item.toolSlug, item.slug].find(
-        (value) => typeof value === "string" && value.trim(),
-      );
-      if (typeof name !== "string") continue;
-      const candidate = candidateFromEntry(name, item);
-      if (candidate) candidates.push(candidate);
-    }
-    if (candidates.length) return candidates;
-  }
-  return [];
+  return candidates;
 }
 
 export type RankingRequest = {
@@ -143,8 +136,14 @@ export function buildRankingRequest(goal: string, candidates: ToolCandidate[]): 
       truncated_count: truncatedCount,
     };
     const bytes = Buffer.byteLength(JSON.stringify({ state, criteria }), "utf8");
-    if (bytes <= TOOL_ROUTER_MAX_RANKING_BYTES || kept.length <= MIN_CANDIDATES) {
+    if (bytes <= TOOL_ROUTER_MAX_RANKING_BYTES) {
       return { state, criteria, truncatedCount };
+    }
+    if (kept.length <= MIN_CANDIDATES) {
+      // Even the minimum catalog overflows the cap — names or one-liners
+      // far larger than any real backend sends. Refuse to rank rather
+      // than ship an oversized wire.
+      return null;
     }
     const nextLength = Math.max(MIN_CANDIDATES, Math.floor(kept.length * 0.9));
     truncatedCount += kept.length - nextLength;
@@ -163,26 +162,35 @@ export function jsonRpcToolCall(body: unknown): { name: string; arguments: unkno
 
 export type ToolSchemaOutcome = { schemas: Map<string, JsonRecord>; missing: string[] };
 
+type PayloadLocation = { kind: "structured" } | { kind: "text"; index: number };
+
 /** Locate the Composio tool payload inside an MCP result envelope:
- * structured content first, then a JSON text item. */
-function toolPayload(frame: unknown): JsonRecord | null {
+ * structured content first, then a JSON text item. The location comes
+ * back too, so a rewrite can replace exactly the item that carried the
+ * payload and leave any other text items alone. */
+function toolPayloadAt(frame: unknown): { payload: JsonRecord; from: PayloadLocation } | null {
   if (!isRecord(frame) || !isRecord(frame.result)) return null;
   const result = frame.result;
-  if (isRecord(result.structuredContent)) return result.structuredContent;
+  if (isRecord(result.structuredContent)) return { payload: result.structuredContent, from: { kind: "structured" } };
   if (Array.isArray(result.content)) {
-    for (const item of result.content) {
+    for (let index = 0; index < result.content.length; index += 1) {
+      const item = result.content[index];
       if (!isRecord(item) || item.type !== "text" || typeof item.text !== "string") continue;
       const trimmed = item.text.trim();
       if (!trimmed.startsWith("{")) continue;
       try {
         const parsed: unknown = JSON.parse(trimmed);
-        if (isRecord(parsed)) return parsed;
+        if (isRecord(parsed)) return { payload: parsed, from: { kind: "text", index } };
       } catch {
         // not JSON after all
       }
     }
   }
   return null;
+}
+
+function toolPayload(frame: unknown): JsonRecord | null {
+  return toolPayloadAt(frame)?.payload ?? null;
 }
 
 /** Rewrite a search response so schemas ride only with the ranked
@@ -203,30 +211,33 @@ export function rewriteSearchResult(
     return null;
   }
   if (!isRecord(frame) || !isRecord(frame.result)) return null;
-  const payload = toolPayload(frame);
-  if (!payload) return null;
-  const schemasKey = "tool_schemas" in payload ? "tool_schemas" : "toolSchemas" in payload ? "toolSchemas" : null;
-  const original = schemasKey ? payload[schemasKey] : undefined;
+  const located = toolPayloadAt(frame);
+  if (!located) return null;
+  const payload = located.payload;
+  const keyed = schemasMapOf(payload);
+  // Array-shaped catalogs cannot be stripped here; the caller passes the
+  // original bytes through instead of ranking them.
+  if (!keyed) return null;
+  const schemasKey = keyed.key;
+  const original = keyed.map;
   const ranked: JsonRecord = {};
   const omitted: JsonRecord = {};
   const winnerSet = new Set(winners);
-  if (isRecord(original)) {
-    for (const [name, entry] of Object.entries(original)) {
-      if (winnerSet.has(name)) continue;
-      omitted[name] = isRecord(entry)
-        ? {
-            ...(typeof entry.tool_slug === "string" ? { tool_slug: entry.tool_slug } : {}),
-            ...(typeof entry.toolSlug === "string" ? { toolSlug: entry.toolSlug } : {}),
-            ...(typeof entry.toolkit === "string" ? { toolkit: entry.toolkit } : {}),
-            ...(oneLiner(entry.description) ? { description: entry.description } : {}),
-            schema_omitted: true,
-          }
-        : { schema_omitted: true };
-    }
+  for (const [name, entry] of Object.entries(original)) {
+    if (winnerSet.has(name)) continue;
+    omitted[name] = isRecord(entry)
+      ? {
+          ...(typeof entry.tool_slug === "string" ? { tool_slug: entry.tool_slug } : {}),
+          ...(typeof entry.toolSlug === "string" ? { toolSlug: entry.toolSlug } : {}),
+          ...(typeof entry.toolkit === "string" ? { toolkit: entry.toolkit } : {}),
+          ...(oneLiner(entry.description) ? { description: entry.description } : {}),
+          schema_omitted: true,
+        }
+      : { schema_omitted: true };
   }
   for (const name of winners) {
     const fetched = schemas.get(name);
-    const base = isRecord(original) && isRecord(original[name]) ? original[name] : {};
+    const base = isRecord(original[name]) ? original[name] : {};
     const full = fetched ?? base;
     const inputSchema = isRecord(full.input_schema) ? full.input_schema : isRecord(full.inputSchema) ? full.inputSchema : undefined;
     ranked[name] = {
@@ -237,7 +248,7 @@ export function rewriteSearchResult(
     };
   }
   const next: JsonRecord = { ...payload };
-  next[schemasKey ?? "tool_schemas"] = { ...ranked, ...omitted };
+  next[schemasKey] = { ...ranked, ...omitted };
   next.tool_router = {
     flow: TOOL_ROUTER_FLOW,
     ranked_winners: winners,
@@ -248,13 +259,25 @@ export function rewriteSearchResult(
       ". Tools marked schema_omitted kept their name and description only — fetch a schema with COMPOSIO_GET_TOOL_SCHEMAS only if the winners cannot do the job.",
   };
   const result: JsonRecord = { ...frame.result };
-  if (isRecord(result.structuredContent)) result.structuredContent = next;
+  if (located.from.kind === "structured" && isRecord(result.structuredContent)) result.structuredContent = next;
   if (Array.isArray(result.content)) {
-    result.content = result.content.map((item) =>
-      isRecord(item) && item.type === "text" && typeof item.text === "string" && item.text.trim().startsWith("{")
-        ? { ...item, text: JSON.stringify(next) }
-        : item,
-    );
+    // Rewrite the text item that carried the payload — and, when the
+    // payload came from structuredContent, any text mirror of the same
+    // payload — while unrelated JSON-looking items keep their bytes.
+    result.content = result.content.map((item, index) => {
+      if (!isRecord(item) || item.type !== "text" || typeof item.text !== "string") return item;
+      if (located.from.kind === "text") {
+        return located.from.index === index ? { ...item, text: JSON.stringify(next) } : item;
+      }
+      const trimmed = item.text.trim();
+      if (!trimmed.startsWith("{")) return item;
+      try {
+        const mirrored: unknown = JSON.parse(trimmed);
+        return isDeepStrictEqual(mirrored, located.payload) ? { ...item, text: JSON.stringify(next) } : item;
+      } catch {
+        return item; // not JSON after all
+      }
+    });
   }
   return JSON.stringify({ ...frame, result });
 }
@@ -290,7 +313,7 @@ export function createToolRouter(options: {
   client: () => DecisionModelClient | null;
   threshold: () => number;
   goal: (threadId: string) => string | null;
-  fetchSchemas: (slugs: string[], transportSessionId?: string) => Promise<ToolSchemaOutcome>;
+  fetchSchemas: (slugs: string[], transportSessionId?: string, signal?: AbortSignal) => Promise<ToolSchemaOutcome>;
   report: (threadId: string, report: ToolRouterReport) => void;
 }): ToolRouter {
   let consecutiveErrors = 0;
@@ -319,13 +342,14 @@ export function createToolRouter(options: {
         verified.delete(threadId);
         return null;
       }
-      const outside = slugs.filter((slug) => !entry.winners.has(slug));
+      const executedWinners = new Set(slugs.filter((slug) => entry.winners.has(slug)));
+      const outside = [...new Set(slugs.filter((slug) => !entry.winners.has(slug)))];
       if (!outside.length) return null;
       return {
         outcome: "abstained",
         flow: TOOL_ROUTER_FLOW,
         candidateCount: entry.winners.size,
-        winnerCount: entry.winners.size - outside.length,
+        winnerCount: executedWinners.size,
         latencyMs: 0,
         breakerOpen: disabled,
         detail: "executed " + outside.length + " tool(s) outside the router's verified winner set: " + outside.slice(0, 8).join(", "),
@@ -378,11 +402,31 @@ export function createToolRouter(options: {
         if (candidates < MIN_CANDIDATES) return null;
         const ranking = buildRankingRequest(goal, found);
         if (!ranking) return null;
+        // A new search replaces the thread's catalog: winners remembered
+        // from an earlier response are stale the moment this one starts
+        // ranking, and only a successful rewrite remembers fresh ones.
+        verified.delete(threadId);
         const decideAbort = new AbortController();
-        const onExternalAbort = () => decideAbort.abort(signal?.reason);
+        // A caller cancellation must stay a non-malfunction even when the
+        // client ignores its signal: record it before aborting so a later
+        // timer expiry on the same abandoned decision cannot tick the breaker.
+        let callerAborted = false;
+        const onExternalAbort = () => {
+          callerAborted = true;
+          decideAbort.abort(signal?.reason);
+        };
         signal?.addEventListener("abort", onExternalAbort, { once: true });
-        if (signal?.aborted) decideAbort.abort(signal.reason);
+        if (signal?.aborted) onExternalAbort();
+        const callerGone = new Promise<never>((_, reject) => {
+          if (!signal) return;
+          if (signal.aborted) {
+            reject(signal.reason ?? new Error("caller aborted"));
+            return;
+          }
+          signal.addEventListener("abort", () => reject(signal.reason ?? new Error("caller aborted")), { once: true });
+        });
         let decision;
+        let timedOut = false;
         let timeoutId: ReturnType<typeof setTimeout> | undefined;
         try {
           decision = await Promise.race([
@@ -392,8 +436,10 @@ export function createToolRouter(options: {
               instructions: "Rank the candidate tools for the goal. Select the single best tool id.",
               signal: decideAbort.signal,
             }),
+            callerGone,
             new Promise<never>((_, reject) => {
               timeoutId = setTimeout(() => {
+                timedOut = true;
                 decideAbort.abort();
                 reject(new Error("decision timed out"));
               }, DECIDE_TIMEOUT_MS);
@@ -401,9 +447,11 @@ export function createToolRouter(options: {
             }),
           ]);
         } catch (error) {
-          if (decideAbort.signal.aborted && !/timed out/.test(messageOf(error))) {
-            // The caller went away mid-decision. Not a malfunction: no
-            // schema fetch, no execute endorsement, no breaker tick.
+          if (callerAborted || (decideAbort.signal.aborted && !timedOut)) {
+            // The caller went away mid-decision — the timer sets timedOut
+            // before aborting, so a client that rejects synchronously on
+            // abort is still a timeout. Not a malfunction: no schema
+            // fetch, no execute endorsement, no breaker tick.
             options.report(threadId, {
               outcome: "error", flow: TOOL_ROUTER_FLOW, candidateCount: candidates, winnerCount: 0,
               latencyMs: Date.now() - started, breakerOpen: disabled, detail: "ranking aborted: " + messageOf(error),
@@ -443,10 +491,32 @@ export function createToolRouter(options: {
           .map(([id]) => id);
         if (!winners.length) return fail("decision returned no usable winners", candidates);
         let schemas: ToolSchemaOutcome;
+        let hydrationTimer: ReturnType<typeof setTimeout> | undefined;
         try {
-          schemas = await options.fetchSchemas(winners, transportSessionId);
+          // The relay's own timeout is minutes long; a search response
+          // cannot wait out a stalled upstream. Hydration gets the same
+          // budget as the decision, and expiry falls through to the failure
+          // path below — a stalled fetch is a malfunction, so it ticks the
+          // breaker like any other, unlike a caller that simply went away.
+          schemas = await Promise.race([
+            options.fetchSchemas(winners, transportSessionId, signal),
+            callerGone,
+            new Promise<never>((_, reject) => {
+              hydrationTimer = setTimeout(() => reject(new Error("schema hydration timed out")), DECIDE_TIMEOUT_MS);
+              hydrationTimer.unref?.();
+            }),
+          ]);
         } catch (error) {
+          if (signal?.aborted) {
+            options.report(threadId, {
+              outcome: "error", flow: TOOL_ROUTER_FLOW, candidateCount: candidates, winnerCount: 0,
+              latencyMs: Date.now() - started, breakerOpen: disabled, detail: "ranking aborted: " + messageOf(error),
+            });
+            return null;
+          }
           return fail("schema fetch failed: " + messageOf(error), candidates);
+        } finally {
+          if (hydrationTimer) clearTimeout(hydrationTimer);
         }
         const missing = winners.filter((slug) => {
           const entry = schemas.schemas.get(slug);
@@ -494,6 +564,38 @@ export function schemaFetchRequest(slugs: string[]): {
   };
 }
 
+/** Decode relayed answer bytes into their JSON-RPC frame according to the
+ * upstream content type. JSON answers are the frame itself; SSE answers
+ * carry it in data: lines, possibly after streamed notifications, so the
+ * last frame bearing a result or error wins. Throws when nothing decodes,
+ * which callers treat as a schema-fetch failure. */
+export function decodeJsonRpcFrame(bytes: Uint8Array, contentType: string): unknown {
+  const text = Buffer.from(bytes).toString("utf8");
+  if (!/text\/event-stream/i.test(contentType)) return JSON.parse(text);
+  const frames: JsonRecord[] = [];
+  for (const event of text.split(/\r?\n\r?\n/)) {
+    const data = event
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).replace(/^ /, ""))
+      .join("\n");
+    if (!data) continue;
+    try {
+      const frame: unknown = JSON.parse(data);
+      if (isRecord(frame)) frames.push(frame);
+    } catch {
+      // A malformed event is skipped; the answer may arrive in a later one.
+    }
+  }
+  for (let index = frames.length - 1; index >= 0; index -= 1) {
+    const frame = frames[index];
+    if ("result" in frame || "error" in frame) return frame;
+  }
+  const last = frames.at(-1);
+  if (!last) throw new Error("SSE answer carried no JSON-RPC frame");
+  return last;
+}
+
 /** Parse a COMPOSIO_GET_TOOL_SCHEMAS answer into per-slug records. The
  * backend may wrap the payload in data and reports misses separately;
  * both spellings are accepted. */
@@ -508,7 +610,9 @@ export function parseSchemaResponse(frame: unknown): ToolSchemaOutcome {
       ? data.tool_schemas
       : isRecord(payload.toolSchemas)
         ? payload.toolSchemas
-        : undefined;
+        : isRecord(data?.toolSchemas)
+          ? data.toolSchemas
+          : undefined;
   if (map) {
     for (const [slug, entry] of Object.entries(map)) {
       if (isRecord(entry)) schemas.set(slug, entry);
