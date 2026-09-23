@@ -168,6 +168,9 @@ function chatCompletionsClient(options: { baseUrl: string; apiKey?: string; mode
       try {
         const response = await fetchImpl(url, {
           method: "POST",
+          // a 3xx could replay this POST — state, criteria, and the key —
+          // over cleartext http; the configured URL is the only destination
+          redirect: "error",
           headers: {
             "content-type": "application/json",
             ...(options.apiKey ? { authorization: `Bearer ${options.apiKey}` } : {}),
