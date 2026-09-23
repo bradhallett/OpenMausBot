@@ -239,7 +239,14 @@ function isRuntimeEvent(value: unknown): value is RuntimeEvent {
           (typeof value.confidence === "number" && Number.isFinite(value.confidence) && value.confidence >= 0 && value.confidence <= 1)) &&
         stringOrMissing(value.model) &&
         stringOrMissing(value.flow) &&
-        stringOrMissing(value.detail)
+        stringOrMissing(value.detail) &&
+        (value.candidateCount === undefined ||
+          (typeof value.candidateCount === "number" && Number.isInteger(value.candidateCount) && value.candidateCount >= 0)) &&
+        (value.winnerCount === undefined ||
+          (typeof value.winnerCount === "number" && Number.isInteger(value.winnerCount) && value.winnerCount >= 0)) &&
+        (value.latencyMs === undefined ||
+          (typeof value.latencyMs === "number" && Number.isFinite(value.latencyMs) && value.latencyMs >= 0)) &&
+        (value.breakerOpen === undefined || typeof value.breakerOpen === "boolean")
       );
     case "runtime.error":
       return typeof value.message === "string" && (value.setup === undefined || typeof value.setup === "boolean");

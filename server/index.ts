@@ -358,11 +358,20 @@ import {
 import { readCuaConnection, gatedLocalComputer } from "./local-computer.ts";
 import {
   createCalibrationGate,
+  createDecisionModelClient,
   decisionModelBaseUrl,
   decisionModelConfigured,
   decisionThreshold,
   keyOverInsecureTransport,
 } from "./decision-model.ts";
+import {
+  createToolRouter,
+  jsonRpcToolCall,
+  multiExecuteSlugs,
+  parseSchemaResponse,
+  schemaFetchRequest,
+  type ToolRouterReport,
+} from "./tool-router.ts";
 import {
   discoverExistingPerBotLocalVms,
   localVmInventoryEntry,
@@ -637,6 +646,49 @@ function decisionChooserEnv(flow: string): Record<string, string> | null {
     OMB_DECISION_THRESHOLD: String(decisionThreshold(section)),
     OMB_DECISION_FLOW: flow,
   };
+}
+
+// The composio tool router (#1667): a second caller of the same calibrated
+// decision model, over connected-app discovery instead of the screen. The
+// activation bar is identical to the chooser's — configured, key safe, and
+// probe-passed in this process — so a default install never pays a decision
+// and its discovery payload stays byte-identical.
+function toolRouterActive(): boolean {
+  const section = cfg.decisionModel;
+  return Boolean(
+    section &&
+      decisionModelConfigured(section) &&
+      !keyOverInsecureTransport(section) &&
+      decisionGate.cached(section),
+  );
+}
+const toolRouter = createToolRouter({
+  client: () => {
+    const section = cfg.decisionModel;
+    if (!section || !decisionModelConfigured(section) || keyOverInsecureTransport(section)) return null;
+    return createDecisionModelClient(section)?.client ?? null;
+  },
+  threshold: () => decisionThreshold(cfg.decisionModel),
+  goal: (threadId) => (decisionModelConfigured(cfg.decisionModel) ? turnGoal(threadId) : null),
+  fetchSchemas: async (slugs, transportSessionId) => {
+    const upstream = await composio.relayMcp(cfg, schemaFetchRequest(slugs), transportSessionId);
+    return parseSchemaResponse(JSON.parse(Buffer.from(upstream.bytes).toString("utf8")));
+  },
+  report: publishToolRouterReport,
+});
+
+/** Router outcomes land in the same event stream as the chooser's
+ * (#1630), tagged flow "tool-router" so the two populations stay
+ * separable in the inspector. */
+function publishToolRouterReport(threadId: string, report: ToolRouterReport) {
+  bus.publish({
+    eventId: newId(),
+    provider: "composio",
+    threadId,
+    createdAt: new Date().toISOString(),
+    type: "decision.chooser",
+    ...report,
+  });
 }
 const hostedModels = hostedModelPolicy(DATA_DIR);
 const providerConfigs = () => hostedModels ? hostedModels.configs() : instanceConfigs(cfg);
@@ -14233,18 +14285,49 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (!currentSender || currentSender.composio === false || !composio.configured(cfg)) {
           return json(res, 403, { error: "connected apps are not enabled for this bot" });
         }
+        const transportSessionId = Array.isArray(req.headers["mcp-session-id"])
+          ? req.headers["mcp-session-id"][0]
+          : req.headers["mcp-session-id"];
+        const toolCall = toolRouterActive() ? jsonRpcToolCall(body) : null;
+        if (toolCall?.name === "COMPOSIO_MULTI_EXECUTE_TOOL") {
+          // Router telemetry (#1667), never a gate: an execute outside the
+          // verified winner set is the model overruling the ranking, which
+          // is exactly what the event log should show.
+          const outside = toolRouter.observeExecute(internalCapability.threadId, multiExecuteSlugs(toolCall.arguments));
+          if (outside) publishToolRouterReport(internalCapability.threadId, outside);
+        }
         const upstream = await composio.relayMcp(
           cfg,
           body,
-          Array.isArray(req.headers["mcp-session-id"])
-            ? req.headers["mcp-session-id"][0]
-            : req.headers["mcp-session-id"],
+          transportSessionId,
         );
         const headers: Record<string, string> = {
           "content-type": upstream.contentType,
           "cache-control": "no-store",
         };
         if (upstream.transportSessionId) headers["mcp-session-id"] = upstream.transportSessionId;
+        if (toolCall?.name === "COMPOSIO_SEARCH_TOOLS" && upstream.status === 200) {
+          // The router (#1667) rewrites a successful search response in
+          // place: ranked winners keep schemas, the rest keep their names.
+          // Every failure path inside returns null and the original bytes
+          // answer, so a router fault cannot break connected apps.
+          const callerAbort = new AbortController();
+          req.once("aborted", () => callerAbort.abort(new Error("caller aborted")));
+          req.once("close", () => {
+            if (!res.writableEnded) callerAbort.abort(new Error("caller closed"));
+          });
+          const routed = await toolRouter.routeSearch({
+            threadId: internalCapability.threadId,
+            responseBytes: upstream.bytes,
+            contentType: upstream.contentType,
+            transportSessionId,
+            signal: callerAbort.signal,
+          });
+          if (routed) {
+            res.writeHead(upstream.status, { ...headers, "content-type": "application/json" });
+            return res.end(Buffer.from(routed));
+          }
+        }
         res.writeHead(upstream.status, headers);
         return res.end(Buffer.from(upstream.bytes));
       }

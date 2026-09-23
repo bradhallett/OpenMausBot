@@ -148,6 +148,15 @@ export type RuntimeEvent = RuntimeEventBase &
         model?: string;
         flow?: string;
         detail?: string;
+        // Router outcomes (#1667) add population counters; the computer
+        // chooser omits them, so every field stays optional.
+        /** Candidates the router was offered, and how many kept schemas. */
+        candidateCount?: number;
+        winnerCount?: number;
+        /** Decide-to-answer wall time, and whether the three-error breaker
+         * had already tripped when this event was written. */
+        latencyMs?: number;
+        breakerOpen?: boolean;
       }
     | { type: "runtime.error"; message: string; setup?: boolean; terminal?: boolean }
   );

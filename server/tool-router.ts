@@ -17,6 +17,7 @@
 // populations stay separable. A router failure must never break a
 // connected-app call: every failure path returns the original bytes.
 import { randomUUID } from "node:crypto";
+import type { DecisionModelClient } from "./decision-model.ts";
 
 export const TOOL_ROUTER_FLOW = "tool-router";
 /** How many ranked tools keep their schemas. Mirrors the chooser's
@@ -25,8 +26,14 @@ export const TOOL_ROUTER_MAX_WINNERS = 32;
 /** The ranking request's wire cap. Goal text plus names and one-liners —
  * the bytes that decide rank — never schemas or full descriptions. */
 export const TOOL_ROUTER_MAX_RANKING_BYTES = 65_536;
+const DECIDE_TIMEOUT_MS = 12_000;
+const ERROR_BUDGET = 3;
 const MIN_CANDIDATES = 2;
 const ONE_LINER_MAX = 160;
+/** A verified winner set goes stale with the turn that produced it, same
+ * horizon as the turn goal: ranking against abandoned work is worse than
+ * not ranking. */
+const VERIFIED_TTL_MS = 10 * 60 * 1000;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -44,6 +51,11 @@ export type ToolRouterReport = {
   model?: string;
   detail?: string;
 };
+
+function messageOf(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.slice(0, 300);
+}
 
 function isRecord(value: unknown): value is JsonRecord {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -173,6 +185,80 @@ function toolPayload(frame: unknown): JsonRecord | null {
   return null;
 }
 
+/** Rewrite a search response so schemas ride only with the ranked
+ * winners. Winner entries are re-ordered to rank and hydrated; every
+ * other tool keeps its name and one-liner with the schema stripped, so
+ * the fallback path — the model fetching a schema itself — stays open.
+ * Null means the frame held nothing rewriteable; callers pass the
+ * original bytes through. */
+export function rewriteSearchResult(
+  frameText: string,
+  winners: string[],
+  schemas: Map<string, JsonRecord>,
+): string | null {
+  let frame: unknown;
+  try {
+    frame = JSON.parse(frameText);
+  } catch {
+    return null;
+  }
+  if (!isRecord(frame) || !isRecord(frame.result)) return null;
+  const payload = toolPayload(frame);
+  if (!payload) return null;
+  const schemasKey = "tool_schemas" in payload ? "tool_schemas" : "toolSchemas" in payload ? "toolSchemas" : null;
+  const original = schemasKey ? payload[schemasKey] : undefined;
+  const ranked: JsonRecord = {};
+  const omitted: JsonRecord = {};
+  const winnerSet = new Set(winners);
+  if (isRecord(original)) {
+    for (const [name, entry] of Object.entries(original)) {
+      if (winnerSet.has(name)) continue;
+      omitted[name] = isRecord(entry)
+        ? {
+            ...(typeof entry.tool_slug === "string" ? { tool_slug: entry.tool_slug } : {}),
+            ...(typeof entry.toolSlug === "string" ? { toolSlug: entry.toolSlug } : {}),
+            ...(typeof entry.toolkit === "string" ? { toolkit: entry.toolkit } : {}),
+            ...(oneLiner(entry.description) ? { description: entry.description } : {}),
+            schema_omitted: true,
+          }
+        : { schema_omitted: true };
+    }
+  }
+  for (const name of winners) {
+    const fetched = schemas.get(name);
+    const base = isRecord(original) && isRecord(original[name]) ? original[name] : {};
+    const full = fetched ?? base;
+    const inputSchema = isRecord(full.input_schema) ? full.input_schema : isRecord(full.inputSchema) ? full.inputSchema : undefined;
+    ranked[name] = {
+      ...base,
+      ...(typeof base.tool_slug === "string" ? {} : { tool_slug: name }),
+      ...(inputSchema ? { input_schema: inputSchema } : {}),
+      rank_verified: true,
+    };
+  }
+  const next: JsonRecord = { ...payload };
+  next[schemasKey ?? "tool_schemas"] = { ...ranked, ...omitted };
+  next.tool_router = {
+    flow: TOOL_ROUTER_FLOW,
+    ranked_winners: winners,
+    schema_omitted_count: Object.keys(omitted).length,
+    note:
+      "A calibrated decision model ranked these tools for the current goal; full schemas are kept for the top " +
+      winners.length +
+      ". Tools marked schema_omitted kept their name and description only — fetch a schema with COMPOSIO_GET_TOOL_SCHEMAS only if the winners cannot do the job.",
+  };
+  const result: JsonRecord = { ...frame.result };
+  if (isRecord(result.structuredContent)) result.structuredContent = next;
+  if (Array.isArray(result.content)) {
+    result.content = result.content.map((item) =>
+      isRecord(item) && item.type === "text" && typeof item.text === "string" && item.text.trim().startsWith("{")
+        ? { ...item, text: JSON.stringify(next) }
+        : item,
+    );
+  }
+  return JSON.stringify({ ...frame, result });
+}
+
 /** The executed tool slugs of a COMPOSIO_MULTI_EXECUTE_TOOL call, if the
  * frame is one. */
 export function multiExecuteSlugs(arguments_: unknown): string[] {
@@ -182,6 +268,207 @@ export function multiExecuteSlugs(arguments_: unknown): string[] {
     if (isRecord(item) && typeof item.tool_slug === "string" && item.tool_slug.trim()) slugs.push(item.tool_slug.trim());
   }
   return slugs;
+}
+
+export interface ToolRouter {
+  /** Rank a search response. Returns replacement bytes, or null to
+   * return the original response untouched. */
+  routeSearch(options: {
+    threadId: string;
+    responseBytes: Uint8Array;
+    contentType: string;
+    transportSessionId?: string;
+    signal?: AbortSignal;
+  }): Promise<Uint8Array | null>;
+  /** Telemetry for an execute against the thread's verified winners.
+   * Never blocks the call. */
+  observeExecute(threadId: string, slugs: string[]): ToolRouterReport | null;
+  breakerOpen(): boolean;
+}
+
+export function createToolRouter(options: {
+  client: () => DecisionModelClient | null;
+  threshold: () => number;
+  goal: (threadId: string) => string | null;
+  fetchSchemas: (slugs: string[], transportSessionId?: string) => Promise<ToolSchemaOutcome>;
+  report: (threadId: string, report: ToolRouterReport) => void;
+}): ToolRouter {
+  let consecutiveErrors = 0;
+  let disabled = false;
+  const verified = new Map<string, { winners: Set<string>; at: number }>();
+
+  const rememberWinners = (threadId: string, winners: string[]) => {
+    if (verified.size >= 256) {
+      const now = Date.now();
+      for (const [key, entry] of verified) {
+        if (now - entry.at > VERIFIED_TTL_MS) verified.delete(key);
+      }
+      if (verified.size >= 256) {
+        const oldest = [...verified.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+        if (oldest) verified.delete(oldest[0]);
+      }
+    }
+    verified.set(threadId, { winners: new Set(winners), at: Date.now() });
+  };
+
+  return {
+    breakerOpen: () => disabled,
+    observeExecute(threadId, slugs) {
+      const entry = verified.get(threadId);
+      if (!entry || Date.now() - entry.at > VERIFIED_TTL_MS) {
+        verified.delete(threadId);
+        return null;
+      }
+      const outside = slugs.filter((slug) => !entry.winners.has(slug));
+      if (!outside.length) return null;
+      return {
+        outcome: "abstained",
+        flow: TOOL_ROUTER_FLOW,
+        candidateCount: entry.winners.size,
+        winnerCount: entry.winners.size - outside.length,
+        latencyMs: 0,
+        breakerOpen: disabled,
+        detail: "executed " + outside.length + " tool(s) outside the router's verified winner set: " + outside.slice(0, 8).join(", "),
+      };
+    },
+    async routeSearch(input) {
+      const { threadId, responseBytes, contentType, transportSessionId, signal } = input;
+      if (disabled) return null;
+      if (!/application\/json/i.test(contentType)) return null;
+      const started = Date.now();
+      const fail = (detail: string, candidates: number): null => {
+        consecutiveErrors += 1;
+        if (consecutiveErrors >= ERROR_BUDGET) {
+          const first = !disabled;
+          disabled = true;
+          if (first) {
+            options.report(threadId, {
+              outcome: "error", flow: TOOL_ROUTER_FLOW, candidateCount: candidates, winnerCount: 0,
+              latencyMs: Date.now() - started, breakerOpen: true,
+              detail: detail + "; router disabled for the rest of this process after repeated errors",
+            });
+          }
+          return null;
+        }
+        options.report(threadId, {
+          outcome: "error", flow: TOOL_ROUTER_FLOW, candidateCount: candidates, winnerCount: 0,
+          latencyMs: Date.now() - started, breakerOpen: disabled, detail,
+        });
+        return null;
+      };
+      const goal = options.goal(threadId);
+      if (!goal || !goal.trim()) return null;
+      const client = options.client();
+      if (!client) return null;
+      let candidates = 0;
+      try {
+        const frameText = Buffer.from(responseBytes).toString("utf8");
+        const parsed = toolPayload(JSON.parse(frameText));
+        if (!parsed || parsed.isError === true) return null;
+        const found = parseSearchToolsCandidates(parsed);
+        candidates = found.length;
+        if (candidates < MIN_CANDIDATES) return null;
+        const ranking = buildRankingRequest(goal, found);
+        if (!ranking) return null;
+        const decideAbort = new AbortController();
+        const onExternalAbort = () => decideAbort.abort(signal?.reason);
+        signal?.addEventListener("abort", onExternalAbort, { once: true });
+        if (signal?.aborted) decideAbort.abort(signal.reason);
+        let decision;
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        try {
+          decision = await Promise.race([
+            client.decide({
+              state: ranking.state,
+              criteria: ranking.criteria,
+              instructions: "Rank the candidate tools for the goal. Select the single best tool id.",
+              signal: decideAbort.signal,
+            }),
+            new Promise<never>((_, reject) => {
+              timeoutId = setTimeout(() => {
+                decideAbort.abort();
+                reject(new Error("decision timed out"));
+              }, DECIDE_TIMEOUT_MS);
+              timeoutId.unref?.();
+            }),
+          ]);
+        } catch (error) {
+          if (decideAbort.signal.aborted && !/timed out/.test(messageOf(error))) {
+            // The caller went away mid-decision. Not a malfunction: no
+            // schema fetch, no execute endorsement, no breaker tick.
+            options.report(threadId, {
+              outcome: "error", flow: TOOL_ROUTER_FLOW, candidateCount: candidates, winnerCount: 0,
+              latencyMs: Date.now() - started, breakerOpen: disabled, detail: "ranking aborted: " + messageOf(error),
+            });
+            return null;
+          }
+          return fail("decision failed: " + messageOf(error), candidates);
+        } finally {
+          if (timeoutId) clearTimeout(timeoutId);
+          signal?.removeEventListener("abort", onExternalAbort);
+        }
+        const note = (outcome: "abstained" | "below-threshold", winners: number, detail?: string): null => {
+          consecutiveErrors = 0;
+          options.report(threadId, {
+            outcome, flow: TOOL_ROUTER_FLOW, candidateCount: candidates, winnerCount: winners,
+            latencyMs: Date.now() - started, breakerOpen: disabled,
+            selectedId: decision.selectedId,
+            ...(decision.confidence !== undefined ? { confidence: decision.confidence } : {}),
+            ...(decision.model ? { model: decision.model } : {}),
+            ...(detail ? { detail } : {}),
+          });
+          return null;
+        };
+        if (decision.selectedId === "abstain") {
+          return note("abstained", 0, "the decision model declined to rank; falling back to the full list");
+        }
+        if (!Object.hasOwn(ranking.criteria, decision.selectedId)) {
+          return fail("decision selected an unknown candidate: " + decision.selectedId, candidates);
+        }
+        if (decision.confidence < options.threshold()) {
+          return note("below-threshold", 0);
+        }
+        const winners = Object.entries(decision.probabilities)
+          .filter(([id]) => id !== "abstain" && Object.hasOwn(ranking.criteria, id))
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+          .slice(0, TOOL_ROUTER_MAX_WINNERS)
+          .map(([id]) => id);
+        if (!winners.length) return fail("decision returned no usable winners", candidates);
+        let schemas: ToolSchemaOutcome;
+        try {
+          schemas = await options.fetchSchemas(winners, transportSessionId);
+        } catch (error) {
+          return fail("schema fetch failed: " + messageOf(error), candidates);
+        }
+        const missing = winners.filter((slug) => {
+          const entry = schemas.schemas.get(slug);
+          return schemas.missing.includes(slug) || !isRecord(entry?.input_schema ?? entry?.inputSchema);
+        });
+        if (missing.length) {
+          // Verification failed: without every winner's schema the ranked
+          // list is a guess, so the discovery flow stays exactly today's.
+          return fail("schema verification failed for: " + missing.slice(0, 8).join(", "), candidates);
+        }
+        const rewritten = rewriteSearchResult(frameText, winners, schemas.schemas);
+        if (!rewritten) return fail("search response held nothing rewriteable", candidates);
+        rememberWinners(threadId, winners);
+        consecutiveErrors = 0;
+        options.report(threadId, {
+          outcome: "acted", flow: TOOL_ROUTER_FLOW, candidateCount: candidates, winnerCount: winners.length,
+          latencyMs: Date.now() - started, breakerOpen: false,
+          selectedId: decision.selectedId,
+          ...(decision.confidence !== undefined ? { confidence: decision.confidence } : {}),
+          ...(decision.model ? { model: decision.model } : {}),
+          ...(ranking.truncatedCount
+            ? { detail: "catalog truncated to " + ranking.state.catalog.length + " of " + candidates + " candidates for the ranking payload cap" }
+            : {}),
+        });
+        return Buffer.from(rewritten, "utf8");
+      } catch (error) {
+        return fail("routing failed: " + messageOf(error), candidates);
+      }
+    },
+  };
 }
 
 /** One batched COMPOSIO_GET_TOOL_SCHEMAS frame for the winners. */
