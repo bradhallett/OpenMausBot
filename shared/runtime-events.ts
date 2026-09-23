@@ -175,6 +175,15 @@ export type RuntimeEvent = RuntimeEventBase &
         model?: string;
         flow?: string;
         detail?: string;
+        // Router outcomes (#1667) add population counters; the computer
+        // chooser omits them, so every field stays optional.
+        /** Candidates the router was offered, and how many kept schemas. */
+        candidateCount?: number;
+        winnerCount?: number;
+        /** Decide-to-answer wall time, and whether the three-error breaker
+         * had already tripped when this event was written. */
+        latencyMs?: number;
+        breakerOpen?: boolean;
       }
     // `claudeUpdate: true` narrows a setup failure to "this Claude Code is
     // too old for the model": the UI offers to run `claude update` for them.
