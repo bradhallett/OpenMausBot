@@ -42,6 +42,37 @@ describe("content-class classification", () => {
     expect(redactContentClasses("plain prose", ["personal"])).toEqual({ text: "plain prose", passed: [] });
   });
 
+  it("masks a card fused with an adjacent digit group", () => {
+    const card = "4111111111111111";
+    // the fused candidate is 20 digits as a whole and would be rejected;
+    // the card inside it must still be found and masked
+    expect(redactContentClasses(`${card} 1234`, ["personal"])).toEqual({ text: "«redacted 16 chars» 1234", passed: [] });
+    expect(redactContentClasses(`1234 ${card}`, ["personal"]).text).toBe("1234 «redacted 16 chars»");
+    // detection agrees when the class is loosened
+    expect(redactContentClasses(`${card} 1234`, ["internal"]).passed).toEqual(["personal"]);
+  });
+
+  it("classifies complete IPv6 addresses, never an internal-looking fragment", () => {
+    const text = "nat 2606:4700::fd00:1 edge; locals fd00::1 fc00::1 fe80::1 ::1 ::ffff:c0a8:0101 ::ffff:192.168.1.1";
+    const { text: out, passed } = redactContentClasses(text, ["internal"]);
+    expect(passed).toEqual([]);
+    // the global address keeps its fd00:1 fragment; only real locals go
+    expect(out).toContain("2606:4700::fd00:1");
+    expect(out).not.toContain("fd00::1");
+    expect(out).not.toContain("fc00::1");
+    expect(out).not.toContain("fe80::1");
+    expect(out).not.toContain("::ffff:c0a8:0101");
+    expect(out).not.toContain("::ffff:192.168.1.1");
+    // loosened detection reports internal only for genuinely internal spans
+    expect(redactContentClasses("2606:4700::fd00:1", []).passed).toEqual([]);
+    expect(redactContentClasses("fd00::1", []).passed).toEqual(["internal"]);
+  });
+
+  it("leaves times, MACs, mapped public addresses and documentation prefixes untouched", () => {
+    const text = "at 12:34:56 nic 00:1a:2b:3c:4d:5e nat ::ffff:8.8.8.8 doc 2001:db8::1";
+    expect(redactContentClasses(text, ["internal"]).text).toBe(text);
+  });
+
   it("is stable across re-application", () => {
     const once = redactContentClasses("card 4111111111111111 ends", ["personal"]).text;
     expect(redactContentClasses(once, ["personal"]).text).toBe(once);
@@ -59,4 +90,3 @@ describe("content-class classification", () => {
     expect(redactContentClasses(both, ["personal", "internal"]).text).toBe(both);
   });
 });
-

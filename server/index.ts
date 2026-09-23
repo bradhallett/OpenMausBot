@@ -15582,6 +15582,16 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       }
       if (body.approvePeerComms === false && existingBot?.approvePeerComms === true) loosened.push("approvePeerComms");
       if (section !== undefined && sectionKey(existingBot?.section) !== sectionKey(section)) loosened.push("section");
+      // Dropping a class makes the redaction boundary weaker, so it
+      // loosens like every comparable field: a loopback caller with no
+      // paired session or browser origin may only do it while every bot
+      // is idle — a bot's own shell cannot clear its own redaction
+      // mid-turn. Adding classes only strengthens the boundary.
+      if (body.contentClasses !== undefined) {
+        const currentClasses = existingBot?.contentClasses ?? [];
+        const nextClasses = (patch.contentClasses as ("personal" | "internal")[] | undefined) ?? [];
+        if (currentClasses.some((c) => !nextClasses.includes(c))) loosened.push("contentClasses");
+      }
       if (Array.isArray(patch.alwaysAllow) && patch.alwaysAllow.some((key) => !(existingBot?.alwaysAllow ?? []).includes(key))) {
         loosened.push("alwaysAllow");
       }

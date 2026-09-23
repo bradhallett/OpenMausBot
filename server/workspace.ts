@@ -408,6 +408,12 @@ export function updateMemory(botId: string, update: MemoryUpdate, opts: MemoryUp
       next = replaceLine(entry);
     }
   }
+  // The assembled file can still carry spans the person or an older
+  // policy wrote; scrub before the size math so the byte count, the
+  // refusal's recent view, and the returned entry all describe the text
+  // that actually persists. Idempotent on already-scrubbed input.
+  next = redactWorkspaceText(botId, next);
+  if (entry !== undefined) entry = redactWorkspaceText(botId, entry);
   const bytes = Buffer.byteLength(next, "utf8");
   const lines = memoryLineCount(next);
   // A write that would push the file past what a session loads is refused
@@ -425,7 +431,7 @@ export function updateMemory(botId: string, update: MemoryUpdate, opts: MemoryUp
       lines,
       bytes,
       budget: { lines: MEMORY_MAX_LINES, bytes: MEMORY_MAX_BYTES },
-      recent: recentEntries(current),
+      recent: recentEntries(current).map((line) => redactWorkspaceText(botId, line)),
     };
   }
   writeMemoryFile(botId, next);

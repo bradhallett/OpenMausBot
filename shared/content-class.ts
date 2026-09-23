@@ -22,7 +22,10 @@ export type ContentClass = "personal" | "internal";
 // cannot be a date, an id, or a version: NANP 3-3-4 with real separators,
 // or a leading + country code. SSNs are 3-2-4, a grouping no date or
 // version uses. Cards are a 13-19 digit run that passes Luhn — the
-// checksum makes false positives negligible.
+// checksum makes false positives negligible. A candidate can fuse a card
+// with an adjacent digit group ("4111…1111 1234" is 20 digits as one
+// match), so cards are validated window-by-window inside the candidate,
+// never as the candidate's whole digit string.
 const EMAIL = /\b[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\b/g;
 const PHONE_NANP = /(?:\+1[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]\d{3}[\s.-]\d{4}\b/g;
 const PHONE_INTL = /\+\d{1,3}(?:[\s.-]?\d){7,13}\b/g;
@@ -31,12 +34,17 @@ const CARD_CANDIDATE = /\b\d[\d -]{11,25}\d\b/g;
 
 // ── internal infrastructure ───────────────────────────────────────────
 // RFC1918/loopback/link-local IPv4 (validated octet-by-octet), IPv6
-// unique-local (fc00::/7), link-local (fe80::/10) and ::1, and hostnames
-// under private-only suffixes. A public IP or domain never matches.
+// unique-local (fc00::/7), link-local (fe80::/10), ::1 and IPv4-mapped
+// private addresses, and hostnames under private-only suffixes. A public
+// IP or domain never matches. IPv6 is classified from the parsed
+// address, never from a fragment: "fd00:1" inside the global address
+// 2606:4700::fd00:1 is not unique-local.
 const IPV4_CANDIDATE = /\b\d{1,3}(?:\.\d{1,3}){3}\b/g;
-const IPV6_UNIQUE_LOCAL = /\bf[cd][0-9a-f]{2}(?::[0-9a-f]{0,4}){1,7}/gi;
-const IPV6_LINK_LOCAL = /\bfe[89ab][0-9a-f](?::[0-9a-f]{0,4}){1,7}/gi;
-const IPV6_LOOPBACK = /(?<![0-9a-f:])::1(?![0-9a-f:])/gi;
+// Any maximal hex/colon blob with at least two colons — every IPv6
+// spelling, including a trailing dotted-quad tail. Whether the blob is a
+// complete address, and whether that address is internal, is the
+// parser's call; matching only an internal-looking prefix was the bug.
+const IPV6_CANDIDATE = /(?<![0-9A-Fa-f:.])(?=[0-9A-Fa-f:]*:[0-9A-Fa-f:]*:)[0-9A-Fa-f:]+(?:\.\d{1,3}){0,3}(?![0-9A-Fa-f:.])/g;
 const INTERNAL_HOST = /\b[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.(?:internal|local|lan|corp|home)\b/g;
 
 function isPrivateIpv4(value: string): boolean {
@@ -62,9 +70,98 @@ function luhnPasses(digits: string): boolean {
   return sum % 10 === 0;
 }
 
-function isCardNumber(candidate: string): boolean {
-  const digits = candidate.replace(/\D/g, "");
-  return digits.length >= 13 && digits.length <= 19 && luhnPasses(digits);
+/** One exact IPv6 literal as eight hextets, or null when the token is
+ * not a complete address (times, MACs, truncated fragments). Accepts one
+ * "::" compression and a trailing dotted-quad IPv4 tail. */
+function parseIpv6Address(token: string): Uint16Array | null {
+  let body = token;
+  if (token.includes(".")) {
+    const lastColon = token.lastIndexOf(":");
+    if (lastColon === -1) return null;
+    const octets = token.slice(lastColon + 1).split(".");
+    if (octets.length !== 4 || octets.some((octet) => !/^\d{1,3}$/.test(octet) || Number(octet) > 255)) return null;
+    const high = (Number(octets[0]) << 8) | Number(octets[1]);
+    const low = (Number(octets[2]) << 8) | Number(octets[3]);
+    body = `${token.slice(0, lastColon)}:${high.toString(16)}:${low.toString(16)}`;
+  }
+  const sections = body.split("::");
+  if (sections.length > 2) return null;
+  const groups: number[][] = [];
+  for (const section of sections) {
+    const parsed: number[] = [];
+    if (section !== "") {
+      for (const hextet of section.split(":")) {
+        if (!/^[0-9A-Fa-f]{1,4}$/.test(hextet)) return null;
+        parsed.push(parseInt(hextet, 16));
+      }
+    }
+    groups.push(parsed);
+  }
+  const explicit = groups.reduce((count, group) => count + group.length, 0);
+  if (sections.length === 2 ? explicit > 7 : explicit !== 8) return null;
+  const out = new Uint16Array(8);
+  let cursor = 0;
+  for (const group of groups[0]) out[cursor++] = group;
+  if (sections.length === 2) {
+    cursor = 8 - groups[1].length;
+    for (const group of groups[1]) out[cursor++] = group;
+  }
+  return out;
+}
+
+/** Whether a parsed address belongs to this machine's own networks:
+ * unique-local fc00::/7, link-local fe80::/10, ::1, and IPv4-mapped
+ * addresses carrying a private IPv4 value. */
+function isInternalIpv6(groups: Uint16Array): boolean {
+  if ((groups[0] & 0xfe00) === 0xfc00) return true;
+  if ((groups[0] & 0xffc0) === 0xfe80) return true;
+  if (groups[7] === 1 && groups.slice(0, 7).every((group) => group === 0)) return true;
+  if (groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0 && groups[5] === 0xffff) {
+    return isPrivateIpv4(`${groups[6] >> 8}.${groups[6] & 0xff}.${groups[7] >> 8}.${groups[7] & 0xff}`);
+  }
+  return false;
+}
+
+/** Contiguous digit-group windows inside one card candidate, longest
+ * first from each start, each 13-19 digits and Luhn-valid. The windows
+ * let a real card inside a fused candidate ("card 1234") still be found
+ * and masked when the candidate as a whole is not a card. */
+function cardSpans(candidate: string): Array<[number, number]> {
+  const groups: Array<[number, number, number]> = [];
+  const digits = /\d+/g;
+  for (let match = digits.exec(candidate); match !== null; match = digits.exec(candidate)) {
+    groups.push([match.index, match.index + match[0].length, match[0].length]);
+  }
+  const spans: Array<[number, number]> = [];
+  let start = 0;
+  while (start < groups.length) {
+    let matched = false;
+    for (let end = groups.length - 1; end >= start; end--) {
+      let total = 0;
+      for (let i = start; i <= end; i++) total += groups[i][2];
+      if (total > 19) continue;
+      if (total >= 13 && luhnPasses(candidate.slice(groups[start][0], groups[end][1]).replace(/\D/g, ""))) {
+        spans.push([groups[start][0], groups[end][1]]);
+        start = end + 1;
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) start += 1;
+  }
+  return spans;
+}
+
+function maskCardCandidate(candidate: string): string {
+  const spans = cardSpans(candidate);
+  if (spans.length === 0) return candidate;
+  let out = "";
+  let cursor = 0;
+  for (const [start, end] of spans) {
+    out += candidate.slice(cursor, start) + mask(candidate.slice(start, end));
+    cursor = end;
+  }
+  return out + candidate.slice(cursor);
 }
 
 /** Module regexes carry /g state; every use goes through these resets. */
@@ -89,21 +186,28 @@ function maskPersonal(text: string): string {
   out = out.replace(PHONE_NANP, (m) => mask(m));
   out = out.replace(PHONE_INTL, (m) => mask(m));
   out = out.replace(SSN, (m) => mask(m));
-  return out.replace(CARD_CANDIDATE, (m) => (isCardNumber(m) ? mask(m) : m));
+  return out.replace(CARD_CANDIDATE, maskCardCandidate);
 }
 
 function maskInternal(text: string): string {
   let out = text.replace(IPV4_CANDIDATE, (m) => (isPrivateIpv4(m) ? mask(m) : m));
-  out = out.replace(IPV6_UNIQUE_LOCAL, (m) => mask(m));
-  out = out.replace(IPV6_LINK_LOCAL, (m) => mask(m));
-  out = out.replace(IPV6_LOOPBACK, (m) => mask(m));
+  out = out.replace(IPV6_CANDIDATE, (m) => {
+    const groups = parseIpv6Address(m);
+    return groups !== null && isInternalIpv6(groups) ? mask(m) : m;
+  });
   return out.replace(INTERNAL_HOST, (m) => mask(m));
 }
 
 const hasPersonal = (text: string) =>
-  matchesAny(text, [EMAIL, PHONE_NANP, PHONE_INTL, SSN]) || matchesAny(text, [CARD_CANDIDATE], isCardNumber);
+  matchesAny(text, [EMAIL, PHONE_NANP, PHONE_INTL, SSN]) ||
+  matchesAny(text, [CARD_CANDIDATE], (m) => cardSpans(m).length > 0);
 const hasInternal = (text: string) =>
-  matchesAny(text, [IPV4_CANDIDATE], isPrivateIpv4) || matchesAny(text, [IPV6_UNIQUE_LOCAL, IPV6_LINK_LOCAL, IPV6_LOOPBACK, INTERNAL_HOST]);
+  matchesAny(text, [IPV4_CANDIDATE], isPrivateIpv4) ||
+  matchesAny(text, [IPV6_CANDIDATE], (m) => {
+    const groups = parseIpv6Address(m);
+    return groups !== null && isInternalIpv6(groups);
+  }) ||
+  matchesAny(text, [INTERNAL_HOST]);
 
 export interface ContentClassRedaction {
   text: string;
