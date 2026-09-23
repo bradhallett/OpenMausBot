@@ -161,6 +161,17 @@ describe("probeDecisionModel (custom lane)", () => {
     });
     expect(fetchImpl).not.toHaveBeenCalled();
   });
+
+  it("never follows a redirect: the decision POST targets the configured URL only", async () => {
+    const inits: Array<{ redirect?: string }> = [];
+    const fetchImpl = vi.fn(async (_input: string | URL, init?: RequestInit) => {
+      inits.push({ redirect: init?.redirect });
+      return chat({ choice: "two", confidence: 0.96, probabilities: CANARY_PROBABILITIES });
+    });
+    await expect(probeDecisionModel(config, fetchImpl as unknown as typeof fetch)).resolves.toMatchObject({ ok: true });
+    expect(inits).toHaveLength(2);
+    expect(inits.every((init) => init.redirect === "error")).toBe(true);
+  });
 });
 
 describe("createCalibrationGate", () => {
