@@ -1285,11 +1285,12 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
     // Group threads have no owning bot: attribution rides from.botId, and
     // the busy speaker covers events that race ahead of that label, so a
     // known speaking bot's policy is never skipped just because attribution
-    // was late. An idle group with no attribution stays credential-only:
-    // there is no bot to read a policy from.
+    // was late. The attributed sender wins: the author's policy governs the
+    // author's bytes. An idle group with no attribution stays
+    // credential-only: there is no bot to read a policy from.
     const busyBotId = this.groupByThread(threadId)?.busyBotId;
-    const owner = this.botByThread(threadId)
-      ?? (message.from?.botId ? this.bot(message.from.botId) : null)
+    const owner = (message.from?.botId ? this.bot(message.from.botId) : null)
+      ?? this.botByThread(threadId)
       ?? (busyBotId ? this.bot(busyBotId) : null);
     if (!owner?.contentClasses) return undefined;
     const { id: botId, contentClasses } = owner;
