@@ -20295,6 +20295,21 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       }
       return json(res, 200, { configured: true, credentialStore: "ok", services: await composio.connectedServices(cfg) });
     }
+    if (method === "GET" && path === "/api/connectors/tools") {
+      // The grant editor's inventory: every grantable tool name grouped by
+      // service, read from the same MCP endpoint a mounted bot relays
+      // through. Failure is a read-only editor, never a blocked save — the
+      // exact-name model does not depend on the listing being reachable.
+      const availability = composio.connectorAvailability(cfg);
+      if (availability !== "configured") {
+        return json(res, 200, { configured: false, services: {} });
+      }
+      try {
+        return json(res, 200, { configured: true, services: await composio.listConnectorTools(cfg) });
+      } catch (e) {
+        return json(res, 502, { configured: true, services: {}, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
     if (method === "GET" && path === "/api/connectors") {
       const services = (url.searchParams.get("services") ?? "").split(",").filter(Boolean);
       const availability = composio.connectorAvailability(cfg);

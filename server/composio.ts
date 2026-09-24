@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 import { managedConnectorUnavailableReason } from "../shared/connector-availability.ts";
-import type { ConnectorToolGrant } from "../shared/wire.ts";
+import { CONNECTOR_TOOL_NAME_PATTERN, type ConnectorToolGrant } from "../shared/wire.ts";
 import { CONNECTOR_ALLOWED_TOOLS_ENV, CONNECTOR_ALLOWED_TOOLS_MAX_BYTES, serializeConnectorAllowedTools } from "./connector-advertisement.ts";
 import { serviceSlugFor } from "./connector-verdict.ts";
 
@@ -844,6 +844,156 @@ export async function validateConnectorGrants(
     return `connectorTools names services missing from the connected-apps catalog: ${unknown.join(", ")}`;
   }
   return null;
+}
+
+/** One grantable tool as the web editor lists it. Descriptions are search
+ * aids trimmed to a card-sized line, never a contract. */
+export interface ConnectorToolListing {
+  name: string;
+  description?: string;
+}
+
+/** The grant editor's tool inventory, grouped by service slug. Sourced from
+ * the same MCP endpoint the bots' bridge relays to (initialize + tools/list
+ * through relayMcp), so what the picker offers is exactly what a granted bot
+ * would see — in self-hosted and managed modes alike. Platform meta-tools
+ * and per-service connection flows are not per-tool grants (they ride along
+ * whenever a service is granted), so they never appear in the picker. */
+export async function listConnectorTools(
+  cfg: AppConfig,
+  options: { force?: boolean } = {},
+): Promise<Record<string, ConnectorToolListing[]>> {
+  if (!options.force && connectorToolsCache && Date.now() - connectorToolsCache.at < CONNECTOR_TOOLS_CACHE_MS) {
+    return connectorToolsCache.services;
+  }
+  const services = await collectConnectorTools(cfg);
+  connectorToolsCache = { at: Date.now(), services };
+  return services;
+}
+
+const CONNECTOR_TOOLS_CACHE_MS = 60_000;
+let connectorToolsCache: { at: number; services: Record<string, ConnectorToolListing[]> } | null = null;
+
+/** Tool names longer than any Composio description worth searching. */
+const TOOL_DESCRIPTION_MAX = 240;
+const TOOLS_LIST_PAGES_MAX = 10;
+
+function connectorToolListing(tool: unknown): ConnectorToolListing | null {
+  if (!tool || typeof tool !== "object" || Array.isArray(tool)) return null;
+  const name = (tool as { name?: unknown }).name;
+  if (typeof name !== "string" || !CONNECTOR_TOOL_NAME_PATTERN.test(name)) return null;
+  if (name.startsWith("COMPOSIO_")) return null;
+  if (name.endsWith("_MANAGE_CONNECTIONS") || name.endsWith("_WAIT_FOR_CONNECTIONS")) return null;
+  const description = (tool as { description?: unknown }).description;
+  const trimmed = typeof description === "string"
+    ? description.replace(/\s+/g, " ").trim().slice(0, TOOL_DESCRIPTION_MAX)
+    : "";
+  return trimmed ? { name, description: trimmed } : { name };
+}
+
+/** One JSON-RPC response frame from a JSON or SSE body, mirroring the
+ * bridge's parseUpstream: SSE data lines are tried in order and the frame
+ * carrying the request id wins. */
+function parseMcpResponse(text: string, id: string | number): Record<string, unknown> | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const candidate = (value: unknown): value is Record<string, unknown> =>
+    Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  if (trimmed.startsWith("{")) {
+    const parsed: unknown = JSON.parse(trimmed);
+    return candidate(parsed) ? parsed : null;
+  }
+  const frames = trimmed
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trim())
+    .filter((line) => line && line !== "[DONE]")
+    .flatMap((line) => {
+      try {
+        return [JSON.parse(line) as unknown];
+      } catch {
+        return [];
+      }
+    })
+    .filter(candidate);
+  return frames.findLast((frame) => frame.id === id) ?? frames.at(-1) ?? null;
+}
+
+async function collectConnectorTools(cfg: AppConfig): Promise<Record<string, ConnectorToolListing[]>> {
+  const initialize = await relayMcp(cfg, {
+    jsonrpc: "2.0",
+    id: "omb-grants-initialize",
+    method: "initialize",
+    params: {
+      protocolVersion: "2025-03-26",
+      capabilities: {},
+      clientInfo: { name: "openmausbot-grant-editor", version: "1" },
+    },
+  });
+  if (initialize.status !== 200) {
+    throw new Error(await responseErrorFromBytes(initialize.status, initialize.bytes));
+  }
+  const transportSessionId = initialize.transportSessionId;
+  // Streamable-HTTP servers expect the handshake notification before the
+  // first request; it carries no response, so failures are not fatal.
+  await relayMcp(cfg, {
+    jsonrpc: "2.0",
+    method: "notifications/initialized",
+  }, transportSessionId).catch(() => undefined);
+  const grouped = new Map<string, ConnectorToolListing[]>();
+  let cursor: string | undefined;
+  for (let page = 0; page < TOOLS_LIST_PAGES_MAX; page += 1) {
+    const list = await relayMcp(cfg, {
+      jsonrpc: "2.0",
+      id: "omb-grants-tools",
+      method: "tools/list",
+      params: cursor ? { cursor } : {},
+    }, transportSessionId);
+    if (list.status !== 200) {
+      throw new Error(await responseErrorFromBytes(list.status, list.bytes));
+    }
+    const frame = parseMcpResponse(new TextDecoder().decode(list.bytes), "omb-grants-tools");
+    const error = frame && typeof frame.error === "object" && frame.error !== null
+      ? (frame.error as { message?: unknown }).message
+      : undefined;
+    if (typeof error === "string" && error) throw new Error(error);
+    const result = frame && typeof frame.result === "object" && frame.result !== null
+      ? (frame.result as { tools?: unknown; nextCursor?: unknown })
+      : undefined;
+    if (!result || !Array.isArray(result.tools)) {
+      throw new Error("Composio returned a tools/list response without a tools array");
+    }
+    for (const tool of result.tools) {
+      const listing = connectorToolListing(tool);
+      if (!listing) continue;
+      const slug = serviceSlugFor(listing.name);
+      if (!slug) continue;
+      const bucket = grouped.get(slug) ?? [];
+      if (!bucket.some((existing) => existing.name === listing.name)) bucket.push(listing);
+      grouped.set(slug, bucket);
+    }
+    cursor = typeof result.nextCursor === "string" && result.nextCursor ? result.nextCursor : undefined;
+    if (!cursor) break;
+  }
+  for (const bucket of grouped.values()) bucket.sort((a, b) => a.name.localeCompare(b.name));
+  return Object.fromEntries([...grouped.entries()].sort(([a], [b]) => a.localeCompare(b)));
+}
+
+async function responseErrorFromBytes(status: number, bytes: Uint8Array): Promise<string> {
+  try {
+    const body: unknown = JSON.parse(new TextDecoder().decode(bytes));
+    const message = body && typeof body === "object" && !Array.isArray(body)
+      ? (body as { error?: unknown }).error
+      : undefined;
+    if (message && typeof message === "object" && !Array.isArray(message)) {
+      const text = (message as { message?: unknown }).message;
+      if (typeof text === "string" && text) return text;
+    }
+    if (typeof message === "string" && message) return message;
+  } catch {
+    // fall through to the generic status line
+  }
+  return `Composio tools/list: HTTP ${status}`;
 }
 
 export async function connectionStatus(cfg: AppConfig, slugs: string[]) {
