@@ -760,7 +760,9 @@ private fun VoiceNoteAttachmentView(
 
     // Late engine failures park the clip; the bubble's retry row is its UI.
     LaunchedEffect(key) {
-        player.playbackErrors.collectLatest { clip = VoiceNoteClipState.Failed }
+        player.playbackErrors.collectLatest {
+            if (it.key == key) clip = VoiceNoteClipState.Failed
+        }
     }
     // Pull the engine's position while it plays; the clock reads it back.
     LaunchedEffect(key, playing) {
@@ -781,6 +783,7 @@ private fun VoiceNoteAttachmentView(
 
     // The wire's estimate until the engine loads metadata, then the real length.
     val durationMs = active?.durationMs ?: note.durationMs?.toLong()?.takeIf { it > 0 }
+    val durationSeconds = durationMs?.let { it / 1000f } ?: 0f
     val positionMs = scrub?.toLong() ?: (active?.positionMs ?: 0L)
 
     Row(
@@ -830,7 +833,10 @@ private fun VoiceNoteAttachmentView(
             }
         }
         Slider(
-            value = (positionMs / 1000f).coerceIn(0f, durationMs?.let { it / 1000f } ?: 0f),
+            // The slider works in seconds; without an explicit range Compose clamps
+            // it to 0f..1f and scrubs can only land inside the first second.
+            value = if (durationSeconds > 0f) (positionMs / 1000f).coerceIn(0f, durationSeconds) else 0f,
+            valueRange = if (durationSeconds > 0f) 0f..durationSeconds else 0f..1f,
             onValueChange = { scrub = it * 1000f },
             onValueChangeFinished = {
                 val target = scrub

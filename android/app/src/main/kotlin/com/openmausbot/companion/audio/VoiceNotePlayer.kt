@@ -30,6 +30,12 @@ data class VoiceNotePlayback(
 )
 
 /**
+ * A late playback failure for one clip. Keyed so only the failing bubble
+ * shows its retry row — a bare string would mark every visible note dead.
+ */
+data class VoiceNotePlaybackError(val key: String)
+
+/**
  * Plays one transcript voice note at a time — the audio-bubble half of the
  * desktop `VoiceNoteBubble` contract (#1744, B3 in #1801).
  *
@@ -59,7 +65,7 @@ class VoiceNotePlayer internal constructor(
     val playback: StateFlow<VoiceNotePlayback?> get() = controller.playback
 
     /** Late decode/playback failures after a successful [play] return. */
-    val playbackErrors: SharedFlow<String> get() = controller.playbackErrors
+    val playbackErrors: SharedFlow<VoiceNotePlaybackError> get() = controller.playbackErrors
 
     init {
         processLifecycle.addObserver(object : DefaultLifecycleObserver {
@@ -115,10 +121,10 @@ class VoiceNoteController(
     private var engine: VoiceNoteEngine? = null
     private var generation = 0
     private val _playback = MutableStateFlow<VoiceNotePlayback?>(null)
-    private val _playbackErrors = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    private val _playbackErrors = MutableSharedFlow<VoiceNotePlaybackError>(extraBufferCapacity = 1)
 
     val playback: StateFlow<VoiceNotePlayback?> = _playback.asStateFlow()
-    val playbackErrors: SharedFlow<String> = _playbackErrors.asSharedFlow()
+    val playbackErrors: SharedFlow<VoiceNotePlaybackError> = _playbackErrors.asSharedFlow()
 
     fun play(key: String, data: ByteArray): String? = synchronized(lock) {
         releaseInternal(abandonFocus = true)
@@ -142,7 +148,8 @@ class VoiceNoteController(
             synchronized(lock) {
                 if (gen != generation) return@synchronized
                 releaseInternal(abandonFocus = true)
-                _playbackErrors.tryEmit(PLAYBACK_ERROR)
+                // The key rides with the failure so only this clip's bubble reacts.
+                _playbackErrors.tryEmit(VoiceNotePlaybackError(key))
             }
         }
         return try {

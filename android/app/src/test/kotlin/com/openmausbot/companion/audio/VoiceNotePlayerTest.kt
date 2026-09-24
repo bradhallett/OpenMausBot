@@ -219,11 +219,11 @@ class VoiceNotePlayerTest {
     }
 
     @Test
-    fun `asynchronous engine error emits the copy and parks idle`() = runTest {
+    fun `asynchronous engine error emits the failing key and parks idle`() = runTest {
         val focus = FakeFocus(grant = true)
         val engine = FakeEngine(ok = true)
         val controller = VoiceNoteController(engineFactory = { engine }, focus = focus)
-        val errors = mutableListOf<String>()
+        val errors = mutableListOf<VoiceNotePlaybackError>()
         val collector = launch { controller.playbackErrors.collect { errors += it } }
         testScheduler.runCurrent()
 
@@ -231,7 +231,7 @@ class VoiceNotePlayerTest {
         engine.onError?.invoke()
         testScheduler.runCurrent()
 
-        assertEquals(listOf(VoiceNoteController.PLAYBACK_ERROR), errors)
+        assertEquals(listOf(VoiceNotePlaybackError("a")), errors)
         assertNull(controller.playback.value)
         assertEquals(1, engine.releases)
         assertEquals(1, focus.abandons)
