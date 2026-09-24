@@ -260,6 +260,7 @@ import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPos
 import {
   isProjectEmoji,
   mentionedBots,
+  parseConnectorTools,
   roomResponders,
   sectionKey,
   Store,
@@ -14194,6 +14195,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         );
         const safeBot = store.patchBot(created.id, {
           composio: false,
+          connectorTools: {},
           autoApprove: false,
           approvePeerComms: false,
         })!;
@@ -15469,6 +15471,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           });
           store.patchBot(created.id, {
             composio: false,
+            connectorTools: {},
             ...(installedPlaybooks.length ? { playbooks: installedPlaybooks } : {}),
             ...(pkg
               ? {
@@ -16578,6 +16581,18 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (body.composio !== undefined) {
         if (typeof body.composio !== "boolean") return json(res, 400, { error: "composio must be true or false" });
         patch.composio = body.composio;
+      }
+      // which of those apps' tools this bot may call (connector grants 1/5:
+      // data model only — enforcement lands with slice 2). null returns the
+      // bot to boolean-only legacy behavior; {} means no tools.
+      if (body.connectorTools !== undefined) {
+        if (body.connectorTools === null) {
+          patch.connectorTools = undefined;
+        } else {
+          const parsed = parseConnectorTools(body.connectorTools);
+          if (!parsed.ok) return json(res, 400, { error: parsed.error });
+          patch.connectorTools = parsed.grants;
+        }
       }
       // Queue this bot's direct messages behind outstanding delegated work
       // instead of steering the conversation immediately (#1194).
