@@ -121,8 +121,18 @@ class VoiceNoteWiringTest {
         compose.waitUntil(10_000) {
             // The label flips to "Pause" the moment playback starts, so the
             // node must be re-resolved on every poll or the handle goes stale.
-            if (compose.onAllNodesWithContentDescription("Play voice note").fetchSemanticsNodes().isNotEmpty()) {
-                compose.onNodeWithContentDescription("Play voice note").performClick()
+            // The queries run on every poll: they re-resolve the flipped
+            // label and drive the frame sync that lets the download
+            // coroutine resume. Clicking stops the moment the fetch is
+            // recorded, and a click that parks the bubble early recovers
+            // through its Retry row instead of dead-ending the poll.
+            val plays = compose.onAllNodesWithContentDescription("Play voice note").fetchSemanticsNodes()
+            val retries = compose.onAllNodesWithText("Retry").fetchSemanticsNodes()
+            if (requests.isEmpty()) {
+                when {
+                    plays.isNotEmpty() -> compose.onAllNodesWithContentDescription("Play voice note")[0].performClick()
+                    retries.isNotEmpty() -> compose.onAllNodesWithText("Retry")[0].performClick()
+                }
             }
             requests.size == 1 && player.playback.value?.playing == true
         }
@@ -149,8 +159,16 @@ class VoiceNoteWiringTest {
 
         // Resume replays the bubble's own bytes; the file route is hit exactly once.
         compose.waitUntil(5_000) {
-            if (compose.onAllNodesWithContentDescription("Play voice note").fetchSemanticsNodes().isNotEmpty()) {
-                compose.onNodeWithContentDescription("Play voice note").performClick()
+            // Same discipline as the first-play poll: query every poll for
+            // the frame sync, click only while the row still wants it, and
+            // recover a parked retry row the same way.
+            val plays = compose.onAllNodesWithContentDescription("Play voice note").fetchSemanticsNodes()
+            val retries = compose.onAllNodesWithText("Retry").fetchSemanticsNodes()
+            if (player.playback.value?.playing != true) {
+                when {
+                    plays.isNotEmpty() -> compose.onAllNodesWithContentDescription("Play voice note")[0].performClick()
+                    retries.isNotEmpty() -> compose.onAllNodesWithText("Retry")[0].performClick()
+                }
             }
             player.playback.value?.playing == true
         }
@@ -224,12 +242,20 @@ class VoiceNoteWiringTest {
         // Play only the first bubble; the guard keeps the poll from ever
         // starting the second one once the first label flips to Pause.
         compose.waitUntil(10_000) {
+            // Query every poll so the download coroutine gets its frame sync;
+            // click only while no fetch has been recorded so a late poll can
+            // never start the sibling row, recovering early failures via Retry.
             val plays = compose.onAllNodesWithContentDescription("Play voice note").fetchSemanticsNodes()
+            val pauses = compose.onAllNodesWithContentDescription("Pause voice note").fetchSemanticsNodes()
+            val retries = compose.onAllNodesWithText("Retry").fetchSemanticsNodes()
             if (requests.isEmpty() &&
-                compose.onAllNodesWithContentDescription("Pause voice note").fetchSemanticsNodes().isEmpty() &&
-                plays.isNotEmpty()
+                pauses.isEmpty() &&
+                (plays.isNotEmpty() || retries.isNotEmpty())
             ) {
-                compose.onAllNodesWithContentDescription("Play voice note")[0].performClick()
+                when {
+                    plays.isNotEmpty() -> compose.onAllNodesWithContentDescription("Play voice note")[0].performClick()
+                    else -> compose.onAllNodesWithText("Retry")[0].performClick()
+                }
             }
             player.playback.value?.playing == true
         }
