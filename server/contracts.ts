@@ -136,7 +136,9 @@ export interface SendTurnInput {
    * that process on the stable half, so a memory edit no longer respawns the
    * session and makes the provider re-cache the entire prompt; the changed half
    * is delivered inside the next turn instead. Drivers that rebuild their
-   * request every turn ignore both and keep reading `system`. */
+   * request every turn keep only the stable half in their system message and
+   * carry the volatile half inside the newest user message, so the resent
+   * prefix stays byte-identical. */
   systemStable?: string;
   systemVolatile?: string;
   /** Coordinated teammate turns may resume a Claude conversation whose
