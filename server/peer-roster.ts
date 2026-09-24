@@ -353,14 +353,23 @@ export function livePeerRoster(team: readonly LivePeer[], cap = LIVE_PEER_ROSTER
 const LIVE_ROSTER_OPEN = "[LIVE TEAMMATES]";
 const LIVE_ROSTER_CLOSE = "[/LIVE TEAMMATES]";
 
+/** A peer label for the live fence: clipped like every roster field, and
+ * with the fence's own markers stripped. Names and ids are user-editable —
+ * including through team import — so a peer named "[/LIVE TEAMMATES]" would
+ * otherwise close the block early and let whatever follows it read as the
+ * harness's own words instead of data. A marker truncated by the clip is no
+ * longer the marker, so stripping after the clip is enough. */
+const liveRosterLabel = (value: string): string =>
+  clip(value, ROSTER_NAME_MAX).replace(/\[\/?LIVE TEAMMATES\]/gi, "").trim();
+
 /** The live roster as it rides a coordination brief: bounded, ordered, and
  * honest about what it left out. Renders nothing for a team with neither a
  * nameable peer nor an unready one — an empty fence is only noise. */
 export function livePeerRosterBlock(roster: LivePeerRoster): string {
   if (!roster.members.length && !roster.notReadyCount && !roster.omittedCount) return "";
   const lines = roster.members.map(peer => {
-    const name = clip(peer.name, ROSTER_NAME_MAX);
-    return `- ${name} — ${peerStatusWords(peerStatus(peer.activity, peer.busy))} [id: ${clip(peer.id, ROSTER_NAME_MAX)}]`;
+    const name = liveRosterLabel(peer.name);
+    return `- ${name} — ${peerStatusWords(peerStatus(peer.activity, peer.busy))} [id: ${liveRosterLabel(peer.id)}]`;
   });
   if (roster.omittedCount > 0) lines.push(`- …and ${roster.omittedCount} more live teammates (use list_bots).`);
   if (roster.notReadyCount > 0) {
