@@ -1,5 +1,5 @@
 // propose_profile: a bot proposes changes to its own name, title, description,
-// SOUL.md, or working folder; confirmed cards and Full Access submissions share
+// SOUL.md, working folder, or alert/voice toggles; confirmed cards and Full Access submissions share
 // the same validated commit path. Same
 // shape as routine-requests.ts, much smaller: the profile commits in one
 // store call, and staleness is a hash of the five fields instead of a
@@ -24,9 +24,12 @@ const LABELS: Record<Exclude<(typeof PROFILE_REQUEST_FIELDS)[number], "soul" | "
   name: "Name",
   title: "Title",
   description: "Description",
+  notifications: "Notifications",
+  speakReplies: "Speak replies",
 };
 const PRIVATE_WORKSPACE = "its private workspace";
-const CHOOSE_ONE = "Choose at least one of name, title, description, soul, cwd";
+const CHOOSE_ONE = "Choose at least one of name, title, description, soul, cwd, notifications, speakReplies";
+const toggleText = (value: boolean | undefined): string => (value ? "on" : "off");
 
 export interface OptionCardLike {
   title: string;
@@ -54,7 +57,7 @@ export interface ProfileRequestStore {
     },
   ): { id: string };
   patchMessage(threadId: string, messageId: string, patch: { card: OptionCardLike }): { id: string } | null;
-  patchBotProfile(id: string, patch: Partial<Pick<BotRecord, "name" | "title" | "description" | "cwd" | "soul" | "lastProfileRequestId">>): BotRecord | null;
+  patchBotProfile(id: string, patch: Partial<Pick<BotRecord, "name" | "title" | "description" | "cwd" | "soul" | "notifications" | "speakReplies" | "lastProfileRequestId">>): BotRecord | null;
 }
 
 export interface ProfileRequestServiceOptions {
@@ -100,8 +103,9 @@ function reasonText(value: unknown): string {
   return redactSecretsInText(trimmed);
 }
 
-/** `parseBotProfilePatch` would silently accept a key like `notifications` —
- * valid for the broader bot patch, not for a profile request. Reject keys
+/** `parseBotProfilePatch` would silently accept a key like `voice` —
+ * valid for the broader bot patch, not for a profile request (a voice pick
+ * needs the harness catalog rendered on the card). Reject keys
  * outside the proposable fields ourselves first, for exact copy. */
 function parseChanges(input: unknown): ProfileRequestChanges {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
@@ -136,6 +140,10 @@ function parseChanges(input: unknown): ProfileRequestChanges {
   for (const field of PROFILE_REQUEST_FIELDS) {
     if (field === "cwd") continue;
     const value = parsed.patch[field];
+    if (field === "notifications" || field === "speakReplies") {
+      if (value !== undefined) changes[field] = value as boolean;
+      continue;
+    }
     // This payload is hidden under the card's visible fields, so the store's
     // shallow card redaction cannot reach it. Scrub before it is persisted.
     if (typeof value !== "string") continue;
@@ -181,6 +189,10 @@ export function profileCardCopy(
   for (const field of PROFILE_REQUEST_FIELDS) {
     if (field === "soul" || field === "cwd") continue;
     if (changes[field] === undefined) continue;
+    if (field === "notifications" || field === "speakReplies") {
+      lines.push(`${LABELS[field]}: ${toggleText(before[field] as boolean | undefined)} → ${toggleText(changes[field] as boolean | undefined)}`);
+      continue;
+    }
     lines.push(`${LABELS[field]}: "${before[field] ?? ""}" → "${changes[field]}"`);
   }
   if (changes.cwd !== undefined) {
@@ -204,11 +216,13 @@ export function profileCardCopy(
     }
   }
   // The closing line says the consequence of exactly what is on the card:
-  // a folder change moves where the bot's tools read and write; the other
-  // fields change what it is told. Either way nothing runs on confirm.
+  // a folder change moves where the bot's tools read and write; the text
+  // fields change what it is told; a toggle-only card carries no instruction
+  // change at all. Either way nothing runs on confirm.
   const onlyFolder = Object.keys(changes).every((field) => field === "cwd");
+  const onlyToggles = Object.keys(changes).every((field) => field === "notifications" || field === "speakReplies");
   if (changes.cwd !== undefined) lines.push(`${target.name}'s tools will read and write files in that folder.`);
-  lines.push(onlyFolder ? "Nothing runs." : `Changes what ${target.name} is told on every turn. Nothing runs.`);
+  lines.push(onlyFolder || onlyToggles ? "Nothing runs." : `Changes what ${target.name} is told on every turn. Nothing runs.`);
   const detail = lines.join("\n");
 
   const fields = PROFILE_REQUEST_FIELDS.filter((field) => changes[field] !== undefined);
@@ -269,11 +283,17 @@ export class ProfileRequestService {
     const before: ProfileRequestChanges = {};
     const finalChanges: ProfileRequestChanges = {};
     for (const field of PROFILE_REQUEST_FIELDS) {
-      const value = changes[field];
-      if (value === undefined) continue;
-      if (value === snapshot[field]) continue;
-      before[field] = redactSecretsInText(snapshot[field]);
-      finalChanges[field] = value;
+      if (field === "notifications" || field === "speakReplies") {
+        const value = changes[field];
+        if (value === undefined || value === snapshot[field]) continue;
+        before[field] = snapshot[field];
+        finalChanges[field] = value;
+      } else {
+        const value = changes[field];
+        if (value === undefined || value === snapshot[field]) continue;
+        before[field] = redactSecretsInText(snapshot[field]);
+        finalChanges[field] = value;
+      }
     }
     if (Object.keys(finalChanges).length === 0) {
       throw new ProfileRequestError("Nothing would change");

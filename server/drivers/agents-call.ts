@@ -934,8 +934,10 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
     if (typeof args.description === "string") changes.description = args.description.trim();
     if (typeof args.soul === "string") changes.soul = args.soul;
     if (typeof args.cwd === "string") changes.cwd = args.cwd.trim();
+    if (typeof args.notifications === "boolean") changes.notifications = args.notifications;
+    if (typeof args.speakReplies === "boolean") changes.speakReplies = args.speakReplies;
     if (!Object.keys(changes).length) {
-      return { text: "propose_profile needs at least one of name, title, description, soul, or cwd.", isError: true };
+      return { text: "propose_profile needs at least one of name, title, description, soul, cwd, notifications, or speakReplies.", isError: true };
     }
     const forBotId = String(args.for_bot_id ?? "").trim();
     const r = await api("/api/internal/profile-requests", {
