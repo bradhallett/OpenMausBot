@@ -30,6 +30,9 @@ const LABELS: Record<Exclude<(typeof PROFILE_REQUEST_FIELDS)[number], "soul" | "
 const PRIVATE_WORKSPACE = "its private workspace";
 const CHOOSE_ONE = "Choose at least one of name, title, description, soul, cwd, notifications, speakReplies";
 const toggleText = (value: boolean | undefined): string => (value ? "on" : "off");
+/** The fields that change what a bot is told: every card field except the
+ * working folder and the two toggles. */
+const TEXT_FIELDS = ["name", "title", "description", "soul"] as const;
 
 export interface OptionCardLike {
   title: string;
@@ -217,12 +220,12 @@ export function profileCardCopy(
   }
   // The closing line says the consequence of exactly what is on the card:
   // a folder change moves where the bot's tools read and write; the text
-  // fields change what it is told; a toggle-only card carries no instruction
-  // change at all. Either way nothing runs on confirm.
-  const onlyFolder = Object.keys(changes).every((field) => field === "cwd");
-  const onlyToggles = Object.keys(changes).every((field) => field === "notifications" || field === "speakReplies");
+  // fields change what it is told; a card of only toggles, only a folder,
+  // or both carries no instruction change at all. Either way nothing runs
+  // on confirm.
+  const changesText = TEXT_FIELDS.some((field) => changes[field] !== undefined);
   if (changes.cwd !== undefined) lines.push(`${target.name}'s tools will read and write files in that folder.`);
-  lines.push(onlyFolder || onlyToggles ? "Nothing runs." : `Changes what ${target.name} is told on every turn. Nothing runs.`);
+  lines.push(changesText ? `Changes what ${target.name} is told on every turn. Nothing runs.` : "Nothing runs.");
   const detail = lines.join("\n");
 
   const fields = PROFILE_REQUEST_FIELDS.filter((field) => changes[field] !== undefined);

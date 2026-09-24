@@ -232,6 +232,27 @@ describe("ProfileRequestService", () => {
     expect(readHistory(bot.id)[0].summary).toBe('speakReplies: "off" → "on"');
   });
 
+  it("describes a mixed folder-and-toggle card without the instruction line, and a text-plus-toggle card with it", () => {
+    const { service, bot } = harness({ name: "Scout" });
+    const dir = mkdtempSync(join(tmpdir(), "omb-cwd-"));
+    try {
+      const mixed = service.propose({ botId: bot.id, threadId: bot.threadId, changes: { cwd: dir, notifications: false }, reason: "r" });
+      expect(mixed.detail).toContain(`Working folder: its private workspace → ${dir}`);
+      expect(mixed.detail).toContain("Notifications: on → off");
+      expect(mixed.detail).toContain("Scout's tools will read and write files in that folder.");
+      // Neither change edits instructions, so the card must not claim it does.
+      expect(mixed.detail).not.toContain("told on every turn");
+      expect(mixed.detail).toContain("Nothing runs.");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    const spoken = service.propose({ botId: bot.id, threadId: bot.threadId, changes: { title: "Tracker", speakReplies: true }, reason: "r" });
+    expect(spoken.detail).toContain('Title: "" → "Tracker"');
+    expect(spoken.detail).toContain("Speak replies: off → on");
+    expect(spoken.detail).toContain("Changes what Scout is told on every turn. Nothing runs.");
+  });
+
   it("fails a toggle card closed when the toggle moved after the card was prepared", () => {
     const { service, store, bot } = harness({ name: "Scout" });
     const proposed = service.propose({ botId: bot.id, threadId: bot.threadId, changes: { notifications: false }, reason: "r" });
