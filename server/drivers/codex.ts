@@ -1402,7 +1402,21 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
               : "Could not read Codex configuration; cannot safely update bot instructions. Retry after checking Codex.",
           );
         }
-        const developerInstructions = codexDeveloperInstructions(effectiveConfig, turn.system ?? "");
+        // Only the stable half of the prompt belongs in the developer slot:
+        // it is the part that must survive compaction unchanged, and any
+        // change to it invalidates the provider's cached prefix. The volatile
+        // half (memory, mentions, outstanding teammate work) is delivered
+        // inside the turn that changed it, after the cached prefix, the same
+        // contract SendTurnInput.systemStable documents. Without the split
+        // the driver keeps the previous single-block behaviour.
+        const stableInstructions = typeof turn.systemStable === "string" && typeof turn.systemVolatile === "string"
+          ? turn.systemStable
+          : null;
+        const promptSplit = stableInstructions !== null;
+        const developerInstructions = codexDeveloperInstructions(
+          effectiveConfig,
+          stableInstructions ?? turn.system ?? "",
+        );
         let approvalParams: CodexApprovalParams;
         if (approvalMode === "custom") {
           // config/read returns the effective global + project config for this
@@ -1489,7 +1503,27 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           startedModel = started?.model ?? null;
         }
         if (!codexThreadId) throw new Error("Codex did not return a native thread id");
-        await syncCodexInstructions(threadId, codexThreadId, developerInstructions, resumedNativeThread, request);
+        const { deliverVolatile, hadVolatile } = await syncCodexInstructions(
+          threadId,
+          codexThreadId,
+          developerInstructions,
+          promptSplit ? turn.systemVolatile ?? "" : "",
+          resumedNativeThread,
+          request,
+        );
+        // A changed volatile half rides the next user input as a labelled
+        // context block. It never touches the developer slot, so an
+        // ordinary memory write or roster change neither appends a second
+        // copy of the prompt to history nor re-uploads the conversation.
+        if (deliverVolatile) {
+          const volatileText = (promptSplit ? turn.systemVolatile ?? "" : "").trim();
+          const note = volatileText
+            ? "Context from OpenMausBot updated since this conversation started; it replaces any earlier copy:\n\n" + volatileText
+            : hadVolatile
+              ? "The OpenMausBot context notes from earlier in this conversation (memory, mentions, outstanding teammate work) have been cleared; the standing instructions still apply."
+              : "";
+          if (note) promptText = promptText ? note + "\n\n" + promptText : note;
+        }
         emit({ ...base(threadId, turnId), type: "session.started", sessionId: codexThreadId, model: startedModel ?? turn.model ?? null, ...(rebuiltFromReplay ? { rebuilt: true } : {}) });
         const turnInput = [
           ...(promptText ? [{ type: "text" as const, text: promptText }] : []),
