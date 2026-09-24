@@ -171,6 +171,7 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
     const card = { ...out.card } as OptionCardData & { summary?: string };
     card.title = scrub(card.title);
     if (typeof card.subtitle === "string") card.subtitle = scrub(card.subtitle);
+    card.options = card.options.map(scrub);
     if (typeof card.summary === "string") card.summary = scrub(card.summary);
     if (typeof card.held === "string") card.held = scrub(card.held);
     if (typeof card.answeredText === "string") card.answeredText = scrub(card.answeredText);

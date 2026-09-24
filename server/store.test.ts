@@ -236,6 +236,34 @@ describe("Store", () => {
 
   });
 
+  it("scrubs bot-authored option labels through the card boundary", () => {
+    const store = new Store(selection);
+    const bot = store.createBot({}, { seedMessages: false });
+    store.patchBot(bot.id, { contentClasses: ["personal"] });
+    const events: unknown[] = [];
+    bindContentBoundaryAuditSink((event) => events.push(event));
+    const key = "sk-ant-" + "b".repeat(90);
+    const sent = store.appendMessage(bot.threadId, {
+      role: "bot",
+      kind: "options",
+      card: { title: "Choose", subtitle: "", options: ["Allow", "Deny", "mail jane@example.com host corp.internal", key] },
+    });
+    expect(sent.card?.options?.[0]).toBe("Allow");
+    expect(sent.card?.options?.[1]).toBe("Deny");
+    expect(sent.card?.options?.[2]).toContain("«redacted 16 chars»");
+    expect(sent.card?.options?.[2]).toContain("corp.internal");
+    expect(sent.card?.options?.[3]).not.toContain(key);
+    expect(sent.card?.options?.[3]).toContain("«redacted");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: "content.class-passed", classes: ["internal"], funnel: "transcript", botId: bot.id });
+    const reloaded = new Store(selection);
+    const stored = reloaded.messagesFor(bot.threadId).find((m) => m.id === sent.id)?.card;
+    expect(stored?.options?.[0]).toBe("Allow");
+    expect(stored?.options?.[2]).toContain("«redacted 16 chars»");
+    expect(stored?.options?.[3]).not.toContain(key);
+    bindContentBoundaryAuditSink(undefined);
+  });
+
   it("round-trips audio attachments with their metadata through persistence", () => {
     const store = new Store(selection);
     const bot = store.createBot({}, { seedMessages: false });
