@@ -37,6 +37,7 @@ import { classifyError, computeBackoff, interruptibleDelay, RETRY_MAX_ATTEMPTS }
 import { appendNative } from "./native.ts";
 import { commandSummary, toolDetailPreview } from "../tool-summary.ts";
 import { codexDeveloperInstructions, syncCodexInstructions } from "./codex-instructions.ts";
+import { volatileContextNote, withContextNote } from "./prompt-split.ts";
 import type { ApprovalMode } from "../../shared/approval-mode.ts";
 import { CodexDeviceAuthController } from "./codex-device-auth.ts";
 import { codexAccountEmail } from "./codex-identity.ts";
@@ -1516,13 +1517,10 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         // ordinary memory write or roster change neither appends a second
         // copy of the prompt to history nor re-uploads the conversation.
         if (deliverVolatile) {
-          const volatileText = (promptSplit ? turn.systemVolatile ?? "" : "").trim();
-          const note = volatileText
-            ? "Context from OpenMausBot updated since this conversation started; it replaces any earlier copy:\n\n" + volatileText
-            : hadVolatile
-              ? "The OpenMausBot context notes from earlier in this conversation (memory, mentions, outstanding teammate work) have been cleared; the standing instructions still apply."
-              : "";
-          if (note) promptText = promptText ? note + "\n\n" + promptText : note;
+          promptText = withContextNote(
+            volatileContextNote(promptSplit ? turn.systemVolatile ?? "" : "", hadVolatile),
+            promptText,
+          );
         }
         emit({ ...base(threadId, turnId), type: "session.started", sessionId: codexThreadId, model: startedModel ?? turn.model ?? null, ...(rebuiltFromReplay ? { rebuilt: true } : {}) });
         const turnInput = [
