@@ -1504,7 +1504,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           startedModel = started?.model ?? null;
         }
         if (!codexThreadId) throw new Error("Codex did not return a native thread id");
-        const { deliverVolatile, hadVolatile } = await syncCodexInstructions(
+        const { deliverVolatile, hadVolatile, commitVolatile } = await syncCodexInstructions(
           threadId,
           codexThreadId,
           developerInstructions,
@@ -1554,6 +1554,9 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           approvalParams = approvalParams.fallback;
           await startTurn();
         }
+        // turn/start accepted the input: only now may the receipt claim the
+        // volatile half was delivered, so a rejected turn redelivers on retry.
+        if (commitVolatile) commitVolatile();
       } catch (e) {
         const failure = e instanceof Error ? e : { text: String(e) };
         const message = e instanceof Error ? e.message : String(e);

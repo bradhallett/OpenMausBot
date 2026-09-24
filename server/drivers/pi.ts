@@ -28,6 +28,7 @@ import { PROVIDER_CREDENTIAL_ENV, stripWorkspaceCredentialEnv } from "../config.
 import { augmentedPath } from "../env-path.ts";
 import { describeSpawnFailure, execCli, killCliTree, spawnCli } from "../procs.ts";
 import { promptHalves, readPromptSplitReceipt, splitSessionPrompt, writePromptSplitReceipt } from "./prompt-split.ts";
+import type { PromptSplitReceipt } from "./prompt-split.ts";
 import { SPAWNED_PROXIES } from "../proxy-paths.ts";
 import { commandSummary, toolDetailPreview } from "../tool-summary.ts";
 
@@ -841,6 +842,7 @@ export const PiDriver: ProviderDriver<PiConfig> = {
       // context, so that turn keeps the full block and writes no receipt.
       const halves = promptHalves(turn);
       let message: string;
+      let pendingReceipt: { key: string; receipt: PromptSplitReceipt } | null = null;
       if (halves.stable !== null && sessionReady && sessionFile) {
         const receiptKey = JSON.stringify([threadId, sessionFile]);
         const composed = splitSessionPrompt(
@@ -851,13 +853,16 @@ export const PiDriver: ProviderDriver<PiConfig> = {
           turn.text,
           Boolean(turn.mentionTurn),
         );
-        writePromptSplitReceipt("pi", receiptKey, composed.receipt);
         message = composed.text;
+        pendingReceipt = { key: receiptKey, receipt: composed.receipt };
       } else {
         message = turn.system ? `${turn.system}\n\n${turn.text}` : turn.text;
       }
       try {
         send({ type: "prompt", message, ...(images.length ? { images } : {}) });
+        // the prompt left this process: only now may the receipt claim the
+        // session carried it, so a failed send redelivers on the next turn.
+        if (pendingReceipt) writePromptSplitReceipt("pi", pendingReceipt.key, pendingReceipt.receipt);
       } catch {
         settle(false);
       }

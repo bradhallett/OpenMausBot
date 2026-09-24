@@ -33,6 +33,7 @@ import { createHash } from "node:crypto";
 import { PROVIDER_CREDENTIAL_ENV, stripControlPlaneEnv, WORKSPACE_CREDENTIAL_ENV } from "../../config.ts";
 import { decodeInjectId } from "../local-inject.ts";
 import { promptHalves, readPromptSplitReceipt, splitSessionPrompt, writePromptSplitReceipt } from "../prompt-split.ts";
+import type { PromptSplitReceipt } from "../prompt-split.ts";
 import { describeSpawnFailure, execCli, killCliTree, spawnCli } from "../../procs.ts";
 
 /**
@@ -1570,6 +1571,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             // adapter call) keeps the legacy full-prompt shape.
             const halves = promptHalves(turn);
             let promptInput = promptTurn;
+            let pendingSplitReceipt: { key: string; receipt: PromptSplitReceipt } | null = null;
             if (halves.stable !== null) {
               const receiptKey = JSON.stringify([threadId, sessionId]);
               const composed = splitSessionPrompt(
@@ -1581,7 +1583,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
                 Boolean(turn.mentionTurn),
               );
               promptInput = { ...promptTurn, system: "", text: composed.text };
-              writePromptSplitReceipt(DRIVER_KIND, receiptKey, composed.receipt);
+              pendingSplitReceipt = { key: receiptKey, receipt: composed.receipt };
             }
             const text = support.buildPromptText
               ? support.buildPromptText(promptInput)
@@ -1607,7 +1609,13 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               promptIdleMs,
               `${DRIVER_KIND} went fully silent ${Math.round(promptIdleMs / 1000)} s after the message and the turn was stopped. ` +
                 "Raise OPENMAUS_ACP_PROMPT_IDLE_TIMEOUT_MS if this model legitimately takes longer to answer.",
-            );
+              );
+            if (pendingSplitReceipt) {
+              // session/prompt resolving is the acceptance boundary: a
+              // rejected prompt leaves the receipt unwritten, so the next
+              // turn redelivers what this one never received.
+              writePromptSplitReceipt(DRIVER_KIND, pendingSplitReceipt.key, pendingSplitReceipt.receipt);
+            }
             // opencode 1.18.18 reports usage at the result root; grok and
             // gemini put it under _meta. Read both rather than lose the count.
             const usage = result?.usage ?? result?._meta ?? {};

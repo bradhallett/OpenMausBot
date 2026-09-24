@@ -9,8 +9,9 @@ import { writeFileAtomic } from "../atomic.ts";
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 
 /** Receipts written before the volatile split hold the bare instruction
- * fingerprint; later ones are JSON with both digests. Anything unreadable
- * reads as unknown, which re-delivers once and rewrites the file. */
+ * fingerprint, as do ones still waiting for their turn to be accepted;
+ * committed ones are JSON with both digests. Anything unreadable reads as
+ * unknown, which re-delivers once and rewrites the file. */
 export interface CodexInstructionReceipt {
   instructions: string;
   volatile?: string;
@@ -63,7 +64,7 @@ export async function syncCodexInstructions(
   resumed: boolean,
   request: (method: string, params: Record<string, unknown>) => Promise<unknown>,
   mentionTurn = false,
-): Promise<{ deliverVolatile: boolean; hadVolatile: boolean }> {
+): Promise<{ deliverVolatile: boolean; hadVolatile: boolean; commitVolatile: (() => void) | null }> {
   const directory = join(DATA_DIR, "codex-instructions");
   const path = join(directory, `${digest(JSON.stringify([key, nativeThreadId]))}.sha256`);
   const fingerprint = digest(instructions);
@@ -105,9 +106,19 @@ export async function syncCodexInstructions(
   // even when the volatile text is byte-identical to the previous turn's.
   const deliverVolatile = !resumed || previous?.volatile !== volatileFingerprint || mentionTurn;
   const hadVolatile = typeof previous?.volatile === "string" && previous.volatile !== digest("");
-  if (!resumed || previous?.instructions !== fingerprint || previous?.volatile !== volatileFingerprint) {
+  if (!resumed || previous?.instructions !== fingerprint) {
+    // Instructions-only, and only after inject_items acknowledged: the
+    // volatile digest stays pending until the driver commits it after the
+    // provider accepts the turn, so a submission the provider rejected
+    // redelivers its context on the next attempt.
     mkdirSync(directory, { recursive: true });
-    writeFileAtomic(path, JSON.stringify({ instructions: fingerprint, volatile: volatileFingerprint }), { mode: 0o600 });
+    writeFileAtomic(path, JSON.stringify({ instructions: fingerprint }), { mode: 0o600 });
   }
-  return { deliverVolatile, hadVolatile };
+  const commitVolatile = previous?.instructions === fingerprint && previous?.volatile === volatileFingerprint
+    ? null
+    : () => {
+        mkdirSync(directory, { recursive: true });
+        writeFileAtomic(path, JSON.stringify({ instructions: fingerprint, volatile: volatileFingerprint }), { mode: 0o600 });
+      };
+  return { deliverVolatile, hadVolatile, commitVolatile };
 }

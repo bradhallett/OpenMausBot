@@ -73,14 +73,17 @@ describe("Codex instruction receipts", () => {
     const key = randomUUID();
     const request = vi.fn().mockResolvedValue({});
     const first = await syncCodexInstructions(key, "native", "rules", "memory v1", false, request);
-    expect(first).toEqual({ deliverVolatile: true, hadVolatile: false });
+    first.commitVolatile?.();
+    expect(first).toMatchObject({ deliverVolatile: true, hadVolatile: false });
     const unchanged = await syncCodexInstructions(key, "native", "rules", "memory v1", true, request);
-    expect(unchanged).toEqual({ deliverVolatile: false, hadVolatile: true });
+    expect(unchanged).toMatchObject({ deliverVolatile: false, hadVolatile: true });
     const changed = await syncCodexInstructions(key, "native", "rules", "memory v2", true, request);
-    expect(changed).toEqual({ deliverVolatile: true, hadVolatile: true });
+    changed.commitVolatile?.();
+    expect(changed).toMatchObject({ deliverVolatile: true, hadVolatile: true });
     expect(request).not.toHaveBeenCalled();
     const cleared = await syncCodexInstructions(key, "native", "rules", "", true, request);
-    expect(cleared).toEqual({ deliverVolatile: true, hadVolatile: true });
+    cleared.commitVolatile?.();
+    expect(cleared).toMatchObject({ deliverVolatile: true, hadVolatile: true });
   });
 
   it("treats a legacy bare-fingerprint receipt as unknown volatile context", async () => {
@@ -92,18 +95,40 @@ describe("Codex instruction receipts", () => {
     const fingerprint = JSON.parse(readFileSync(path, "utf8")).instructions;
     writeFileSync(path, fingerprint, { mode: 0o600 });
     const legacy = await syncCodexInstructions(key, "native", "rules", "memory v1", true, request);
-    expect(legacy).toEqual({ deliverVolatile: true, hadVolatile: false });
+    expect(legacy).toMatchObject({ deliverVolatile: true, hadVolatile: false });
     expect(request).not.toHaveBeenCalled();
   });
 
   it("delivers mention context on every tagged turn even when the volatile half is unchanged", async () => {
     const key = randomUUID();
     const request = vi.fn().mockResolvedValue({});
-    await syncCodexInstructions(key, "native", "rules", "Tagged: @Testy", false, request);
+    const first = await syncCodexInstructions(key, "native", "rules", "Tagged: @Testy", false, request);
+    first.commitVolatile?.();
     const untagged = await syncCodexInstructions(key, "native", "rules", "Tagged: @Testy", true, request);
     expect(untagged.deliverVolatile).toBe(false);
     const tagged = await syncCodexInstructions(key, "native", "rules", "Tagged: @Testy", true, request, true);
     expect(tagged.deliverVolatile).toBe(true);
     expect(request).not.toHaveBeenCalled();
+  });
+
+  it("keeps the volatile digest pending until the provider accepts the turn", async () => {
+    const key = randomUUID();
+    const request = vi.fn().mockResolvedValue({});
+    const first = await syncCodexInstructions(key, "native", "rules", "memory v1", true, request);
+    expect(first.deliverVolatile).toBe(true);
+    // the on-disk receipt does not yet claim the volatile half was carried
+    const path = receiptPath(key, "native");
+    const pending = JSON.parse(readFileSync(path, "utf8"));
+    expect(pending).toEqual({ instructions: expect.any(String) });
+    // so a retry before acceptance still redelivers it
+    const retry = await syncCodexInstructions(key, "native", "rules", "memory v1", true, request);
+    expect(retry.deliverVolatile).toBe(true);
+    expect(first.commitVolatile).toBeTypeOf("function");
+    first.commitVolatile?.();
+    const committed = JSON.parse(readFileSync(path, "utf8"));
+    expect(committed).toEqual({ instructions: pending.instructions, volatile: expect.any(String) });
+    const after = await syncCodexInstructions(key, "native", "rules", "memory v1", true, request);
+    expect(after.deliverVolatile).toBe(false);
+    expect(after.commitVolatile).toBeNull();
   });
 });
