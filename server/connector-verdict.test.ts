@@ -133,13 +133,22 @@ describe("evaluateConnectorTools", () => {
       bland: { tools: "*" },
       bland_ai: { tools: ["BLAND_AI_MAKE_CALL"] },
     };
-    expect(evaluateConnectorTools(["BLAND_AI_MAKE_CALL"], grants)).toMatchObject({
+    expect(evaluateConnectorTools(["BLAND_AI_MAKE_CALL"], grants, ["bland", "bland_ai"])).toMatchObject({
       allowed: true,
       rule: "connectorTools.bland_ai",
     });
     // bland_ai claims BLAND_AI_* before bland's star grant can widen it.
-    expect(evaluateConnectorTools(["BLAND_AI_SEND_SMS"], grants).denials).toEqual([
+    expect(evaluateConnectorTools(["BLAND_AI_SEND_SMS"], grants, ["bland", "bland_ai"]).denials).toEqual([
       { tool: "BLAND_AI_SEND_SMS", service: "bland_ai", onGrantedService: true },
+    ]);
+  });
+
+  it("does not let a plain-prefix grant capture an underscored connected service", () => {
+    // bland_ai is the connected service, so its tools must resolve there
+    // even when the record only holds a wildcard for the plain prefix.
+    const grants: Record<string, ConnectorToolGrant> = { bland: { tools: "*" } };
+    expect(evaluateConnectorTools(["BLAND_AI_MAKE_CALL"], grants, ["bland_ai"]).denials).toEqual([
+      { tool: "BLAND_AI_MAKE_CALL", service: "bland_ai", onGrantedService: false },
     ]);
   });
 

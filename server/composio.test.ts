@@ -5,6 +5,7 @@ import type { AppConfig } from "./config.ts";
 import {
   applyManagedBrokerMessage,
   authorizeService,
+  connectedServiceSlugs,
   connectedServices,
   connectionMode,
   connectionStatus,
@@ -19,7 +20,11 @@ import {
   setManagedBrokerAccess,
   validateConnectorGrants,
 } from "./composio.ts";
-import { CONNECTOR_ALLOWED_TOOLS_ENV } from "./connector-advertisement.ts";
+import {
+  CONNECTOR_ALLOWED_TOOLS_ENV,
+  CONNECTOR_SERVICE_SLUGS_ENV,
+  parseConnectorServiceSlugsEnv,
+} from "./connector-advertisement.ts";
 import type { ConnectorToolGrant } from "../shared/wire.ts";
 
 let api: Server;
@@ -43,6 +48,8 @@ let brokerToolsListFail = false;
 // What /broker/v1/connectors/connected serves; null falls back to github
 // only, the state the existing validation tests were written against.
 let brokerConnectedServicesBody: { services: Record<string, { connected: boolean; status: string }> } | null = null;
+// What /broker/v1/catalog serves; null falls back to github only.
+let brokerCatalogBody: { items: Array<{ slug: string; name: string }> } | null = null;
 // The project's own auth configs, and the ones the stub Session was created
 // with — a Session only knows the configs named at its creation, which is
 // the whole reason #509 happened.
@@ -65,9 +72,9 @@ beforeAll(async () => {
     });
 
     if (url.pathname.startsWith("/broker/")) {
-      // c/d/e back the cache-identity tests; b stays invalid so a token
+      // c/d/e/f back the cache-identity tests; b stays invalid so a token
       // switch can be made to fail on purpose.
-      if (!/^[acde]{64}$/.test(String(req.headers.authorization ?? "").replace(/^Bearer /, ""))) {
+      if (!/^[acdef]{64}$/.test(String(req.headers.authorization ?? "").replace(/^Bearer /, ""))) {
         res.writeHead(401, { "content-type": "application/json" });
         return res.end(JSON.stringify({ error: "invalid broker token" }));
       }
@@ -97,7 +104,7 @@ beforeAll(async () => {
       }
       if (req.method === "GET" && url.pathname === "/broker/v1/catalog") {
         res.writeHead(200, { "content-type": "application/json" });
-        return res.end(JSON.stringify({ items: [{ slug: "github", name: "GitHub" }] }));
+        return res.end(JSON.stringify(brokerCatalogBody ?? { items: [{ slug: "github", name: "GitHub" }] }));
       }
       if (req.method === "POST" && url.pathname === "/broker/v1/mcp") {
         if (brokerMcpTools !== null && body?.method === "initialize") {
@@ -919,6 +926,38 @@ describe.sequential("Composio Sessions", () => {
     }
   });
 
+  it("passes the connected-service slugs to the bridge alongside the allowlist", async () => {
+    setManagedBrokerAccess({ url: origin + "/broker", token: "f".repeat(64) });
+    brokerConnectedServicesBody = {
+      services: {
+        bland_ai: { connected: true, status: "ACTIVE" },
+        bland: { connected: true, status: "ACTIVE" },
+        github: { connected: true, status: "ACTIVE" },
+      },
+    };
+    try {
+      const integration = await mcpIntegration({}, {
+        harnessUrl: "http://127.0.0.1:8799",
+        commsToken: "secret",
+        botId: "bot-1",
+        threadId: "thread-1",
+        connectorTools: { bland: { tools: "*" } },
+      });
+      const slugs = parseConnectorServiceSlugsEnv(integration?.env[CONNECTOR_SERVICE_SLUGS_ENV]);
+      expect(slugs).toContain("bland_ai");
+      expect(slugs).toContain("bland");
+    } finally {
+      brokerConnectedServicesBody = null;
+      setManagedBrokerAccess(null);
+    }
+  });
+
+  it("reads an unreachable connection inventory as no service slugs", async () => {
+    // No project key and no broker: the inventory cannot run, so the
+    // resolver degrades to the plain split instead of caching a failure.
+    await expect(connectedServiceSlugs({})).resolves.toEqual([]);
+  });
+
   it("validates grant patches against connected services and the catalog", async () => {
     const cfg: AppConfig = {
       composio: { apiKey: "ak_test", userId: "openmausbot_existing", sessionId: "trs_test" },
@@ -951,13 +990,28 @@ describe.sequential("Composio Sessions", () => {
   });
 
   it("accepts an underscored service's own tool names in its grant", async () => {
-    // The prefix check reads the grant keys themselves, so bland_ai keeps
-    // its BLAND_AI_* names instead of the first-segment split filing them
-    // under "bland" as another service's tools.
-    await expect(validateConnectorGrants({}, { bland_ai: { tools: ["BLAND_AI_MAKE_CALL"] } })).resolves.toBeNull();
-    await expect(
-      validateConnectorGrants({}, { bland: { tools: ["BLAND_AI_MAKE_CALL"] }, bland_ai: { tools: ["*"] } }),
-    ).resolves.toMatch(/another service: BLAND_AI_MAKE_CALL/);
+    // The prefix check resolves against the connected-service slugs, so
+    // bland_ai keeps its BLAND_AI_* names instead of the first-segment
+    // split filing them under "bland" — and a bland grant cannot capture
+    // them while bland_ai is the connected service.
+    setManagedBrokerAccess({ url: origin + "/broker", token: "f".repeat(64) });
+    brokerConnectedServicesBody = {
+      services: {
+        bland_ai: { connected: true, status: "ACTIVE" },
+        bland: { connected: true, status: "ACTIVE" },
+        github: { connected: true, status: "ACTIVE" },
+      },
+    };
+    brokerCatalogBody = { items: [{ slug: "github", name: "GitHub" }, { slug: "bland_ai", name: "Bland AI" }, { slug: "bland", name: "Bland" }] };
+    try {
+      await expect(validateConnectorGrants({}, { bland_ai: { tools: ["BLAND_AI_MAKE_CALL"] } })).resolves.toBeNull();
+      await expect(validateConnectorGrants({}, { bland: { tools: ["BLAND_AI_MAKE_CALL"] } }))
+        .resolves.toMatch(/another service: BLAND_AI_MAKE_CALL/);
+    } finally {
+      brokerConnectedServicesBody = null;
+      brokerCatalogBody = null;
+      setManagedBrokerAccess(null);
+    }
   });
 
   it("does not reject grants against a catalog walk that never finished", async () => {

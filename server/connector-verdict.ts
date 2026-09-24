@@ -143,18 +143,24 @@ function multiExecuteCall(invoked: string, args: unknown): ConnectorCall {
 /** Judge distinct target names against a bot's grants. grants undefined
  * is the legacy all-tools bot and passes everything; an explicit record —
  * including the empty one — allows only what it names. */
+/** candidates are the caller's connected-service slugs: the real backend
+ * slugs, so an underscored service (bland_ai) keeps its own tools instead
+ * of a plain-prefix grant (bland) capturing them. An empty list means the
+ * connected-service catalog was unreachable, and the plain first-segment
+ * split stands as the fallback — call-time enforcement degrades open, the
+ * same way advertisement filtering does. */
 export function evaluateConnectorTools(
   names: string[],
   grants: Record<string, ConnectorToolGrant> | undefined,
+  candidates: readonly string[] = [],
 ): ConnectorVerdict {
   if (grants === undefined) {
     return { allowed: true, legacy: true, denials: [], rule: "composio" };
   }
   const denials: ConnectorDenial[] = [];
   let rule = "";
-  const grantKeys = Object.keys(grants);
   for (const tool of new Set(names)) {
-    const service = serviceSlugForCandidates(tool, grantKeys) ?? serviceSlugFor(tool);
+    const service = serviceSlugForCandidates(tool, candidates) ?? serviceSlugFor(tool);
     const grant = service === null ? undefined : grants[service];
     if (grant && (grant.tools === "*" || grant.tools.includes(tool))) {
       if (!rule) rule = "connectorTools." + service;

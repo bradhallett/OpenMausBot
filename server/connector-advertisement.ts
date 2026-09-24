@@ -16,10 +16,19 @@ import { serviceSlugFor, serviceSlugForCandidates } from "./connector-verdict.ts
 /** The env var mcpIntegration sets and connector-proxy.ts reads. */
 export const CONNECTOR_ALLOWED_TOOLS_ENV = "OMB_CONNECTOR_ALLOWED_TOOLS";
 
+/** The env var carrying the connected-service slugs the filter resolves
+ * tool-name prefixes against. Without it the filter falls back to the
+ * plain first-segment split, exactly as when the catalog is unreachable. */
+export const CONNECTOR_SERVICE_SLUGS_ENV = "OMB_CONNECTOR_SERVICE_SLUGS";
+
 /** Upper bound for the serialized allowlist. Past it the env var is
  * omitted entirely (mounting must never depend on catalog size) and the
  * bot keeps the unfiltered list with call-time enforcement only. */
 export const CONNECTOR_ALLOWED_TOOLS_MAX_BYTES = 32 * 1024;
+
+/** Upper bound for the serialized slug list; past it the env var is
+ * omitted and the filter falls back to the plain split. */
+export const CONNECTOR_SERVICE_SLUGS_MAX_BYTES = 32 * 1024;
 
 /** The platform meta-tools. They name no connected-app tool themselves —
  * search and schemas discover, the executor runs what it is told — so
@@ -49,6 +58,19 @@ export function serializeConnectorAllowedTools(
 ): { env?: string; oversized: boolean } {
   const env = JSON.stringify(grants);
   if (Buffer.byteLength(env, "utf8") > CONNECTOR_ALLOWED_TOOLS_MAX_BYTES) return { oversized: true };
+  return { env, oversized: false };
+}
+
+/** Harness side: serialize the connected-service slugs for the bridge
+ * env, or report that they exceeded the cap. Duplicate or non-slug
+ * entries are dropped rather than failing the whole mount. */
+export function serializeConnectorServiceSlugs(
+  slugs: readonly string[],
+): { env?: string; oversized: boolean } {
+  const unique = [...new Set(slugs.filter((slug) => CONNECTOR_SLUG_PATTERN.test(slug)))];
+  if (!unique.length) return { oversized: false };
+  const env = JSON.stringify(unique);
+  if (Buffer.byteLength(env, "utf8") > CONNECTOR_SERVICE_SLUGS_MAX_BYTES) return { oversized: true };
   return { env, oversized: false };
 }
 
@@ -83,17 +105,41 @@ export function parseConnectorAllowedToolsEnv(raw: string | undefined): Record<s
   return grants;
 }
 
+/** Bridge side: decode the connected-service slug list. Anything off —
+ * absent, unparseable, or one bad entry — reads as an empty list so the
+ * filter degrades to the plain split instead of trusting a partial
+ * inventory. */
+export function parseConnectorServiceSlugsEnv(raw: string | undefined): readonly string[] {
+  if (!raw) return [];
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(value)) return [];
+  return value.every((slug): slug is string => typeof slug === "string" && CONNECTOR_SLUG_PATTERN.test(slug))
+    ? value
+    : [];
+}
+
 /** Whether one advertised tool name survives the filter. A tool is
  * offered when its service is granted with `"*`", when its exact name is
  * granted, or when it is that service's connection flow — a card the
  * person approves, which slice 2 passes through at call time and which a
  * bot granted a service should still be able to offer for another
  * account. */
-export function connectorToolAdvertised(name: string, grants: Record<string, ConnectorToolGrant>): boolean {
+export function connectorToolAdvertised(
+  name: string,
+  grants: Record<string, ConnectorToolGrant>,
+  candidates: readonly string[] = [],
+): boolean {
   if (Object.keys(grants).length > 0 && CONNECTOR_META_TOOLS.includes(name)) return true;
-  // Grant keys are the real service slugs, so an underscored service
-  // (bland_ai) claims its own tools instead of splitting as "bland".
-  const service = serviceSlugForCandidates(name, Object.keys(grants)) ?? serviceSlugFor(name);
+  // The connected-service slugs are the resolver's candidates, so an
+  // underscored service (bland_ai) claims its own tools instead of a
+  // plain-prefix grant (bland) widening them; an unreachable catalog
+  // leaves the list empty and the plain split stands.
+  const service = serviceSlugForCandidates(name, candidates) ?? serviceSlugFor(name);
   const grant = service === null ? undefined : grants[service];
   if (!grant) return false;
   if (grant.tools === "*") return true;
@@ -109,6 +155,7 @@ export function connectorToolAdvertised(name: string, grants: Record<string, Con
 export function filterToolsListFrame(
   frame: Record<string, unknown>,
   grants: Record<string, ConnectorToolGrant>,
+  candidates: readonly string[] = [],
 ): Record<string, unknown> {
   const result = frame.result;
   if (!result || typeof result !== "object" || Array.isArray(result)) return frame;
@@ -118,7 +165,7 @@ export function filterToolsListFrame(
     const name = tool && typeof tool === "object" && !Array.isArray(tool)
       ? (tool as { name?: unknown }).name
       : undefined;
-    return typeof name === "string" ? connectorToolAdvertised(name, grants) : true;
+    return typeof name === "string" ? connectorToolAdvertised(name, grants, candidates) : true;
   });
   return { ...frame, result: { ...(result as Record<string, unknown>), tools: kept } };
 }

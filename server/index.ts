@@ -14768,7 +14768,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           }));
         }
         if (call.kind === "tools") {
-          const verdict = evaluateConnectorTools(call.names, currentSender.connectorTools);
+          // The resolver needs the real connected-service slugs, so an
+          // underscored service (bland_ai) keeps its own tools instead of
+          // a plain-prefix grant (bland) capturing them; an unreachable
+          // catalog reads as empty and the plain split stands.
+          const serviceSlugs = await composio.connectedServiceSlugs(cfg);
+          const verdict = evaluateConnectorTools(call.names, currentSender.connectorTools, serviceSlugs);
           if (!verdict.allowed) {
             for (const denial of verdict.denials) {
               appendDecision(DATA_DIR, {

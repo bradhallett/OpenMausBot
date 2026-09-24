@@ -6,7 +6,14 @@ import { z } from "zod";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 import { managedConnectorUnavailableReason } from "../shared/connector-availability.ts";
 import { CONNECTOR_TOOL_NAME_PATTERN, type ConnectorToolGrant } from "../shared/wire.ts";
-import { CONNECTOR_ALLOWED_TOOLS_ENV, CONNECTOR_ALLOWED_TOOLS_MAX_BYTES, serializeConnectorAllowedTools } from "./connector-advertisement.ts";
+import {
+  CONNECTOR_ALLOWED_TOOLS_ENV,
+  CONNECTOR_ALLOWED_TOOLS_MAX_BYTES,
+  CONNECTOR_SERVICE_SLUGS_ENV,
+  CONNECTOR_SERVICE_SLUGS_MAX_BYTES,
+  serializeConnectorAllowedTools,
+  serializeConnectorServiceSlugs,
+} from "./connector-advertisement.ts";
 import { serviceSlugFor, serviceSlugForCandidates } from "./connector-verdict.ts";
 
 const DEFAULT_BACKEND_ORIGIN = "https://backend.composio.dev";
@@ -559,6 +566,20 @@ export async function mcpIntegration(
       + " tools/list stays unfiltered and grants are enforced per call",
     );
   }
+  // The connected-service slugs ride alongside the allowlist so the
+  // bridge resolves underscored services (bland_ai) instead of letting a
+  // plain-prefix grant (bland) widen them. An unreachable catalog omits
+  // the var and the filter keeps its plain-split fallback; legacy
+  // all-tools bots mount without it because their list is unfiltered.
+  const serviceSlugs = context.connectorTools === undefined
+    ? undefined
+    : serializeConnectorServiceSlugs(await connectedServiceSlugs(cfg));
+  if (serviceSlugs?.oversized) {
+    console.warn(
+      `[composio] connector service slugs for bot ${context.botId} exceed ${CONNECTOR_SERVICE_SLUGS_MAX_BYTES} bytes;`
+      + " tools/list falls back to plain-prefix resolution",
+    );
+  }
   return {
     command: process.execPath,
     args: [SPAWNED_PROXIES.connectors],
@@ -577,6 +598,7 @@ export async function mcpIntegration(
       OMB_BOT_ID: context.botId,
       OMB_THREAD_ID: context.threadId,
       ...(allowlist?.env ? { [CONNECTOR_ALLOWED_TOOLS_ENV]: allowlist.env } : {}),
+      ...(serviceSlugs?.env ? { [CONNECTOR_SERVICE_SLUGS_ENV]: serviceSlugs.env } : {}),
     },
   };
 }
@@ -806,7 +828,10 @@ export async function connectedServices(cfg: AppConfig): Promise<Record<string, 
  * must name a connected service, and every listed tool name must carry its
  * own service prefix (GMAIL_SEND_EMAIL under "gmail") — a mismatched name
  * would be granted yet permanently refused at call time. The prefix check
- * is purely local, so it always runs; only the connection-dependent and
+ * resolves against the connected-service slugs, so an underscored service
+ * (bland_ai) keeps its BLAND_AI_* names and a plain-prefix grant cannot
+ * capture them; it always runs, degrading to the plain split when the
+ * connection inventory is unreachable. Only the connection-dependent and
  * catalog checks fail open — an unreachable connection inventory, the
  * curated fallback, or a catalog walk that did not reach its end never
  * block the patch, because call-time enforcement (slice 2) stays the
@@ -815,25 +840,22 @@ export async function validateConnectorGrants(
   cfg: AppConfig,
   grants: Record<string, ConnectorToolGrant>,
 ): Promise<string | null> {
-  const grantKeys = Object.keys(grants);
+  const connected = await connectedServices(cfg).catch(() => null);
+  const candidates = connected ? Object.keys(connected) : [];
   for (const [slug, grant] of Object.entries(grants)) {
     if (grant.tools === "*") continue;
-    // The prefix check runs against the grant keys themselves, so an
+    // The prefix check runs against the connected-service slugs, so an
     // underscored service (bland_ai) accepts its own BLAND_AI_* names —
-    // the plain split would file them under "bland" and reject the grant.
+    // and a plain-prefix grant cannot capture them while the real service
+    // is connected.
     const misplaced = grant.tools.filter(
-      (tool) => (serviceSlugForCandidates(tool, grantKeys) ?? serviceSlugFor(tool)) !== slug,
+      (tool) => (serviceSlugForCandidates(tool, candidates) ?? serviceSlugFor(tool)) !== slug,
     );
     if (misplaced.length) {
       return `connectorTools.${slug}.tools names tools that belong to another service: ${misplaced.join(", ")}`;
     }
   }
-  let connected: Record<string, ConnectorServiceState>;
-  try {
-    connected = await connectedServices(cfg);
-  } catch {
-    return null;
-  }
+  if (!connected) return null;
   const unconnected = Object.keys(grants).filter((slug) => !connected[slug]?.connected);
   if (unconnected.length) {
     return `connectorTools names services that are not connected: ${unconnected.join(", ")}`;
@@ -904,6 +926,41 @@ function connectorToolsIdentity(cfg: AppConfig): string {
 }
 
 let connectorToolsRequest: { identity: string; services: Promise<Record<string, ConnectorToolListing[]>> } | null = null;
+
+/** The service slugs grant enforcement resolves tool-name prefixes
+ * against: every key of the connection inventory, connected or not,
+ * because the real backend slugs are what separates an underscored
+ * service (bland_ai) from a plain-prefix grant (bland). Cached like the
+ * tool inventory — 60s, keyed by backend identity, one shared in-flight
+ * walk — and an unreachable inventory reads as an empty list without
+ * caching the failure, so callers fall back to the plain split and the
+ * next call retries. */
+export async function connectedServiceSlugs(cfg: AppConfig): Promise<readonly string[]> {
+  const identity = connectorToolsIdentity(cfg);
+  if (connectorServiceSlugsCache?.identity === identity
+    && Date.now() - connectorServiceSlugsCache.at < CONNECTOR_SERVICE_SLUGS_CACHE_MS) {
+    return connectorServiceSlugsCache.slugs;
+  }
+  if (connectorServiceSlugsRequest?.identity === identity) return connectorServiceSlugsRequest.slugs;
+  const walk = connectedServices(cfg).then(
+    (services) => {
+      const slugs = Object.keys(services);
+      connectorServiceSlugsCache = { at: Date.now(), identity, slugs };
+      return slugs;
+    },
+    () => [] as readonly string[],
+  );
+  connectorServiceSlugsRequest = { identity, slugs: walk };
+  try {
+    return await walk;
+  } finally {
+    if (connectorServiceSlugsRequest?.slugs === walk) connectorServiceSlugsRequest = null;
+  }
+}
+
+const CONNECTOR_SERVICE_SLUGS_CACHE_MS = 60_000;
+let connectorServiceSlugsCache: { at: number; identity: string; slugs: readonly string[] } | null = null;
+let connectorServiceSlugsRequest: { identity: string; slugs: Promise<readonly string[]> } | null = null;
 
 /** Tool names longer than any Composio description worth searching. */
 const TOOL_DESCRIPTION_MAX = 240;
