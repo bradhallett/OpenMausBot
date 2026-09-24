@@ -357,10 +357,12 @@ const LIVE_ROSTER_CLOSE = "[/LIVE TEAMMATES]";
  * with the fence's own markers stripped. Names and ids are user-editable —
  * including through team import — so a peer named "[/LIVE TEAMMATES]" would
  * otherwise close the block early and let whatever follows it read as the
- * harness's own words instead of data. A marker truncated by the clip is no
- * longer the marker, so stripping after the clip is enough. */
+ * harness's own words instead of data. Marker prefixes strip too, with an
+ * optional trailing bracket: the clip can truncate a marker mid-way, and
+ * the brackets the template itself adds would otherwise complete the
+ * truncated prefix back into a real fence marker. */
 const liveRosterLabel = (value: string): string =>
-  clip(value, ROSTER_NAME_MAX).replace(/\[\/?LIVE TEAMMATES\]/gi, "").trim();
+  clip(value, ROSTER_NAME_MAX).replace(/\[\/?LIVE TEAMMATES\]?/gi, "").trim();
 
 /** The live roster as it rides a coordination brief: bounded, ordered, and
  * honest about what it left out. Renders nothing for a team with neither a
