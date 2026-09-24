@@ -266,6 +266,29 @@ describe("ProfileRequestService", () => {
     expect(store.bot(bot.id)!.title).toBe("");
   });
 
+  it("never decides an expired card, even after the profile moves back under it", () => {
+    const { service, store, bot } = harness({ name: "Scout" });
+    const proposed = service.propose({ botId: bot.id, threadId: bot.threadId, changes: { title: "T" }, reason: "r" });
+    store.patchBot(bot.id, { description: "changed elsewhere" });
+    expect(service.resolve({ botId: bot.id, threadId: bot.threadId, requestId: proposed.requestId, behavior: "allow" }))
+      .toMatchObject({ claimed: true, state: "invalid", status: 409 });
+    const dead = store.messagesFor(bot.threadId).at(-1)!.card!;
+    expect(dead.expired).toBe(true);
+
+    // The revision the card was prepared against comes back: the card stays
+    // dead for both decisions, and the proposal never applies.
+    store.patchBot(bot.id, { description: "" });
+    const expired = "This profile request expired before it was confirmed. Ask for a fresh proposal.";
+    expect(service.resolve({ botId: bot.id, threadId: bot.threadId, requestId: proposed.requestId, behavior: "allow" }))
+      .toEqual({ claimed: true, state: "invalid", error: expired, status: 409 });
+    expect(service.resolve({ botId: bot.id, threadId: bot.threadId, requestId: proposed.requestId, behavior: "deny" }))
+      .toEqual({ claimed: true, state: "invalid", error: expired, status: 409 });
+    expect(store.bot(bot.id)!.title).toBe("");
+    const card = store.messagesFor(bot.threadId).at(-1)!.card!;
+    expect(card).toMatchObject({ expired: true, options: [] });
+    expect(card.answered).toBeUndefined();
+  });
+
   it("scrubs existing profile secrets in the returned tool result as well as the card", () => {
     const { service, store, bot } = harness({ name: "Scout" });
     const secret = "sk-ant-api03-SECRETSECRETSECRETSECRETSECRET";
@@ -338,8 +361,14 @@ describe("ProfileRequestService", () => {
     refuse = "@Peer is no longer in this section";
     expect(service.resolve({ botId: bot.id, threadId: bot.threadId, requestId, behavior: "allow" }))
       .toMatchObject({ claimed: true, state: "invalid", status: 404 });
+    // The refusal expired the card. The section comes back, but the card
+    // stays dead — a fresh proposal carries the same change instead.
     refuse = null;
     expect(service.resolve({ botId: bot.id, threadId: bot.threadId, requestId, behavior: "allow" }))
+      .toMatchObject({ claimed: true, state: "invalid", status: 409 });
+    expect(store.messagesFor(bot.threadId).at(-1)!.card).toMatchObject({ expired: true, options: [] });
+    const fresh = service.propose({ botId: bot.id, threadId: bot.threadId, targetBotId: peer.id, changes: { title: "Analyst" }, reason: "r" });
+    expect(service.resolve({ botId: bot.id, threadId: bot.threadId, requestId: fresh.requestId, behavior: "allow" }))
       .toMatchObject({ state: "applied", targetBotId: peer.id });
     expect(store.bot(peer.id)!.title).toBe("Analyst");
     expect(store.bot(bot.id)!.title).toBe("");

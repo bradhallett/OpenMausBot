@@ -353,6 +353,15 @@ export class ProfileRequestService {
         if (!settled) throw new ProfileRequestError("This profile confirmation card is no longer available", 409);
         return { claimed: true, state: "already_settled", behavior: "allow" };
       }
+      // An expired card is settled terminal state, not a decision waiting on
+      // a slower click: the proposal it carried can never be confirmed as
+      // prepared, even when the condition that expired it reverses (the
+      // revision matches again, the folder comes back). The committed
+      // receipt above still recovers a write that already happened; nothing
+      // past this point can.
+      if (card.expired) {
+        return { claimed: true, state: "invalid", error: "This profile request expired before it was confirmed. Ask for a fresh proposal.", status: 409 };
+      }
       if (args.behavior === "deny") {
         this.store.patchMessage(args.threadId, message.id, { card: { ...card, answered: "deny", held: undefined } });
         return { claimed: true, state: "denied" };
