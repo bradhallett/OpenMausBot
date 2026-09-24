@@ -176,6 +176,23 @@ export type RuntimeEvent = RuntimeEventBase &
         flow?: string;
         detail?: string;
       }
+    | {
+        /** Admission telemetry (steer-vs-queue): one event per busy 1:1 send
+         * and each human Steer press, naming which layer decided. */
+        type: "decision.admission";
+        /** Which surface decided; the 1:1 busy-send seam today. */
+        surface: "direct";
+        /** The deciding layer: the bot's configured fallback, a confident
+         * model override, a hard mechanical rule, or the human. */
+        layer: "preference-default" | "model-override" | "mechanical-clamp" | "human";
+        /** What was done. */
+        decision: "steer" | "queue";
+        /** The bot's configured fallback. */
+        preference: "steer" | "queue";
+        confidence?: number;
+        model?: string;
+        detail?: string;
+      }
     // `claudeUpdate: true` narrows a setup failure to "this Claude Code is
     // too old for the model": the UI offers to run `claude update` for them.
     | { type: "runtime.error"; message: string; setup?: boolean; terminal?: boolean; claudeUpdate?: boolean }
