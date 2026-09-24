@@ -8,9 +8,9 @@ import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import type { LocaleKey } from "@/locales";
 
-export type ConfigSection = "composio" | "box" | "opencodeGo" | "anthropic" | "openaiCompat" | "decisionModel" | "xai";
+export type ConfigSection = "composio" | "box" | "opencodeGo" | "anthropic" | "openaiCompat" | "decisionModel" | "xai" | "mistral";
 /** Sections whose key can be tried against the provider from the server. */
-export type TestableProvider = "anthropic" | "openaiCompat" | "decisionModel" | "xai";
+export type TestableProvider = "anthropic" | "openaiCompat" | "decisionModel" | "xai" | "mistral";
 
 const SECTIONS: Record<
   ConfigSection,
@@ -25,6 +25,7 @@ const SECTIONS: Record<
   anthropic: { body: (v) => ({ anthropic: { key: v } }), flag: (c) => c.anthropic?.configured ?? false },
   openaiCompat: { body: (v) => ({ openaiCompat: { key: v } }), flag: (c) => c.openaiCompat?.configured ?? false },
   decisionModel: { body: (v) => ({ decisionModel: { apiKey: v } }), flag: (c) => c.decisionModel?.configured ?? false },
+  mistral: { body: (v) => ({ mistral: { key: v } }), flag: (c) => c.mistral?.configured ?? false },
   xai: { body: (v) => ({ xai: { key: v } }), flag: (c) => c.xai?.configured ?? false },
 };
 
@@ -62,7 +63,7 @@ const CREDENTIALS: Record<
     labelKey: "keys.box.label",
     placeholderKey: "keys.box.placeholder",
     descriptionKey: "keys.box.desc",
-    href: "https://docs.ascii.dev/box/api-keys",
+    href: "https://docs.boat.dev/api-keys",
     linkLabelKey: "keys.box.link",
     optional: true,
     warningKey: "keys.box.warning",
@@ -97,6 +98,14 @@ const CREDENTIALS: Record<
     descriptionKey: "keys.decisionModel.desc",
     href: "https://typesafe.ai",
     linkLabelKey: "keys.decisionModel.link",
+    optional: true,
+  },
+  mistral: {
+    labelKey: "keys.mistral.label",
+    placeholderKey: "keys.mistral.placeholder",
+    descriptionKey: "keys.mistral.desc",
+    href: "https://console.mistral.ai/api-keys",
+    linkLabelKey: "keys.mistral.link",
     optional: true,
   },
   xai: {
