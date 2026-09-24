@@ -6,7 +6,7 @@
 // modes mirror how the real CLI misbehaves:
 //
 //   FAKE_PI_MODE   happy (default) | tooluse | permission | interleave | question-select | question-input
-//                  | turn-error | no-models | exit-early | compaction | prompt-reject
+//                  | turn-error | no-models | exit-early | compaction | compaction-recovery | prompt-reject
 //   FAKE_PI_MODELS comma-separated provider/model pairs (default "ollama-cloud/glm-5.2,openai/gpt-4o")
 //   FAKE_PI_DUMP   path to append {argv, env} JSON, so a test can assert argv shape
 //                  and env hygiene (no leaked secrets into the pi child).
@@ -113,6 +113,30 @@ const streamCompactionTurn = () => {
   send({ type: "message_update", usage: { input: 0, output: 0 }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "compacted" } });
   send({ type: "turn_end", message: { stopReason: "end_turn", usage: { input: 12, output: 3 } }, usage: { input: 12, output: 3 } });
   send({ type: "agent_end" });
+};
+
+// compaction-recovery: post-run overflow recovery — the run "ends"
+// (turn_end + a non-terminal agent_end), then compaction summarises the
+// session and the run resumes for one more turn before the terminal
+// agent_end. The second half is delayed so it lands after the first
+// agent_end, exactly the sequence a driver must not treat as finished at
+// turn_end: killing the child there would silence the late compaction
+// events that invalidate the prompt-split receipt.
+const streamCompactionRecoveryTurn = () => {
+  send({ type: "agent_start" });
+  send({ type: "turn_start" });
+  send({ type: "message_update", usage: { input: 0, output: 0 }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "recovered" } });
+  send({ type: "turn_end", message: { stopReason: "end_turn", usage: { input: 12, output: 3 } }, usage: { input: 12, output: 3 } });
+  send({ type: "agent_end", isTerminal: false });
+  setTimeout(() => {
+    send({ type: "compaction_start", reason: "overflow" });
+    send({ type: "compaction_end", reason: "overflow", result: undefined, aborted: false, willRetry: false });
+    send({ type: "agent_start" });
+    send({ type: "turn_start" });
+    send({ type: "message_update", usage: { input: 0, output: 0 }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "ok" } });
+    send({ type: "turn_end", message: { stopReason: "end_turn", usage: { input: 4, output: 1 } }, usage: { input: 4, output: 1 } });
+    send({ type: "agent_end", isTerminal: true });
+  }, 30);
 };
 
 // tooluse: one tool turn (stopReason toolUse, pi auto-continues) then a text
@@ -275,6 +299,7 @@ function handle(cmd: any) {
       else if (mode === "interleave") streamInterleaveTurn();
       else if (mode === "turn-error") streamErrorTurn();
       else if (mode === "compaction") streamCompactionTurn();
+      else if (mode === "compaction-recovery") streamCompactionRecoveryTurn();
       else streamTurn();
       return;
     case "extension_ui_response":

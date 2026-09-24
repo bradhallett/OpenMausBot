@@ -402,6 +402,42 @@ describe("PiDriver turns (fake CLI)", () => {
     expect(second.message).toBe("Standing rules.\n\nMemory: likes quiet hours.\n\nsecond");
   });
 
+  it("keeps pi alive through post-run compaction recovery and re-establishes the full prompt", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-pi-compaction-recovery-"));
+    const dump = join(dir, "dump.jsonl");
+    await create("compaction-recovery", { FAKE_PI_DUMP: dump });
+    const threadId = "t-pi-compaction-recovery-" + randomUUID();
+    const prompts = () =>
+      readFileSync(dump, "utf8").split("\n").filter(Boolean)
+        .map((line) => JSON.parse(line) as { prompt?: { message?: string } })
+        .filter((row) => row.prompt).map((row) => row.prompt!.message!);
+    const send = async (text: string, cursor?: string) => {
+      const { turnId } = await instance.adapter.sendTurn({
+        threadId,
+        text,
+        system: "Standing rules.\n\nMemory: likes quiet hours.",
+        systemStable: "Standing rules.",
+        systemVolatile: "Memory: likes quiet hours.",
+        ...(cursor ? { resumeCursor: cursor } : {}),
+      });
+      await recorder.until((e) => e.type === "turn.completed" && e.turnId === turnId);
+      const session = recorder.events.find((e) => e.type === "session.started" && e.turnId === turnId) as { sessionId: string };
+      return { message: prompts().at(-1)!, cursor: session.sessionId };
+    };
+
+    // The establishing turn ends, pi schedules overflow-recovery compaction
+    // after a non-terminal agent_end, and only then resumes for the final
+    // turn and the terminal agent_end. Settling at turn_end would kill the
+    // child before the late compaction events could drop the receipt.
+    const first = await send("first");
+    expect(first.message).toBe("Standing rules.\n\nMemory: likes quiet hours.\n\nfirst");
+    // The recovery compaction summarized the delivery away: the next turn
+    // re-establishes the standing prompt instead of running bare against a
+    // receipt the missed events should have invalidated.
+    const second = await send("second", first.cursor);
+    expect(second.message).toBe("Standing rules.\n\nMemory: likes quiet hours.\n\nsecond");
+  });
+
   it("re-anchors the full prompt after eight bare turns on one session", async () => {
     const dir = mkdtempSync(join(tmpdir(), "omb-pi-reanchor-"));
     const dump = join(dir, "dump.jsonl");

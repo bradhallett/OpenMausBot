@@ -71,6 +71,10 @@ const NODE_ENV_FLAG = { ELECTRON_RUN_AS_NODE: "1" };
  * miss (an older pi, a missed line) still loses at most this many turns
  * of standing instructions instead of the rest of the session. */
 const PI_PROMPT_RE_ANCHOR_TURNS = 8;
+/** How long the driver keeps listening after a finished turn_end for the
+ * run's terminal agent_end before settling anyway: a runtime that never
+ * emits agent_end still completes, while one that does cancels the wait. */
+const PI_AGENT_END_GRACE_MS = 60_000;
 
 type PiPromptImage = {
   type: "image";
@@ -430,6 +434,8 @@ interface PiEvent {
   // turn_end / message_end
   message?: { stopReason?: string; errorMessage?: string; usage?: { input?: number; output?: number } };
   usage?: { input?: number; output?: number };
+  // agent_end
+  isTerminal?: boolean;
   // extension_ui_request
   id?: string;
   method?: string;
@@ -533,6 +539,13 @@ export const PiDriver: ProviderDriver<PiConfig> = {
       // closure (send, child) alive until it fires.
       const askTimers = new Set<ReturnType<typeof setTimeout>>();
       let settled = false;
+      // the last turn_end's outcome, replayed when the run's terminal
+      // agent_end (or the grace fallback) settles the turn
+      let endStopReason: string | undefined;
+      let endUsage: { input?: number; output?: number } | undefined;
+      let endErrorMessage: string | undefined;
+      // hang insurance for runtimes with no agent_end frame at all
+      let agentEndTimer: ReturnType<typeof setTimeout> | null = null;
       // pi's RPC surface accepts image content directly. Read before spawning
       // so an attachment that disappeared produces one clear dispatch error
       // instead of starting a child that can never receive its prompt.
@@ -632,6 +645,10 @@ export const PiDriver: ProviderDriver<PiConfig> = {
       const settle = (ok: boolean, stopReason?: string | null, usage?: { input?: number; output?: number }) => {
         if (settled) return;
         settled = true;
+        if (agentEndTimer) {
+          clearTimeout(agentEndTimer);
+          agentEndTimer = null;
+        }
         // The turn is over: drop unanswered asks so their 15-minute
         // fail-safe timers are cancelled outright instead of no-oping on a
         // dead child while holding the ask closure alive.
@@ -664,6 +681,24 @@ export const PiDriver: ProviderDriver<PiConfig> = {
           }
         }
         active.delete(threadId);
+      };
+
+      /** Settle from the last turn_end's recorded outcome. Errors surface
+       * here, at run completion, so a failed run reports exactly once and
+       * only after any scheduled maintenance events had their chance to
+       * arrive. */
+      const finishRun = () => {
+        const sr = endStopReason;
+        if (sr === "error" || sr === "failed") {
+          emit({
+            ...base(threadId, turnId),
+            type: "runtime.error",
+            message: String(endErrorMessage ?? "pi turn failed").slice(0, 2_000),
+          });
+          settle(false, "failed", endUsage);
+          return;
+        }
+        settle(true, sr === "cancelled" || sr === "aborted" ? "cancelled" : "end_turn", endUsage);
       };
 
       const stop = () => {
@@ -809,7 +844,9 @@ export const PiDriver: ProviderDriver<PiConfig> = {
             return;
           }
           case "compaction_start":
-          case "compaction_end": {
+          case "compaction_end":
+          case "auto_compaction_start":
+          case "auto_compaction_end": {
             // pi compaction (manual or automatic) summarizes older
             // messages, which can absorb the turn that carried this
             // session's standing prompt. Both events ride the RPC surface
@@ -825,22 +862,38 @@ export const PiDriver: ProviderDriver<PiConfig> = {
             return;
           }
           case "turn_end":
-          case "agent_end": {
+          {
             const sr = evt.message?.stopReason;
             // toolUse means pi ran a tool and auto-continues next turn to
-            // answer — settling now would drop the final reply.
+            // answer — the run is not over, and the next turn_end carries
+            // the real outcome.
             if (sr === "toolUse" || sr === "tool_use" || sr === "tool_calls") return;
-            const usage = evt.usage ?? evt.message?.usage;
-            if (sr === "error" || sr === "failed") {
-              emit({
-                ...base(threadId, turnId),
-                type: "runtime.error",
-                message: String(evt.message?.errorMessage ?? "pi turn failed").slice(0, 2_000),
-              });
-              settle(false, "failed", usage);
-              return;
+            endStopReason = sr;
+            endUsage = evt.usage ?? evt.message?.usage;
+            endErrorMessage = evt.message?.errorMessage;
+            // agent_end, not turn_end, closes the run: pi can schedule
+            // post-run maintenance (overflow-recovery compaction) after
+            // the final turn_end, and only the terminal agent_end proves
+            // the session is done rewriting itself. The grace timer
+            // settles a runtime that never sends agent_end at all.
+            if (agentEndTimer) clearTimeout(agentEndTimer);
+            agentEndTimer = setTimeout(finishRun, PI_AGENT_END_GRACE_MS);
+            agentEndTimer.unref?.();
+            return;
+          }
+          case "agent_end": {
+            // isTerminal !== false is the RPC contract's terminal settle.
+            // isTerminal: false means maintenance or async delivery has
+            // scheduled more work (post-run compaction, a retry), so the
+            // session may still rewrite the turn that carried this
+            // session's standing prompt — keep listening so those events
+            // can drop the prompt-split receipt.
+            if (evt.isTerminal === false) return;
+            if (agentEndTimer) {
+              clearTimeout(agentEndTimer);
+              agentEndTimer = null;
             }
-            settle(true, sr === "cancelled" || sr === "aborted" ? "cancelled" : "end_turn", usage);
+            finishRun();
             return;
           }
           default:
