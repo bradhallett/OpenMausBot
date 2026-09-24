@@ -5509,6 +5509,53 @@ describe("harness HTTP API", () => {
           )),
         },
       );
+      // A newer request can supersede the card while its encrypted phone
+      // save is still in flight. The completing save must reject instead of
+      // marking the superseded card provided and dispatching its
+      // continuation; only the fresh card can still resolve. This runs on a
+      // third bot, before any credential is configured, so the ownership
+      // fixtures below keep their own cards untouched.
+      const raceBot = await createBot();
+      const raceThread = raceBot.threadId as string;
+      const supersededRequest = await requestCredential(raceBot.id, raceThread);
+      const raceCard = async (messageId: string) => (await isolatedApi("GET", "/api/bots?messages=20")).body.bots
+        .find((bot: { id: string }) => bot.id === raceBot.id).messages
+        .find((message: { id: string }) => message.id === messageId);
+      const supersededEnvelope = await sealPhoneSecretForTest({
+        version: 1,
+        keyId: PHONE_SECRET_TEST_IDENTITY.keyId,
+        deviceId,
+        botId: raceBot.id,
+        threadId: raceThread,
+        messageId: supersededRequest.messageId,
+        target: "openaiImageApiKey",
+        requestKey: (await raceCard(supersededRequest.messageId)).secret.requestKey,
+      }, "sk-test-superseded");
+      const supersededProvide = provide(raceBot.id, supersededRequest.messageId, supersededEnvelope);
+      await expect.poll(() => readdirSync(isolatedGate).filter((name) => name.endsWith(".started")).length).toBe(1);
+      const freshRequest = await requestCredential(raceBot.id, raceThread);
+      writeFileSync(releaseFile, "release");
+      const rejected = await supersededProvide;
+      expect(rejected.status).toBe(409);
+      expect(await rejected.json()).toMatchObject({ error: expect.stringMatching(/superseded by a newer one/i) });
+      expect((await raceCard(supersededRequest.messageId)).secret).toMatchObject({ superseded: true });
+      expect((await raceCard(supersededRequest.messageId)).secret.provided).not.toBe(true);
+      const freshEnvelope = await sealPhoneSecretForTest({
+        version: 1,
+        keyId: PHONE_SECRET_TEST_IDENTITY.keyId,
+        deviceId,
+        botId: raceBot.id,
+        threadId: raceThread,
+        messageId: freshRequest.messageId,
+        target: "openaiImageApiKey",
+        requestKey: (await raceCard(freshRequest.messageId)).secret.requestKey,
+      }, "sk-test-fresh-card");
+      const freshProvide = await provide(raceBot.id, freshRequest.messageId, freshEnvelope);
+      expect(freshProvide.status).toBe(200);
+      expect(await freshProvide.json()).toEqual({ provided: true, resumed: true });
+      // Hand the gate back to the ownership fixtures below: their saves must
+      // start held, with a clean slate of started markers.
+      for (const name of readdirSync(isolatedGate)) rmSync(join(isolatedGate, name));
       provideRequests.push(...[
         provide(direct.id, directRequest.messageId, directEnvelope),
         provide(channelOwner.id, groupRequest.messageId, groupEnvelope),

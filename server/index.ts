@@ -11929,6 +11929,12 @@ async function provideSecretFromPhone(
     if (current.secret.dismissed) {
       throw new PhoneSecretError("This credential request was dismissed", 409);
     }
+    // The request route may have superseded this card while the encrypted
+    // save was in flight. Completing the superseded card would mark it
+    // provided and dispatch its continuation, leaving two cards resolved.
+    if (current.secret.superseded) {
+      throw new PhoneSecretError("This credential request was superseded by a newer one", 409);
+    }
     // Electron acknowledges only after credentials.bin and the server's
     // external-secret config update both commit. Keep this assertion at the
     // boundary so a future parent handler cannot accidentally resume first.
