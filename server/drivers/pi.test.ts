@@ -330,7 +330,7 @@ describe("PiDriver turns (fake CLI)", () => {
     expect(secondSession?.sessionId).toBe(firstSession?.sessionId);
   });
 
-  it("delivers the full prompt once per session and rides volatile changes as notes", async () => {
+  it("delivers the full prompt on every turn so compaction cannot strand the session", async () => {
     const dir = mkdtempSync(join(tmpdir(), "omb-pi-split-"));
     const dump = join(dir, "dump.jsonl");
     await create(undefined, { FAKE_PI_DUMP: dump });
@@ -355,16 +355,13 @@ describe("PiDriver turns (fake CLI)", () => {
       return { message: prompts().at(-1)!, cursor: session.sessionId };
     };
 
-    // The establishing turn carries the full prompt, exactly as before.
+    // pi summarizes older user messages when it compacts, and the prompt
+    // rides a user message: every turn re-delivers it in full so a
+    // compacted session never loses its standing instructions.
     const first = await send("first", "Memory: likes quiet hours.");
     expect(first.message).toBe("Standing rules.\n\nMemory: likes quiet hours.\n\nfirst");
-    // The resumed session already carries it: later turns go through bare.
-    const second = await send("second", "Memory: likes quiet hours.", first.cursor);
-    expect(second.message).toBe("second");
-    // A changed volatile half rides the next prompt as a labelled note.
-    const third = await send("third", "Memory: moved to Toronto.", first.cursor);
-    expect(third.message)
-      .toBe("Context from OpenMausBot updated since this conversation started; it replaces any earlier copy:\n\nMemory: moved to Toronto.\n\nthird");
+    const second = await send("second", "Memory: moved to Toronto.", first.cursor);
+    expect(second.message).toBe("Standing rules.\n\nMemory: moved to Toronto.\n\nsecond");
   });
 
   it("keeps the full prompt when no session could be established", async () => {
@@ -382,8 +379,7 @@ describe("PiDriver turns (fake CLI)", () => {
     const message = readFileSync(dump, "utf8").split("\n").filter(Boolean)
       .map((line) => JSON.parse(line) as { prompt?: { message?: string } })
       .find((row) => row.prompt)?.prompt?.message;
-    // Without a session the prompt is the model's only context: the turn
-    // keeps the full block and writes no receipt.
+    // Without a session the prompt is the model's only context.
     expect(message).toBe("Standing rules.\n\nMemory: likes quiet hours.\n\nbare");
   });
 

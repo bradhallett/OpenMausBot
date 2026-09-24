@@ -27,8 +27,6 @@ import { join } from "node:path";
 import { PROVIDER_CREDENTIAL_ENV, stripWorkspaceCredentialEnv } from "../config.ts";
 import { augmentedPath } from "../env-path.ts";
 import { describeSpawnFailure, execCli, killCliTree, spawnCli } from "../procs.ts";
-import { promptHalves, readPromptSplitReceipt, splitSessionPrompt, writePromptSplitReceipt } from "./prompt-split.ts";
-import type { PromptSplitReceipt } from "./prompt-split.ts";
 import { SPAWNED_PROXIES } from "../proxy-paths.ts";
 import { commandSummary, toolDetailPreview } from "../tool-summary.ts";
 
@@ -790,14 +788,12 @@ export const PiDriver: ProviderDriver<PiConfig> = {
       // sessionFile, which switch_session expects as `sessionPath`.
       const sessionPath = typeof turn.resumeCursor === "string" ? turn.resumeCursor : null;
       let sessionFile = sessionPath;
-      let sessionReady = false;
       try {
         const command = sessionPath ? "switch_session" : "new_session";
         const hsPromise = awaitResponse(command);
         send(sessionPath ? { type: "switch_session", sessionPath } : { type: "new_session" });
         const hs = (await hsPromise) as { sessionFile?: string; sessionId?: string } | undefined;
         if (hs?.sessionFile) sessionFile = hs.sessionFile;
-        sessionReady = true;
         emit({
           ...base(threadId, turnId),
           type: "session.started",
@@ -833,36 +829,15 @@ export const PiDriver: ProviderDriver<PiConfig> = {
         }
       }
 
-      // The stable/volatile split: the full prompt rides only the turn that
-      // establishes - or re-instructs, after a soul edit - this pi session,
-      // which previously re-sent the whole system prompt on every turn and
-      // let it accumulate in the session file once per turn. Receipts are
-      // durable because the session file outlives both the per-turn child
-      // and this process. Without a session the prompt is the model's only
-      // context, so that turn keeps the full block and writes no receipt.
-      const halves = promptHalves(turn);
-      let message: string;
-      let pendingReceipt: { key: string; receipt: PromptSplitReceipt } | null = null;
-      if (halves.stable !== null && sessionReady && sessionFile) {
-        const receiptKey = JSON.stringify([threadId, sessionFile]);
-        const composed = splitSessionPrompt(
-          halves.stable,
-          halves.volatile,
-          readPromptSplitReceipt("pi", receiptKey),
-          turn.system,
-          turn.text,
-          Boolean(turn.mentionTurn),
-        );
-        message = composed.text;
-        pendingReceipt = { key: receiptKey, receipt: composed.receipt };
-      } else {
-        message = turn.system ? `${turn.system}\n\n${turn.text}` : turn.text;
-      }
+      // pi compacts long sessions by summarizing older user messages, and
+      // this driver delivers the prompt as the leading user message: a
+      // receipt-based split would let a compacted session keep running
+      // bare, without its standing instructions. Re-deliver the full prompt
+      // every turn until pi exposes a compaction signal the harness can
+      // watch (its extension API has session_before_compact).
+      const message = turn.system ? `${turn.system}\n\n${turn.text}` : turn.text;
       try {
         send({ type: "prompt", message, ...(images.length ? { images } : {}) });
-        // the prompt left this process: only now may the receipt claim the
-        // session carried it, so a failed send redelivers on the next turn.
-        if (pendingReceipt) writePromptSplitReceipt("pi", pendingReceipt.key, pendingReceipt.receipt);
       } catch {
         settle(false);
       }
