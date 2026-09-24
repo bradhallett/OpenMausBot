@@ -412,6 +412,18 @@ const appConfigSchema = z.object({
       apiKey: optionalText,
       model: optionalText,
       threshold: z.number().min(0.5).max(1).optional(),
+      /** Which consumers may consult the model. Absent = none: the
+       * connection can be calibrated without anything acting on it. */
+      uses: z.object({ steerPolicy: z.boolean().optional() }).optional(),
+      /** The 1:1 busy-send chooser's knobs. Asymmetric by design: a wrong
+       * queue is undone with the Steer chip, a wrong steer costs the turn. */
+      steerPolicy: z
+        .object({
+          queueOverrideThreshold: z.number().min(0.5).max(1).optional(),
+          steerOverrideThreshold: z.number().min(0.5).max(1).optional(),
+          budgetMs: z.number().min(250).max(1500).optional(),
+        })
+        .optional(),
     })
     .optional(),
   /** Project key used for Sessions, catalog and agent tools. userId/sessionId
@@ -523,6 +535,12 @@ export interface AppConfig {
     apiKey?: string;
     model?: string;
     threshold?: number;
+    uses?: { steerPolicy?: boolean };
+    steerPolicy?: {
+      queueOverrideThreshold?: number;
+      steerOverrideThreshold?: number;
+      budgetMs?: number;
+    };
   };
   composio?: { apiKey?: string; userId?: string; sessionId?: string };
   box?: { token?: string };

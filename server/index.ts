@@ -245,6 +245,7 @@ import {
   restoreHeldSteeredQueue,
   restoreSteeredMessages,
   settleHeldSteeredQueue,
+  _queuedCount,
 } from "./steer-queue.ts";
 import {
   cancelChannelMessage,
@@ -384,11 +385,23 @@ import {
 import { readCuaConnection, readCuaUnavailableReason, gatedLocalComputer } from "./local-computer.ts";
 import {
   createCalibrationGate,
+  createDecisionModelClient,
   decisionModelBaseUrl,
   decisionModelConfigured,
   decisionThreshold,
   keyOverInsecureTransport,
 } from "./decision-model.ts";
+import {
+  admissionBudgetMs,
+  buildAdmissionState,
+  DEFAULT_QUEUE_OVERRIDE_THRESHOLD,
+  DEFAULT_STEER_OVERRIDE_THRESHOLD,
+  decideAdmission,
+  steerPrior,
+  validateAdmissionState,
+  type AdmissionLayer,
+  type AdmissionPreference,
+} from "./steer-policy.ts";
 import {
   discoverExistingPerBotLocalVms,
   localVmInventoryEntry,
@@ -673,6 +686,24 @@ function decisionChooserEnv(flow: string): Record<string, string> | null {
     OMB_DECISION_MODEL: section.model ?? "",
     OMB_DECISION_THRESHOLD: String(decisionThreshold(section)),
     OMB_DECISION_FLOW: flow,
+  };
+}
+/** The steer-policy chooser's connection: the same gate as the computer-use
+ * chooser (configured, key-safe, calibrated in this process), plus the
+ * asymmetric thresholds and the hot-path abort budget. Null means the
+ * per-bot preference decides alone — today's behavior, byte for byte. */
+function steerPolicyConnection() {
+  const section = cfg.decisionModel;
+  if (!section?.uses?.steerPolicy) return null;
+  if (!decisionModelConfigured(section) || keyOverInsecureTransport(section) || !decisionGate.cached(section)) return null;
+  const built = createDecisionModelClient(section);
+  if (!built) return null;
+  const policy = section.steerPolicy;
+  return {
+    client: built.client,
+    queueOverrideThreshold: policy?.queueOverrideThreshold ?? DEFAULT_QUEUE_OVERRIDE_THRESHOLD,
+    steerOverrideThreshold: policy?.steerOverrideThreshold ?? DEFAULT_STEER_OVERRIDE_THRESHOLD,
+    budgetMs: admissionBudgetMs(policy?.budgetMs),
   };
 }
 const hostedModels = hostedModelPolicy(DATA_DIR);
@@ -7582,6 +7613,45 @@ function turnGoal(threadId: string): string | null {
     return null;
   }
   return entry.text;
+}
+
+/** When the running turn's goal was recorded — i.e. when the turn started.
+ * The admission chooser uses it both as the elapsed-time signal and to tell
+ * a reply that targets a message born inside the running turn. */
+function turnGoalStart(threadId: string): number | null {
+  const entry = turnGoals.get(threadId);
+  if (!entry || Date.now() - entry.at > TURN_GOAL_TTL_MS) return null;
+  return entry.at;
+}
+
+/** One admission telemetry event per busy 1:1 send and each human Steer
+ * press, naming which layer decided (preference / model / mechanical /
+ * human). Metrics only — never propagated into the turn. */
+function publishAdmission(
+  threadId: string,
+  event: {
+    layer: AdmissionLayer;
+    decision: AdmissionPreference;
+    preference: AdmissionPreference;
+    detail: string;
+    confidence?: number;
+    model?: string;
+  },
+): void {
+  bus.publish({
+    eventId: newId(),
+    provider: "admission",
+    threadId,
+    createdAt: new Date().toISOString(),
+    type: "decision.admission",
+    surface: "direct",
+    layer: event.layer,
+    decision: event.decision,
+    preference: event.preference,
+    detail: event.detail,
+    ...(event.confidence !== undefined ? { confidence: event.confidence } : {}),
+    ...(event.model !== undefined ? { model: event.model } : {}),
+  });
 }
 
 /** The control endpoint is an in-process loopback, but the report still
@@ -18001,6 +18071,16 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (typeof body.parkDirectMessages !== "boolean") return json(res, 400, { error: "parkDirectMessages must be true or false" });
         patch.parkDirectMessages = body.parkDirectMessages;
       }
+      // Preferred admission when this bot's 1:1 thread is busy: fold new
+      // words into the live turn (steer, the historical default) or queue
+      // them for the next turn. The decision-model steer policy may override
+      // this at confidence; it never changes anything else about the seam.
+      if (body.defaultAdmission !== undefined) {
+        if (body.defaultAdmission !== "steer" && body.defaultAdmission !== "queue") {
+          return json(res, 400, { error: "defaultAdmission must be steer or queue" });
+        }
+        patch.defaultAdmission = body.defaultAdmission;
+      }
       // Per-bot selection of app-wide MCP servers. Omitted keeps the current
       // selection; null restores all enabled servers; [] explicitly mounts none.
       let requestedMcpServers = existingBot?.mcpServers;
@@ -18989,14 +19069,68 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             // admission can hand it to the provider natively.
             const carriesImages = extractTurnImages(text).images.length > 0;
             const steerTarget = handoffs.current(threadId);
+            const computerSelected = Boolean(computerSelectionTurns.get(threadId)?.selected);
+            const engineCanSteer = instance?.adapter.capabilities.queueing === true && typeof instance.adapter.steer === "function";
+            // L0 stays the shared admission module's verdict (slice 1); the
+            // chooser only layers preference and confident overrides on top.
             const busyAdmission = admit("direct-busy", {
               carriesImages,
-              pendingComputerSelection: Boolean(computerSelectionTurns.get(threadId)?.selected),
-              engineCanSteer: Boolean(instance?.adapter.capabilities.queueing && instance.adapter.steer),
+              pendingComputerSelection: computerSelected,
+              engineCanSteer,
             });
+            const canSteer = busyAdmission.action === "steer";
+            // Admission (steer-vs-queue) in layers: mechanical clamps first,
+            // then the user's per-bot preference, then — only when a
+            // calibrated decision model is opted in — a confident override
+            // with asymmetric thresholds. The model's only power is to
+            // withhold or redirect a steer it is confident about; abstain,
+            // low confidence, errors and timeouts all mean "preference".
+            const preference: AdmissionPreference = currentAtStart.defaultAdmission === "queue" ? "queue" : "steer";
+            const goalStartedAt = turnGoalStart(threadId);
+            const state = buildAdmissionState({
+              message: text,
+              runningTurnOpeningRequest: turnGoal(threadId),
+              runningTurnStartedAt: goalStartedAt,
+              queueDepth: _queuedCount(threadId),
+              replyToRunningTurn: Boolean(replyTo && goalStartedAt !== null && replyTo.at >= goalStartedAt),
+              unattended: isUnattended(bot.id, threadId),
+              engine: currentAtStart.modelSelection?.instanceId ?? "",
+              sender: auth.kind,
+            });
+            let admission: AdmissionPreference = canSteer ? preference : "queue";
+            let report: { layer: AdmissionLayer; detail: string; confidence?: number; model?: string };
+            const connection = canSteer ? steerPolicyConnection() : null;
+            if (!canSteer) {
+              report = {
+                layer: "mechanical-clamp",
+                detail: carriesImages ? "images" : computerSelected ? "computer-selection" : "engine-cannot-steer",
+              };
+            } else if (!connection) {
+              report = { layer: "preference-default", detail: "model-off" };
+            } else if (preference === "queue" && !steerPrior(state)) {
+              // Volume cut: a queue-preferring bot consults the model only
+              // when a steer prior exists; otherwise the preference stands
+              // without a model call, saving hot-path latency and privacy
+              // exposure.
+              report = { layer: "preference-default", detail: "no-steer-prior" };
+            } else if (!validateAdmissionState(state)) {
+              report = { layer: "preference-default", detail: "state-invalid" };
+            } else {
+              const decision = await decideAdmission({
+                client: connection.client,
+                preference,
+                queueOverrideThreshold: connection.queueOverrideThreshold,
+                steerOverrideThreshold: connection.steerOverrideThreshold,
+                budgetMs: connection.budgetMs,
+                state,
+              });
+              admission = decision.action;
+              report = decision;
+            }
+            publishAdmission(threadId, { ...report, decision: admission, preference });
             // steer was offered only when a live instance could take it;
             // the second check carries that fact to the type system.
-            if (busyAdmission.action === "steer" && instance?.adapter.steer) {
+            if (canSteer && admission === "steer" && instance?.adapter.steer) {
               steered = await instance.adapter
                 .steer(threadId, promptWithReply(text, replyTo, cfg.profile?.name?.trim() || "User"))
                 .catch((): SteerOutcome => "indeterminate");
@@ -19135,6 +19269,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         for (const message of messages) handoffs.steered(bot.threadId, steerTarget, instance?.instanceId, message.id);
         const queueIds = held.items.map((item) => item.messageId);
         settleHeldSteeredQueue(held);
+        publishAdmission(bot.threadId, {
+          layer: "human",
+          decision: "steer",
+          preference: bot.defaultAdmission === "queue" ? "queue" : "steer",
+          detail: "queue-steer-pressed",
+        });
         return json(res, 200, { ok: true, steered: true, threadId: bot.threadId, messages, queueIds });
       }
       if (steered === "indeterminate") {
@@ -19150,6 +19290,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // The turn may have settled while the steer was refused; a queue that
       // is now drainable must not strand behind a missed settle.
       if (current && !current.busy) drainQueuedSends();
+      publishAdmission(bot.threadId, {
+        layer: "human",
+        decision: "queue",
+        preference: bot.defaultAdmission === "queue" ? "queue" : "steer",
+        detail: "queue-steer-refused",
+      });
       return json(res, 200, { ok: true, queued: true, threadId: bot.threadId });
     }
 
