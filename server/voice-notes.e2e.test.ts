@@ -104,7 +104,9 @@ it("advertises send_voice_note to a ready bot and attaches the clip to the settl
   expect(files).toHaveLength(1);
   expect(audio.path.endsWith(files[0])).toBe(true);
   const stored = join(f.attachmentsDir(), files[0]);
-  expect(statSync(stored).mode & 0o777).toBe(0o600);
+  // Windows cannot represent a POSIX owner-only mode; writeFileAtomic's 0600
+  // is enforced where it exists, like every other attachment-mode assertion.
+  if (process.platform !== "win32") expect(statSync(stored).mode & 0o777).toBe(0o600);
   expect(readFileSync(stored).equals(MP3)).toBe(true);
 }), 60_000);
 
@@ -168,5 +170,4 @@ it("deletes a parked voice note when the turn is cancelled mid-flight", async ()
   await f.api("/api/bots/" + bot.id + "/interrupt", { threadId: bot.activeTaskId });
   await expect.poll(() => f.mp3Files(), { timeout: 20_000 }).toEqual([]);
 }), 90_000);
-
 
