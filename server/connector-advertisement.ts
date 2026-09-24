@@ -29,6 +29,15 @@ export const CONNECTOR_META_TOOLS: readonly string[] = [
   "COMPOSIO_SEARCH_TOOLS",
   "COMPOSIO_GET_TOOL_SCHEMAS",
   "COMPOSIO_MULTI_EXECUTE_TOOL",
+  // Session-level connection meta-tools. COMPOSIO_MANAGE_CONNECTIONS ships
+  // in every Composio session; COMPOSIO_WAIT_FOR_CONNECTIONS is opt-in and
+  // off by default. They prefix as service "composio", which no grant
+  // names, so they ride this list instead of CONNECTION_TOOL_SUFFIXES —
+  // connector-proxy intercepts their calls to surface connection cards.
+  // The filter only keeps names upstream actually lists, so advertising an
+  // opted-out tool changes nothing.
+  "COMPOSIO_MANAGE_CONNECTIONS",
+  "COMPOSIO_WAIT_FOR_CONNECTIONS",
 ];
 
 const CONNECTION_TOOL_SUFFIXES = ["_MANAGE_CONNECTIONS", "_WAIT_FOR_CONNECTIONS"];

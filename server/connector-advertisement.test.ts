@@ -52,6 +52,10 @@ describe("connector tool advertisement", () => {
     expect(connectorToolAdvertised("COMPOSIO_SEARCH_TOOLS", partial)).toBe(true);
     expect(connectorToolAdvertised("COMPOSIO_GET_TOOL_SCHEMAS", partial)).toBe(true);
     expect(connectorToolAdvertised("COMPOSIO_MULTI_EXECUTE_TOOL", partial)).toBe(true);
+    // Session-level connection meta-tools prefix as service "composio",
+    // which no grant names, so they ride the meta-tool list.
+    expect(connectorToolAdvertised("COMPOSIO_MANAGE_CONNECTIONS", partial)).toBe(true);
+    expect(connectorToolAdvertised("COMPOSIO_WAIT_FOR_CONNECTIONS", partial)).toBe(true);
     // not granted: another tool on the granted service, another service
     expect(connectorToolAdvertised("GMAIL_GET_EMAIL", partial)).toBe(false);
     expect(connectorToolAdvertised("SLACK_POST_MESSAGE", partial)).toBe(false);
@@ -68,6 +72,8 @@ describe("connector tool advertisement", () => {
   it("advertises nothing at all — not even the meta-tools — when no tools are granted", () => {
     const none = grants({});
     expect(connectorToolAdvertised("COMPOSIO_SEARCH_TOOLS", none)).toBe(false);
+    expect(connectorToolAdvertised("COMPOSIO_MANAGE_CONNECTIONS", none)).toBe(false);
+    expect(connectorToolAdvertised("COMPOSIO_WAIT_FOR_CONNECTIONS", none)).toBe(false);
     expect(connectorToolAdvertised("GMAIL_SEND_EMAIL", none)).toBe(false);
     expect(connectorToolAdvertised("GMAIL_MANAGE_CONNECTIONS", none)).toBe(false);
   });
@@ -82,6 +88,8 @@ describe("tools/list frame filtering", () => {
         { name: "COMPOSIO_SEARCH_TOOLS" },
         { name: "COMPOSIO_GET_TOOL_SCHEMAS" },
         { name: "COMPOSIO_MULTI_EXECUTE_TOOL" },
+        { name: "COMPOSIO_MANAGE_CONNECTIONS" },
+        { name: "COMPOSIO_WAIT_FOR_CONNECTIONS" },
         { name: "GMAIL_SEND_EMAIL", description: "send" },
         { name: "GMAIL_GET_EMAIL", description: "read" },
         { name: "GMAIL_MANAGE_CONNECTIONS" },
@@ -97,6 +105,8 @@ describe("tools/list frame filtering", () => {
       "COMPOSIO_SEARCH_TOOLS",
       "COMPOSIO_GET_TOOL_SCHEMAS",
       "COMPOSIO_MULTI_EXECUTE_TOOL",
+      "COMPOSIO_MANAGE_CONNECTIONS",
+      "COMPOSIO_WAIT_FOR_CONNECTIONS",
       "GMAIL_SEND_EMAIL",
       "GMAIL_MANAGE_CONNECTIONS",
     ]);

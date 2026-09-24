@@ -805,15 +805,23 @@ export async function connectedServices(cfg: AppConfig): Promise<Record<string, 
 /** Semantic validation for a connectorTools patch (issue #1737): slugs
  * must name a connected service, and every listed tool name must carry its
  * own service prefix (GMAIL_SEND_EMAIL under "gmail") — a mismatched name
- * would be granted yet permanently refused at call time. Tool names are
- * cross-checked against the marketplace catalog when the live catalog is
- * reachable; the curated fallback and an unreachable connection inventory
- * never block the patch, because call-time enforcement (slice 2) stays
- * the authority either way. Returns the rejection message or null. */
+ * would be granted yet permanently refused at call time. The prefix check
+ * is purely local, so it always runs; only the connection-dependent and
+ * catalog checks fail open — an unreachable connection inventory, the
+ * curated fallback, or a catalog walk that did not reach its end never
+ * block the patch, because call-time enforcement (slice 2) stays the
+ * authority either way. Returns the rejection message or null. */
 export async function validateConnectorGrants(
   cfg: AppConfig,
   grants: Record<string, ConnectorToolGrant>,
 ): Promise<string | null> {
+  for (const [slug, grant] of Object.entries(grants)) {
+    if (grant.tools === "*") continue;
+    const misplaced = grant.tools.filter((tool) => serviceSlugFor(tool) !== slug);
+    if (misplaced.length) {
+      return `connectorTools.${slug}.tools names tools that belong to another service: ${misplaced.join(", ")}`;
+    }
+  }
   let connected: Record<string, ConnectorServiceState>;
   try {
     connected = await connectedServices(cfg);
@@ -824,17 +832,12 @@ export async function validateConnectorGrants(
   if (unconnected.length) {
     return `connectorTools names services that are not connected: ${unconnected.join(", ")}`;
   }
-  for (const [slug, grant] of Object.entries(grants)) {
-    if (grant.tools === "*") continue;
-    const misplaced = grant.tools.filter((tool) => serviceSlugFor(tool) !== slug);
-    if (misplaced.length) {
-      return `connectorTools.${slug}.tools names tools that belong to another service: ${misplaced.join(", ")}`;
-    }
-  }
   const catalog = await listToolkits(cfg);
-  // source "curated" means the marketplace was unreachable (or served an
-  // empty walk), so there is nothing trustworthy to cross-check against.
-  if (catalog.source !== "api" || catalog.cards.length === 0) return null;
+  // source "curated" means the marketplace was unreachable, and a walk that
+  // never reached its natural end served only part of it — either way there
+  // is nothing trustworthy to cross-check against, and a grant for a service
+  // on a page the walk never saw must not be rejected.
+  if (catalog.source !== "api" || !catalog.pagination?.complete) return null;
   const known = new Set(catalog.cards.map((card) => card.slug.toLowerCase()));
   const unknown = Object.keys(grants).filter((slug) => !known.has(slug));
   if (unknown.length) {
@@ -1085,6 +1088,11 @@ export interface CatalogPagination {
   totalItems?: number;
   /** True when paging stopped before the reported total. */
   stalled: boolean;
+  /** True only when the walk reached its natural end — the last page
+   * offered no cursor, or the reported page counts said done — without
+   * stalling. stalled needs upstream totals to compare against; complete
+   * also covers a mid-walk failure on an API that reports none. */
+  complete: boolean;
 }
 
 /**
@@ -1195,7 +1203,12 @@ export async function listToolkits(cfg: AppConfig): Promise<{ cards: ToolkitCard
         const pagingStoppedEarly = lastReportedPage !== undefined
           && reportedTotalPages !== undefined
           && lastReportedPage < reportedTotalPages;
-        const pagination: CatalogPagination = { items: uniqueCards.length, stalled: shortOfReportedTotal || pagingStoppedEarly };
+        const stalled = shortOfReportedTotal || pagingStoppedEarly;
+        // "end" and "total-reached" are the walk's natural finishes; every
+        // other stop reason left pages unread even when the API reports no
+        // totals for stalled to compare against.
+        const complete = (stop === "end" || stop === "total-reached") && !stalled;
+        const pagination: CatalogPagination = { items: uniqueCards.length, stalled, complete };
         if (reportedTotalItems !== undefined) pagination.totalItems = reportedTotalItems;
         if (pagination.stalled) {
           console.warn(

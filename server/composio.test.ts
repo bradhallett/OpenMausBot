@@ -97,7 +97,8 @@ beforeAll(async () => {
 
     const apiKey = String(req.headers["x-api-key"] ?? "");
     if (!["ak_test", "ak_catalog_a", "ak_catalog_b", "ak_catalog_pages", "ak_catalog_partial", "ak_catalog_stuck",
-        "ak_catalog_page_stuck", "ak_catalog_exhausted", "ak_catalog_stalled_total", "ak_catalog_end_short"].includes(apiKey)) {
+        "ak_catalog_page_stuck", "ak_catalog_exhausted", "ak_catalog_stalled_total", "ak_catalog_end_short",
+        "ak_catalog_http_no_total"].includes(apiKey)) {
       res.writeHead(401, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { message: "invalid project key" } }));
     }
@@ -121,6 +122,7 @@ beforeAll(async () => {
         || apiKey === "ak_catalog_exhausted"
         || apiKey === "ak_catalog_stalled_total"
         || apiKey === "ak_catalog_end_short"
+        || apiKey === "ak_catalog_http_no_total"
       )
     ) {
       if (apiKey === "ak_catalog_stuck") {
@@ -177,6 +179,23 @@ beforeAll(async () => {
           items: [{ slug: "gmail", name: "Gmail" }],
           current_page: 1,
           total_pages: 4,
+        }));
+      }
+      if (apiKey === "ak_catalog_http_no_total") {
+        // Reports neither totals nor page counts, so a lost second page can
+        // only be caught by tracking walk completion, not by stalled.
+        if (url.searchParams.get("cursor") === "catalog-page-2") {
+          res.writeHead(502, { "content-type": "application/json" });
+          return res.end(JSON.stringify({ error: "catalog page unavailable" }));
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({
+          items: [
+            { slug: "gmail", name: "Gmail" },
+            { slug: "bland_ai", name: "Bland AI" },
+            { slug: "currencyscoop", name: "CurrencyScoop" },
+          ],
+          next_cursor: "catalog-page-2",
         }));
       }
       // Mirrors the real marketplace: a usage-sorted head, then an alphabetical
@@ -397,7 +416,7 @@ describe.sequential("Composio Sessions", () => {
 
     // "Deepgram" only exists on page two: #634 saw the catalog stop at "CurrencyScoop".
     expect(cards.map((card) => card.slug)).toEqual(["gmail", "bland_ai", "currencyscoop", "deepgram", "zoom"]);
-    expect(pagination).toEqual({ items: 5, totalItems: 5, stalled: false });
+    expect(pagination).toEqual({ items: 5, totalItems: 5, stalled: false, complete: true });
     const pages = calls.slice(before).filter((call) => call.path === "/api/v3/toolkits");
     expect(pages).toHaveLength(2);
     expect(pages[0]?.query).not.toContain("cursor=");
@@ -424,7 +443,7 @@ describe.sequential("Composio Sessions", () => {
     const { cards, pagination } = await listToolkits({ composio: { apiKey: "ak_catalog_page_stuck" } });
 
     expect(cards).toEqual([expect.objectContaining({ slug: "gmail" })]);
-    expect(pagination).toEqual({ items: 1, stalled: true });
+    expect(pagination).toEqual({ items: 1, stalled: true, complete: false });
     expect(calls.slice(before).filter((call) => call.path === "/api/v3/toolkits")).toHaveLength(2);
   });
 
@@ -432,7 +451,7 @@ describe.sequential("Composio Sessions", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const { pagination } = await listToolkits({ composio: { apiKey: "ak_catalog_stalled_total" } });
-      expect(pagination).toEqual({ items: 1, totalItems: 1540, stalled: true });
+      expect(pagination).toEqual({ items: 1, totalItems: 1540, stalled: true, complete: false });
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("partial marketplace"));
     } finally {
       warn.mockRestore();
@@ -443,7 +462,7 @@ describe.sequential("Composio Sessions", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const { pagination } = await listToolkits({ composio: { apiKey: "ak_catalog_end_short" } });
-      expect(pagination).toEqual({ items: 1, stalled: true });
+      expect(pagination).toEqual({ items: 1, stalled: true, complete: false });
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("partial marketplace"));
     } finally {
       warn.mockRestore();
@@ -454,7 +473,7 @@ describe.sequential("Composio Sessions", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const { pagination } = await listToolkits({ composio: { apiKey: "ak_catalog_partial" } });
-      expect(pagination).toEqual({ items: 3, totalItems: 5, stalled: true });
+      expect(pagination).toEqual({ items: 3, totalItems: 5, stalled: true, complete: false });
     } finally {
       warn.mockRestore();
     }
@@ -466,6 +485,11 @@ describe.sequential("Composio Sessions", () => {
     const second = await listToolkits({ composio: { apiKey: "ak_catalog_stalled_total" } });
     expect(second.pagination).toEqual(first.pagination);
     expect(calls.slice(before)).toHaveLength(0);
+  });
+
+  it("marks a catalog that lost a page incomplete even with no totals to compare", async () => {
+    const { pagination } = await listToolkits({ composio: { apiKey: "ak_catalog_http_no_total" } });
+    expect(pagination).toEqual({ items: 3, stalled: false, complete: false });
   });
 
   it("stops at the reported last page even when a cursor is still offered", async () => {
@@ -877,10 +901,13 @@ describe.sequential("Composio Sessions", () => {
     await expect(validateConnectorGrants(cfg, { gmail: { tools: ["GMAIL_SEND_EMAIL"] } })).resolves.toMatch(/missing from the connected-apps catalog: gmail/);
   });
 
-  it("never blocks a grant patch when the connection inventory is unreachable", async () => {
+  it("never blocks a grant patch when the connection inventory is unreachable, but still checks prefixes", async () => {
     // No project key and no broker: connectedServices cannot run, so the
-    // semantic checks step aside and call-time enforcement stays the gate.
+    // connection and catalog checks step aside and call-time enforcement
+    // stays the gate. The prefix check is purely local, so it still runs —
+    // a tool filed under the wrong service is broken no matter what.
     await expect(validateConnectorGrants({}, { anything: { tools: ["ANYTHING_DO_IT"] } })).resolves.toBeNull();
+    await expect(validateConnectorGrants({}, { gmail: { tools: ["SLACK_POST_MESSAGE"] } })).resolves.toMatch(/another service/);
     setManagedBrokerAccess({ url: origin + "/broker", token: "a".repeat(64) });
     try {
       // The broker serves github as connected and its catalog lists github.
@@ -889,6 +916,16 @@ describe.sequential("Composio Sessions", () => {
     } finally {
       setManagedBrokerAccess(null);
     }
+  });
+
+  it("does not reject grants against a catalog walk that never finished", async () => {
+    const cfg: AppConfig = {
+      composio: { apiKey: "ak_catalog_http_no_total", userId: "openmausbot_existing", sessionId: "trs_test" },
+    };
+    // github is connected, but the catalog lost its page mid-walk with no
+    // reported totals: the partial catalog cannot vouch for what it never
+    // saw, so the catalog check steps aside.
+    await expect(validateConnectorGrants(cfg, { github: { tools: ["GITHUB_CREATE_ISSUE"] } })).resolves.toBeNull();
   });
 
   it("reports connection state, creates auth links and revokes disconnects", async () => {
