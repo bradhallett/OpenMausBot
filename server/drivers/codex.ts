@@ -1511,6 +1511,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           promptSplit ? turn.systemVolatile ?? "" : "",
           resumedNativeThread,
           request,
+          Boolean(turn.mentionTurn),
         );
         // A changed volatile half rides the next user input as a labelled
         // context block. It never touches the developer slot, so an

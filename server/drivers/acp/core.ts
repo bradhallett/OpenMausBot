@@ -1578,6 +1578,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
                 readPromptSplitReceipt(DRIVER_KIND, receiptKey),
                 promptTurn.system,
                 promptTurn.text,
+                Boolean(turn.mentionTurn),
               );
               promptInput = { ...promptTurn, system: "", text: composed.text };
               writePromptSplitReceipt(DRIVER_KIND, receiptKey, composed.receipt);

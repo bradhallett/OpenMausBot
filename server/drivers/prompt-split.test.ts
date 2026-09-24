@@ -77,6 +77,16 @@ describe("splitSessionPrompt", () => {
     expect(still.text).toBe("still");
   });
 
+  it("redelivers an unchanged volatile half on a turn that carries its own mention context", () => {
+    const first = splitSessionPrompt("stable rules.", "Tagged: @Testy", null, fullSystem, "first");
+    const untagged = splitSessionPrompt("stable rules.", "Tagged: @Testy", first.receipt, fullSystem, "untagged");
+    expect(untagged.text).toBe("untagged");
+    const tagged = splitSessionPrompt("stable rules.", "Tagged: @Testy", first.receipt, fullSystem, "tagged", true);
+    expect(tagged.text).toContain("replaces any earlier copy");
+    expect(tagged.text).toContain("Tagged: @Testy");
+    expect(tagged.text.endsWith("tagged")).toBe(true);
+  });
+
   it("re-delivers the full prompt when the stable half changes", () => {
     const first = splitSessionPrompt("old rules.", "memory", null, fullSystem, "first");
     const second = splitSessionPrompt("new rules.", "memory", first.receipt, "new rules.\n\nmemory", "second");

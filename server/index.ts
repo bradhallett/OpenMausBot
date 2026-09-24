@@ -8134,6 +8134,9 @@ async function startTurn(
         system: prompt.text,
         systemStable: prompt.stable,
         systemVolatile: prompt.volatile,
+        // the mentions half describes this turn: identical consecutive tags
+        // must still deliver their note (SendTurnInput.mentionTurn)
+        mentionTurn: tagged.length > 0,
         integrations,
         mcpFromUserConfig: claudeUserMcpEnabled(cfg) && !managedPolicy.restrictsMcp(),
         cwd,

@@ -251,7 +251,7 @@ describe("CodexDriver turns (fake app-server)", () => {
     await create({ mode: "resume" });
     // each turn spawns a fresh app-server whose dump overwrites the file, so
     // every turn writes its own and the assertions stay per-turn
-    const send = async (dumpName: string, text: string, volatile: string, cursor?: string) => {
+    const send = async (dumpName: string, text: string, volatile: string, cursor?: string, mentionTurn?: boolean) => {
       process.env.FAKE_CODEX_DUMP = join(scratch, dumpName);
       const { turnId } = await instance.adapter.sendTurn({
         threadId: "t-prompt-split",
@@ -260,6 +260,7 @@ describe("CodexDriver turns (fake app-server)", () => {
         systemStable: "Stable rules.",
         systemVolatile: volatile,
         ...(cursor ? { resumeCursor: cursor } : {}),
+        ...(mentionTurn ? { mentionTurn: true } : {}),
       });
       await recorder.until((event) => event.type === "turn.completed" && event.turnId === turnId);
       return JSON.parse(readFileSync(join(scratch, dumpName), "utf8")).calls as Array<{
@@ -286,6 +287,11 @@ describe("CodexDriver turns (fake app-server)", () => {
     expect(turnText(second)).toBe("second");
     expect(turnText(third)).toContain("Memory: moved to Toronto.");
     expect(turnText(third)).toContain("third");
+    // a tagged turn redelivers the note even when nothing else changed:
+    // the mention describes this turn, not just the last volatile diff
+    const fourth = await send("split-4.json", "fourth", "Memory: moved to Toronto.", "codex-thread-1", true);
+    expect(turnText(fourth)).toContain("Memory: moved to Toronto.");
+    expect(turnText(fourth)).toContain("fourth");
   });
 
   it("ignores requests received after turn completion", async () => {

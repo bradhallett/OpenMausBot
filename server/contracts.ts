@@ -141,6 +141,10 @@ export interface SendTurnInput {
    * prefix stays byte-identical. */
   systemStable?: string;
   systemVolatile?: string;
+  /** True when this turn's user message tags teammates: the mentions part of
+   * systemVolatile describes this turn even when its text is unchanged from
+   * the previous turn, so digest-based delivery must not suppress the note. */
+  mentionTurn?: boolean;
   /** Coordinated teammate turns may resume a Claude conversation whose
    * earlier system prompt contained a different assignment. Refresh that
    * prompt when the provider supports it; the current brief also arrives

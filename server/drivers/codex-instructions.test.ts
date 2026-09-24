@@ -95,4 +95,15 @@ describe("Codex instruction receipts", () => {
     expect(legacy).toEqual({ deliverVolatile: true, hadVolatile: false });
     expect(request).not.toHaveBeenCalled();
   });
+
+  it("delivers mention context on every tagged turn even when the volatile half is unchanged", async () => {
+    const key = randomUUID();
+    const request = vi.fn().mockResolvedValue({});
+    await syncCodexInstructions(key, "native", "rules", "Tagged: @Testy", false, request);
+    const untagged = await syncCodexInstructions(key, "native", "rules", "Tagged: @Testy", true, request);
+    expect(untagged.deliverVolatile).toBe(false);
+    const tagged = await syncCodexInstructions(key, "native", "rules", "Tagged: @Testy", true, request, true);
+    expect(tagged.deliverVolatile).toBe(true);
+    expect(request).not.toHaveBeenCalled();
+  });
 });

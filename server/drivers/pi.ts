@@ -849,6 +849,7 @@ export const PiDriver: ProviderDriver<PiConfig> = {
           readPromptSplitReceipt("pi", receiptKey),
           turn.system,
           turn.text,
+          Boolean(turn.mentionTurn),
         );
         writePromptSplitReceipt("pi", receiptKey, composed.receipt);
         message = composed.text;

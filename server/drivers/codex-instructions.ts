@@ -62,6 +62,7 @@ export async function syncCodexInstructions(
   volatile: string,
   resumed: boolean,
   request: (method: string, params: Record<string, unknown>) => Promise<unknown>,
+  mentionTurn = false,
 ): Promise<{ deliverVolatile: boolean; hadVolatile: boolean }> {
   const directory = join(DATA_DIR, "codex-instructions");
   const path = join(directory, `${digest(JSON.stringify([key, nativeThreadId]))}.sha256`);
@@ -100,7 +101,9 @@ export async function syncCodexInstructions(
       throw error;
     }
   }
-  const deliverVolatile = resumed ? previous?.volatile !== volatileFingerprint : true;
+  // A mention describes the turn it rides: deliver it on every tagged turn,
+  // even when the volatile text is byte-identical to the previous turn's.
+  const deliverVolatile = !resumed || previous?.volatile !== volatileFingerprint || mentionTurn;
   const hadVolatile = typeof previous?.volatile === "string" && previous.volatile !== digest("");
   if (!resumed || previous?.instructions !== fingerprint || previous?.volatile !== volatileFingerprint) {
     mkdirSync(directory, { recursive: true });

@@ -100,19 +100,22 @@ export function writePromptSplitReceipt(scope: string, key: string, receipt: Pro
  * current copy the way a pre-split turn always did - and a changed
  * volatile half rides as a labelled note. Otherwise the turn text goes
  * through bare, so an ordinary memory write neither appends a second copy
- * of the prompt to the session nor re-prices its cached prefix. */
+ * of the prompt to the session nor re-prices its cached prefix.
+ * perTurnVolatile marks a turn whose volatile half describes this very
+ * turn (a mention): its note is delivered even when the text is unchanged. */
 export function splitSessionPrompt(
   stable: string,
   volatile: string,
   previous: PromptSplitReceipt | null,
   fullSystem: string | undefined,
   text: string,
+  perTurnVolatile = false,
 ): { text: string; receipt: PromptSplitReceipt } {
   const receipt = promptSplitFingerprints(stable, volatile);
   if (previous === null || previous.stable !== receipt.stable) {
     return { text: fullSystem ? fullSystem + "\n\n" + text : text, receipt };
   }
-  const note = previous.volatile === receipt.volatile
+  const note = previous.volatile === receipt.volatile && !perTurnVolatile
     ? ""
     : volatileContextNote(volatile, previous.volatile !== EMPTY_FINGERPRINT);
   return { text: withContextNote(note, text), receipt };
