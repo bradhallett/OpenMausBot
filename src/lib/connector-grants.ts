@@ -75,7 +75,10 @@ export function connectorServiceAccess(
   const grant = record[slug];
   if (grant === undefined) return { level: "none", count: 0, editable };
   if (!isConnectorToolGrantShape(grant)) return { level: "partial", count: 0, editable: false };
-  if (grant.tools === "*") return { level: "all", count: 0, editable: true };
+  // A wildcard still rides the record-level editable flag: inside a record
+  // this build cannot fully read, the editor must not offer writes that
+  // withServiceGrant would silently drop.
+  if (grant.tools === "*") return { level: "all", count: 0, editable };
   return { level: "partial", count: grant.tools.length, editable };
 }
 

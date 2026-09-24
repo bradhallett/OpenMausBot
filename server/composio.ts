@@ -7,7 +7,7 @@ import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 import { managedConnectorUnavailableReason } from "../shared/connector-availability.ts";
 import { CONNECTOR_TOOL_NAME_PATTERN, type ConnectorToolGrant } from "../shared/wire.ts";
 import { CONNECTOR_ALLOWED_TOOLS_ENV, CONNECTOR_ALLOWED_TOOLS_MAX_BYTES, serializeConnectorAllowedTools } from "./connector-advertisement.ts";
-import { serviceSlugFor } from "./connector-verdict.ts";
+import { serviceSlugFor, serviceSlugForCandidates } from "./connector-verdict.ts";
 
 const DEFAULT_BACKEND_ORIGIN = "https://backend.composio.dev";
 
@@ -815,9 +815,15 @@ export async function validateConnectorGrants(
   cfg: AppConfig,
   grants: Record<string, ConnectorToolGrant>,
 ): Promise<string | null> {
+  const grantKeys = Object.keys(grants);
   for (const [slug, grant] of Object.entries(grants)) {
     if (grant.tools === "*") continue;
-    const misplaced = grant.tools.filter((tool) => serviceSlugFor(tool) !== slug);
+    // The prefix check runs against the grant keys themselves, so an
+    // underscored service (bland_ai) accepts its own BLAND_AI_* names —
+    // the plain split would file them under "bland" and reject the grant.
+    const misplaced = grant.tools.filter(
+      (tool) => (serviceSlugForCandidates(tool, grantKeys) ?? serviceSlugFor(tool)) !== slug,
+    );
     if (misplaced.length) {
       return `connectorTools.${slug}.tools names tools that belong to another service: ${misplaced.join(", ")}`;
     }
@@ -863,16 +869,41 @@ export async function listConnectorTools(
   cfg: AppConfig,
   options: { force?: boolean } = {},
 ): Promise<Record<string, ConnectorToolListing[]>> {
-  if (!options.force && connectorToolsCache && Date.now() - connectorToolsCache.at < CONNECTOR_TOOLS_CACHE_MS) {
+  const identity = connectorToolsIdentity(cfg);
+  if (!options.force && connectorToolsCache?.identity === identity
+    && Date.now() - connectorToolsCache.at < CONNECTOR_TOOLS_CACHE_MS) {
     return connectorToolsCache.services;
   }
-  const services = await collectConnectorTools(cfg);
-  connectorToolsCache = { at: Date.now(), services };
-  return services;
+  // Concurrent misses share one MCP walk — two editors opening together
+  // must not run the initialize + tools/list sequences twice. force
+  // bypasses the settled cache but still joins a walk already running.
+  if (connectorToolsRequest?.identity === identity) return connectorToolsRequest.services;
+  const walk = collectConnectorTools(cfg).then((services) => {
+    connectorToolsCache = { at: Date.now(), identity, services };
+    return services;
+  });
+  connectorToolsRequest = { identity, services: walk };
+  try {
+    return await walk;
+  } finally {
+    if (connectorToolsRequest?.services === walk) connectorToolsRequest = null;
+  }
 }
 
 const CONNECTOR_TOOLS_CACHE_MS = 60_000;
-let connectorToolsCache: { at: number; services: Record<string, ConnectorToolListing[]> } | null = null;
+let connectorToolsCache: { at: number; identity: string; services: Record<string, ConnectorToolListing[]> } | null = null;
+/** Which backend an inventory walk belongs to, mirroring the relay's own
+ * credential fingerprint: a project key or the managed broker. Cached
+ * inventories are keyed by it, so a config switch can never serve the
+ * previous backend's tools for another cache window. */
+function connectorToolsIdentity(cfg: AppConfig): string {
+  const apiKey = projectApiKey(cfg);
+  if (apiKey) return backendFingerprint("project-tools", apiBase(), apiKey);
+  const broker = brokerAccess();
+  return broker ? backendFingerprint("managed-tools", broker.url, broker.token) : "none";
+}
+
+let connectorToolsRequest: { identity: string; services: Promise<Record<string, ConnectorToolListing[]>> } | null = null;
 
 /** Tool names longer than any Composio description worth searching. */
 const TOOL_DESCRIPTION_MAX = 240;
@@ -920,6 +951,11 @@ function parseMcpResponse(text: string, id: string | number): Record<string, unk
 }
 
 async function collectConnectorTools(cfg: AppConfig): Promise<Record<string, ConnectorToolListing[]>> {
+  // Connected services are the real slugs, so they resolve underscored
+  // services (bland_ai) the plain split would file under "bland"; an
+  // unreachable inventory degrades to that split.
+  const connected = await connectedServices(cfg).catch(() => null);
+  const candidates = connected ? Object.keys(connected) : [];
   const initialize = await relayMcp(cfg, {
     jsonrpc: "2.0",
     id: "omb-grants-initialize",
@@ -966,7 +1002,7 @@ async function collectConnectorTools(cfg: AppConfig): Promise<Record<string, Con
     for (const tool of result.tools) {
       const listing = connectorToolListing(tool);
       if (!listing) continue;
-      const slug = serviceSlugFor(listing.name);
+      const slug = serviceSlugForCandidates(listing.name, candidates) ?? serviceSlugFor(listing.name);
       if (!slug) continue;
       const bucket = grouped.get(slug) ?? [];
       if (!bucket.some((existing) => existing.name === listing.name)) bucket.push(listing);

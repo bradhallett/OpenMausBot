@@ -62,6 +62,13 @@ describe("per-service access summaries", () => {
     expect(connectorServiceAccess(["gmail"], "gmail"))
       .toEqual({ level: "partial", count: 0, editable: false });
   });
+
+  it("rides the record-level editable flag even for a wildcard grant", () => {
+    // A wildcard beside an unrecognized sibling shape must not offer an
+    // edit withServiceGrant would silently drop.
+    const record = { gmail: { tools: "*" }, notion: { tools: { prefix: "NOTION_" } } };
+    expect(connectorServiceAccess(record, "gmail")).toEqual({ level: "all", count: 0, editable: false });
+  });
 });
 
 describe("the Connected apps card state", () => {

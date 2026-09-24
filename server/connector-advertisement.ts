@@ -11,7 +11,7 @@
 // run — no env var, malformed env, oversized payload — the bridge relays
 // the list untouched and the grants stay enforced at call time.
 import { CONNECTOR_SLUG_PATTERN, CONNECTOR_TOOL_NAME_PATTERN, type ConnectorToolGrant } from "../shared/wire.ts";
-import { serviceSlugFor } from "./connector-verdict.ts";
+import { serviceSlugFor, serviceSlugForCandidates } from "./connector-verdict.ts";
 
 /** The env var mcpIntegration sets and connector-proxy.ts reads. */
 export const CONNECTOR_ALLOWED_TOOLS_ENV = "OMB_CONNECTOR_ALLOWED_TOOLS";
@@ -91,7 +91,9 @@ export function parseConnectorAllowedToolsEnv(raw: string | undefined): Record<s
  * account. */
 export function connectorToolAdvertised(name: string, grants: Record<string, ConnectorToolGrant>): boolean {
   if (Object.keys(grants).length > 0 && CONNECTOR_META_TOOLS.includes(name)) return true;
-  const service = serviceSlugFor(name);
+  // Grant keys are the real service slugs, so an underscored service
+  // (bland_ai) claims its own tools instead of splitting as "bland".
+  const service = serviceSlugForCandidates(name, Object.keys(grants)) ?? serviceSlugFor(name);
   const grant = service === null ? undefined : grants[service];
   if (!grant) return false;
   if (grant.tools === "*") return true;
