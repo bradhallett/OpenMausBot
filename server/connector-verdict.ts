@@ -125,7 +125,10 @@ function multiExecuteCall(invoked: string, args: unknown): ConnectorCall {
 
 /** Judge distinct target names against a bot's grants. grants undefined
  * is the legacy all-tools bot and passes everything; an explicit record —
- * including the empty one — allows only what it names. */
+ * including the empty one — allows only what it names. Service keys are
+ * read as own properties only: a name like CONSTRUCTOR_X maps to the
+ * "constructor" service, and the inherited property must never pose as
+ * a grant. */
 export function evaluateConnectorTools(
   names: string[],
   grants: Record<string, ConnectorToolGrant> | undefined,
@@ -137,7 +140,9 @@ export function evaluateConnectorTools(
   let rule = "";
   for (const tool of new Set(names)) {
     const service = serviceSlugFor(tool);
-    const grant = service === null ? undefined : grants[service];
+    const grant = service !== null && Object.hasOwn(grants, service)
+      ? grants[service]
+      : undefined;
     if (grant && (grant.tools === "*" || grant.tools.includes(tool))) {
       if (!rule) rule = "connectorTools." + service;
       continue;
