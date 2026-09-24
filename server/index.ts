@@ -5915,7 +5915,18 @@ bus.subscribe((event: RuntimeEvent) => {
       const generatedKey = turnAttachmentKey(event.threadId, event.turnId);
       const generated = turnAttachmentsByTurn.get(generatedKey) ?? [];
       turnAttachmentsByTurn.delete(generatedKey);
-      if (generated.length) {
+      // A turn that never completed never lands its half-said note: parked
+      // audio is deleted when the settle is not ok (person stop, provider
+      // failure) rather than posted as if the turn finished (#1742).
+      // Generated images keep their long-standing settle-anyway behavior.
+      for (const attachment of generated) {
+        if (event.ok || attachment.kind !== "audio") continue;
+        deleteAttachment(attachment.path);
+      }
+      const settled = event.ok || !generated.length
+        ? generated
+        : generated.filter((attachment) => attachment.kind !== "audio");
+      if (settled.length) {
         const response = [...store.messagesFor(event.threadId)].reverse().find(
           (message) =>
             message.role === "bot" &&
@@ -5924,12 +5935,12 @@ bus.subscribe((event: RuntimeEvent) => {
         );
         // A voice note's text is its transcript: the visible caption search,
         // compaction and notifications read (#1740 decision 3).
-        const transcript = generated
+        const transcript = settled
           .filter((attachment) => attachment.kind === "audio" && attachment.text)
           .map((attachment) => attachment.text!.trim())
           .filter(Boolean)
           .join("\n\n");
-        const staged = generated.map((attachment) =>
+        const staged = settled.map((attachment) =>
           attachment.kind === "audio"
             ? { kind: "audio" as const, path: attachment.path, mime: attachment.mime }
             : attachment,
