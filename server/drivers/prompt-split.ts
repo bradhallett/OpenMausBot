@@ -24,11 +24,11 @@ export interface PromptHalves {
 export function promptHalves(
   turn: Pick<SendTurnInput, "system" | "systemStable" | "systemVolatile">,
 ): PromptHalves {
-  const split = typeof turn.systemStable === "string" && typeof turn.systemVolatile === "string";
-  return {
-    stable: split ? turn.systemStable : null,
-    volatile: split ? turn.systemVolatile : "",
-  };
+  const { systemStable, systemVolatile } = turn;
+  if (typeof systemStable !== "string" || typeof systemVolatile !== "string") {
+    return { stable: null, volatile: "" };
+  }
+  return { stable: systemStable, volatile: systemVolatile };
 }
 
 export const VOLATILE_CONTEXT_NOTE_PREFIX =
