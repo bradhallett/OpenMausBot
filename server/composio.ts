@@ -5,6 +5,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 import { managedConnectorUnavailableReason } from "../shared/connector-availability.ts";
+import type { ConnectorToolGrant } from "../shared/wire.ts";
+import { CONNECTOR_ALLOWED_TOOLS_ENV, CONNECTOR_ALLOWED_TOOLS_MAX_BYTES, serializeConnectorAllowedTools } from "./connector-advertisement.ts";
+import { serviceSlugFor } from "./connector-verdict.ts";
 
 const DEFAULT_BACKEND_ORIGIN = "https://backend.composio.dev";
 
@@ -143,6 +146,10 @@ interface IntegrationContext {
   commsToken: string;
   botId: string;
   threadId: string;
+  /** The bot's connector tool grants (issue #1737): undefined is the
+   * legacy all-tools bot and gets no advertisement filtering; a record —
+   * including the empty one — filters the bridge's tools/list. */
+  connectorTools?: Record<string, ConnectorToolGrant>;
 }
 
 let managedBrokerAccess: { url: string; token: string } | null | undefined;
@@ -538,6 +545,20 @@ export async function mcpIntegration(
   context: IntegrationContext,
 ): Promise<ComposioMcpIntegration | null> {
   if (!configured(cfg)) return null;
+  // Connector grants 3/5: a grants record rides to the bridge as a capped
+  // JSON env var so tools/list is filtered down to what the bot may call.
+  // No record (legacy all-tools bots) or one past the cap mounts without
+  // the var — the bridge then relays the unfiltered list and every call is
+  // still judged by the slice-2 verdict on the relay endpoint.
+  const allowlist = context.connectorTools === undefined
+    ? undefined
+    : serializeConnectorAllowedTools(context.connectorTools);
+  if (allowlist?.oversized) {
+    console.warn(
+      `[composio] connector allowlist for bot ${context.botId} exceeds ${CONNECTOR_ALLOWED_TOOLS_MAX_BYTES} bytes;`
+      + " tools/list stays unfiltered and grants are enforced per call",
+    );
+  }
   return {
     command: process.execPath,
     args: [SPAWNED_PROXIES.connectors],
@@ -555,6 +576,7 @@ export async function mcpIntegration(
       OMB_CONNECTOR_TOKEN: context.commsToken,
       OMB_BOT_ID: context.botId,
       OMB_THREAD_ID: context.threadId,
+      ...(allowlist?.env ? { [CONNECTOR_ALLOWED_TOOLS_ENV]: allowlist.env } : {}),
     },
   };
 }
@@ -778,6 +800,47 @@ export async function connectedServices(cfg: AppConfig): Promise<Record<string, 
     listConnectedAccounts(apiKey, userId, []).catch(() => []),
   ]);
   return allServiceStates(summarizeAccounts(accounts, []), toolkits);
+}
+
+/** Semantic validation for a connectorTools patch (issue #1737): slugs
+ * must name a connected service, and every listed tool name must carry its
+ * own service prefix (GMAIL_SEND_EMAIL under "gmail") — a mismatched name
+ * would be granted yet permanently refused at call time. Tool names are
+ * cross-checked against the marketplace catalog when the live catalog is
+ * reachable; the curated fallback and an unreachable connection inventory
+ * never block the patch, because call-time enforcement (slice 2) stays
+ * the authority either way. Returns the rejection message or null. */
+export async function validateConnectorGrants(
+  cfg: AppConfig,
+  grants: Record<string, ConnectorToolGrant>,
+): Promise<string | null> {
+  let connected: Record<string, ConnectorServiceState>;
+  try {
+    connected = await connectedServices(cfg);
+  } catch {
+    return null;
+  }
+  const unconnected = Object.keys(grants).filter((slug) => !connected[slug]?.connected);
+  if (unconnected.length) {
+    return `connectorTools names services that are not connected: ${unconnected.join(", ")}`;
+  }
+  for (const [slug, grant] of Object.entries(grants)) {
+    if (grant.tools === "*") continue;
+    const misplaced = grant.tools.filter((tool) => serviceSlugFor(tool) !== slug);
+    if (misplaced.length) {
+      return `connectorTools.${slug}.tools names tools that belong to another service: ${misplaced.join(", ")}`;
+    }
+  }
+  const catalog = await listToolkits(cfg);
+  // source "curated" means the marketplace was unreachable (or served an
+  // empty walk), so there is nothing trustworthy to cross-check against.
+  if (catalog.source !== "api" || catalog.cards.length === 0) return null;
+  const known = new Set(catalog.cards.map((card) => card.slug.toLowerCase()));
+  const unknown = Object.keys(grants).filter((slug) => !known.has(slug));
+  if (unknown.length) {
+    return `connectorTools names services missing from the connected-apps catalog: ${unknown.join(", ")}`;
+  }
+  return null;
 }
 
 export async function connectionStatus(cfg: AppConfig, slugs: string[]) {

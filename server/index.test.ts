@@ -156,7 +156,10 @@ let fakeDockerFixture: string;
 let fakeVpsFixture: string;
 let fakeDockerLog: string;
 let stderr = "";
-let connectorAccounts: Array<{ id: string; alias: string; status: string; toolkit: { slug: string } }> = [];
+let connectorAccounts: Array<{ id: string; alias?: string; status: string; toolkit: { slug: string } }> = [];
+// What the stubbed marketplace catalog serves for project keys; empty means
+// the walk found nothing and composio falls back to its curated list.
+let connectorCatalogToolkits: Array<{ slug: string; name: string }> = [];
 const connectorLinkRequests: Array<{ toolkit: string; alias?: string }> = [];
 /** Every frame the harness relayed to the stubbed Composio MCP endpoint. */
 const connectorRelayCalls: Array<{ transportSessionId: string; body: any }> = [];
@@ -753,7 +756,9 @@ beforeAll(async () => {
     }
     if (req.url?.startsWith("/api/v3.1/connected_accounts") || req.url?.startsWith("/api/v3/toolkits")) {
       res.writeHead(200, { "content-type": "application/json" });
-      return res.end(JSON.stringify({ items: req.url.startsWith("/api/v3.1/connected_accounts") ? connectorAccounts : [] }));
+      return res.end(JSON.stringify({
+        items: req.url.startsWith("/api/v3.1/connected_accounts") ? connectorAccounts : connectorCatalogToolkits,
+      }));
     }
     if (req.url?.startsWith("/api/v3.1/tool_router/session")) {
       if (req.headers["x-api-key"] !== "ak_good") {
@@ -9263,6 +9268,43 @@ describe("harness HTTP API", () => {
       expect(denyRows.some((row) => row.tool === "gmail_send_email")).toBe(true);
     } finally {
       await api("DELETE", `/api/bots/${bot.id}`);
+    }
+  });
+
+  it("validates connector grant patches against connected services and the catalog", async () => {
+    // Project mode: the stub serves gmail (session toolkits plus an active
+    // account), slack (active account) and a catalog of exactly those two.
+    expect((await api("PUT", "/api/config", { composio: { apiKey: "ak_good" } })).status).toBe(200);
+    const bot = (await api("POST", "/api/bots")).body.bot;
+    connectorAccounts = [
+      { id: "ca_gmail", status: "ACTIVE", toolkit: { slug: "gmail" } },
+      { id: "ca_slack", status: "ACTIVE", toolkit: { slug: "slack" } },
+      { id: "ca_customcrm", status: "ACTIVE", toolkit: { slug: "customcrm" } },
+    ];
+    connectorCatalogToolkits = [
+      { slug: "gmail", name: "Gmail" },
+      { slug: "slack", name: "Slack" },
+    ];
+    const patch = (connectorTools: unknown) => api("PATCH", "/api/bots/" + bot.id, { connectorTools });
+    try {
+      expect((await patch({ gmail: { tools: ["GMAIL_SEND_EMAIL"] }, slack: { tools: "*" } })).status).toBe(200);
+      expect((await patch({ notion: { tools: ["NOTION_CREATE_PAGE"] } })).body.error).toMatch(/not connected: notion/);
+      expect((await patch({ gmail: { tools: ["SLACK_POST_MESSAGE"] } })).body.error).toMatch(
+        /another service: SLACK_POST_MESSAGE/,
+      );
+      // customcrm is connected but absent from the live catalog walk.
+      expect((await patch({ customcrm: { tools: ["CUSTOMCRM_LOG_CALL"] } })).body.error).toMatch(
+        /missing from the connected-apps catalog: customcrm/,
+      );
+      // An unreachable inventory never blocks the patch: with no project key
+      // and no managed broker the semantic checks step aside entirely.
+      expect((await api("PUT", "/api/config", { composio: { apiKey: "" } })).status).toBe(200);
+      expect((await patch({ linear: { tools: ["LINEAR_CREATE_TICKET"] } })).status).toBe(200);
+    } finally {
+      connectorAccounts = [];
+      connectorCatalogToolkits = [];
+      await api("PUT", "/api/config", { composio: { apiKey: "" } });
+      await api("DELETE", "/api/bots/" + bot.id);
     }
   });
 

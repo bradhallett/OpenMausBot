@@ -16,7 +16,10 @@ import {
   removeService,
   relayMcp,
   setManagedBrokerAccess,
+  validateConnectorGrants,
 } from "./composio.ts";
+import { CONNECTOR_ALLOWED_TOOLS_ENV } from "./connector-advertisement.ts";
+import type { ConnectorToolGrant } from "../shared/wire.ts";
 
 let api: Server;
 let origin = "";
@@ -810,6 +813,82 @@ describe.sequential("Composio Sessions", () => {
         OMB_THREAD_ID: "thread-1",
       },
     });
+  });
+
+  it("passes a bot's connector grants to the bridge as an env allowlist", async () => {
+    const cfg: AppConfig = {
+      composio: { apiKey: "ak_test", userId: "openmausbot_existing", sessionId: "trs_test" },
+    };
+    const grants: Record<string, ConnectorToolGrant> = { gmail: { tools: ["GMAIL_SEND_EMAIL"] }, slack: { tools: "*" } };
+    const integration = await mcpIntegration(cfg, {
+      harnessUrl: "http://127.0.0.1:8799",
+      commsToken: "secret",
+      botId: "bot-1",
+      threadId: "thread-1",
+      connectorTools: grants,
+    });
+    expect(integration?.env[CONNECTOR_ALLOWED_TOOLS_ENV]).toBe(JSON.stringify(grants));
+  });
+
+  it("omits the allowlist for legacy bots and for oversized grants, warning once", async () => {
+    const cfg: AppConfig = {
+      composio: { apiKey: "ak_test", userId: "openmausbot_existing", sessionId: "trs_test" },
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const legacy = await mcpIntegration(cfg, {
+        harnessUrl: "http://127.0.0.1:8799",
+        commsToken: "secret",
+        botId: "bot-1",
+        threadId: "thread-1",
+      });
+      expect(legacy?.env[CONNECTOR_ALLOWED_TOOLS_ENV]).toBeUndefined();
+      expect(warn).not.toHaveBeenCalled();
+
+      const names = Array.from({ length: 500 }, (_, index) => "GMAIL_TOOL_" + String(index).padStart(3, "0") + "_WITH_" + "A_LONG_DESCRIPTOR_".repeat(6));
+      const oversized = await mcpIntegration(cfg, {
+        harnessUrl: "http://127.0.0.1:8799",
+        commsToken: "secret",
+        botId: "bot-1",
+        threadId: "thread-1",
+        connectorTools: { gmail: { tools: names } },
+      });
+      // The mount survives; only the advertisement filter is skipped.
+      expect(oversized?.args[0]).toContain("connector-proxy");
+      expect(oversized?.env[CONNECTOR_ALLOWED_TOOLS_ENV]).toBeUndefined();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0])).toContain("exceeds 32768 bytes");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("validates grant patches against connected services and the catalog", async () => {
+    const cfg: AppConfig = {
+      composio: { apiKey: "ak_test", userId: "openmausbot_existing", sessionId: "trs_test" },
+    };
+    // github and gmail are connected (session toolkits page 1); slack is not.
+    // The ak_test catalog serves x and github.
+    await expect(validateConnectorGrants(cfg, { github: { tools: ["GITHUB_CREATE_ISSUE"] } })).resolves.toBeNull();
+    await expect(validateConnectorGrants(cfg, { github: { tools: "*" } })).resolves.toBeNull();
+    await expect(validateConnectorGrants(cfg, { slack: { tools: ["SLACK_POST_MESSAGE"] } })).resolves.toMatch(/not connected: slack/);
+    await expect(validateConnectorGrants(cfg, { gmail: { tools: ["SLACK_POST_MESSAGE"] } })).resolves.toMatch(/another service: SLACK_POST_MESSAGE/);
+    // gmail is connected (no-auth toolkit) but absent from the live catalog.
+    await expect(validateConnectorGrants(cfg, { gmail: { tools: ["GMAIL_SEND_EMAIL"] } })).resolves.toMatch(/missing from the connected-apps catalog: gmail/);
+  });
+
+  it("never blocks a grant patch when the connection inventory is unreachable", async () => {
+    // No project key and no broker: connectedServices cannot run, so the
+    // semantic checks step aside and call-time enforcement stays the gate.
+    await expect(validateConnectorGrants({}, { anything: { tools: ["ANYTHING_DO_IT"] } })).resolves.toBeNull();
+    setManagedBrokerAccess({ url: origin + "/broker", token: "a".repeat(64) });
+    try {
+      // The broker serves github as connected and its catalog lists github.
+      await expect(validateConnectorGrants({}, { github: { tools: ["GITHUB_CREATE_ISSUE"] } })).resolves.toBeNull();
+      await expect(validateConnectorGrants({}, { gmail: { tools: ["GMAIL_SEND_EMAIL"] } })).resolves.toMatch(/not connected: gmail/);
+    } finally {
+      setManagedBrokerAccess(null);
+    }
   });
 
   it("reports connection state, creates auth links and revokes disconnects", async () => {

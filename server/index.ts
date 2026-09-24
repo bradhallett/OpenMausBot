@@ -356,7 +356,7 @@ import {
   buildSystemPrompt,
   userProfileSystemPrompt,
   computerPrompt,
-  COMPOSIO_PROMPT,
+  composioSystemPrompt,
   customMcpPrompt,
   CREDENTIAL_PROMPT,
   mentionPrompt,
@@ -2184,9 +2184,9 @@ function phoneIntegration(botId: string, threadId: string, generation: string) {
   return { command: process.execPath, args: [phoneProxyPath], env };
 }
 
-function connectedAppsIntegration(botId: string, threadId: string, generation: string) {
+function connectedAppsIntegration(bot: Pick<BotRecord, "id" | "connectorTools">, threadId: string, generation: string) {
   const token = mintInternalCapability({
-    botId,
+    botId: bot.id,
     threadId,
     generation,
     depth: 0,
@@ -2198,8 +2198,12 @@ function connectedAppsIntegration(botId: string, threadId: string, generation: s
   return composio.mcpIntegration(cfg, {
     harnessUrl: `http://127.0.0.1:${PORT}`,
     commsToken: token,
-    botId,
+    botId: bot.id,
     threadId,
+    // Connector grants 3/5: the record (or its absence) rides along so
+    // the bridge can filter tools/list; the verdict on the relay endpoint
+    // stays the authority for every call.
+    connectorTools: bot.connectorTools,
   });
 }
 
@@ -2767,7 +2771,7 @@ function previewSystemPrompt(bot: BotRecord) {
       computer: previewPlan.computer && previewPlan.computer !== "off" && computerPromptKind ? previewPlan.computer : null,
       browser: previewPlan.computer === undefined ? false : previewPlan.browser,
     }, { note: previewPlan.note }) },
-    { id: "composio", label: "Connected apps", text: caps?.composioMcp && bot.composio !== false && composio.configured(cfg) ? COMPOSIO_PROMPT : "" },
+    { id: "composio", label: "Connected apps", text: caps?.composioMcp && bot.composio !== false && composio.configured(cfg) ? composioSystemPrompt(bot.connectorTools) : "" },
     { id: "mcp", label: "MCP servers", text: caps?.customMcp ? customMcpPrompt(Object.keys(engineMcpServers(bot))) : "" },
     { id: "browser", label: "Browser", text: previewPlan.browser ? BUILT_IN_BROWSER_SYSTEM_PROMPT : "" },
     { id: "coordination", label: "Team", text: agentsMounted && coordination ? ` ${coordination}` : "" },
@@ -7792,7 +7796,7 @@ async function startTurn(
       // this engine can reach them — and only to a bot the user has not
       // switched off: the key is workspace-wide, the grant is per bot.
       if (bot.composio !== false && composio.configured(cfg) && instance.adapter.capabilities.composioMcp === true) {
-        const connection = await connectedAppsIntegration(bot.id, threadId, dispatchClaimId);
+        const connection = await connectedAppsIntegration(bot, threadId, dispatchClaimId);
         if (connection) integrations.composio = connection;
       }
       // user-configured MCP servers (config.json mcpServers): same rule as
@@ -8361,7 +8365,7 @@ async function startTurn(
         { id: "plan", label: "Surface", text: surfacePrompt({ computer: mountedComputer, browser: Boolean(integrations.browser) }, { pinned: plan.pinned, note: plan.note, canSelect: computerSelectionTurns.has(threadId) }) },
         // gated on the integration, not the key: the hint only goes to a
         // bot whose driver actually mounted the tools
-        { id: "composio", label: "Connected apps", text: integrations.composio ? COMPOSIO_PROMPT : "" },
+        { id: "composio", label: "Connected apps", text: integrations.composio ? composioSystemPrompt(liveBot?.connectorTools ?? bot.connectorTools) : "" },
         { id: "mcp", label: "MCP servers", text: customMcpPrompt(Object.keys(integrations.custom ?? {})) },
         { id: "browser", label: "Browser", text: integrations.browser ? BUILT_IN_BROWSER_SYSTEM_PROMPT : "" },
         { id: "coordination", label: "Team", text: coordinationPrompt ? ` ${coordinationPrompt}` : "" },
@@ -9801,7 +9805,7 @@ async function runGroupMemberTurn(
   }
   try {
     if (bot.composio !== false && composio.configured(cfg) && instance.adapter.capabilities.composioMcp === true) {
-      const connection = await connectedAppsIntegration(bot.id, threadId, internalGeneration);
+      const connection = await connectedAppsIntegration(bot, threadId, internalGeneration);
       if (connection) integrations.composio = connection;
     }
   } catch (error) {
@@ -17127,6 +17131,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         } else {
           const parsed = parseConnectorTools(body.connectorTools);
           if (!parsed.ok) return json(res, 400, { error: parsed.error });
+          // Connector grants 3/5: past the shape checks, slugs must name
+          // connected services and tool names must carry their service
+          // prefix. Unreachable backends never block the patch — the
+          // call-time verdict from slice 2 stays the authority.
+          const semantic = await composio.validateConnectorGrants(cfg, parsed.grants);
+          if (semantic) return json(res, 400, { error: semantic });
           patch.connectorTools = parsed.grants;
         }
       }
