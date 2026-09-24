@@ -14254,15 +14254,28 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
               if (duplicate && createdThread && createdThread !== node.threadId) store.deleteTask(target.botId, createdThread);
               createdThread = undefined; // The durable coordinator now owns this task.
               accepted.push({ requestId: node.id, botId: node.botId, duplicate, status: node.status });
+              // A duplicate request_key lands on the node enqueue already
+              // made. Only a live node can still report: a failed or
+              // cancelled one already fired its report and tick() skips it,
+              // so promising "its result will resume you" would be the one
+              // lie a receipt must never tell.
               receipts.push(peerDeliveryReceipt({
                 botId: node.botId,
                 botName: store.bot(node.botId)?.name,
-                outcome: duplicate && (node.status === "running" || node.status === "completed") ? "injected" : "queued",
+                outcome: duplicate
+                  ? node.status === "running" || node.status === "completed"
+                    ? "injected"
+                    : node.status === "failed" || node.status === "cancelled"
+                      ? "failed"
+                      : "queued"
+                  : "queued",
                 detail: duplicate
                   ? node.status === "running"
                     ? "duplicate request_key — this teammate is already running that exact assignment"
                     : node.status === "completed"
                       ? "duplicate request_key — this teammate already completed that assignment; the earlier result stands"
+                      : node.status === "failed" || node.status === "cancelled"
+                        ? `duplicate request_key — the earlier assignment ${node.status === "cancelled" ? "was cancelled" : "failed"} and will not rerun or resume you; resend with a new request_key to retry`
                       : "duplicate request_key — already in flight; its result will resume you automatically"
                   : "handed to the coordinator; the teammate's turn has not started yet",
                 requestId: node.id,
