@@ -1,5 +1,6 @@
 // Fetch a skill's files from where users actually keep skills: a GitHub
-// repo, a folder inside one, or a direct SKILL.md. Network in, plain
+// repo, a folder inside one, a direct SKILL.md, or a skills.sh page that
+// points at one. Network in, plain
 // {path, content} list out — validation, scanning, and storage live in
 // skills.ts, so this file owns exactly one concern and its tests can hand
 // it a fake fetch.
@@ -61,10 +62,12 @@ interface Target {
   repo: string;
   ref?: string;
   path: string;
+  skill?: string;
 }
 
-/** owner/repo, github.com/owner/repo[/tree/<ref>/<path>], or a raw/blob URL
- * straight to a SKILL.md. Anything else is refused, loudly. */
+/** owner/repo, github.com/owner/repo[/tree/<ref>/<path>], a raw/blob URL
+ * straight to a SKILL.md, or a skills.sh/owner/repo[/skill] page. Anything
+ * else is refused, loudly. */
 export function parseSkillSource(input: string): Target | { rawUrl: string } | { error: string } {
   const text = input.trim();
   if (!text) return { error: "paste a GitHub repository, folder, or SKILL.md URL" };
@@ -77,9 +80,16 @@ export function parseSkillSource(input: string): Target | { rawUrl: string } | {
   if (tree) {
     return { owner: tree[1]!, repo: tree[2]!, ref: tree[3], path: tree[4] ?? "" };
   }
+  const registry = text.match(/^https?:\/\/skills\.sh\/([\w.-]+)\/([\w.-]+)(?:\/([\w.-]+))?\/?$/i);
+  if (registry) {
+    // skills.sh is a registry over GitHub: each page installs from
+    // github.com/<owner>/<repo> filtered to the named skill, so resolve to
+    // the repo and remember the slug to filter discovery on.
+    return { owner: registry[1]!, repo: registry[2]!, path: "", skill: registry[3] };
+  }
   const shorthand = text.match(/^([\w.-]+)\/([\w.-]+)$/);
   if (shorthand) return { owner: shorthand[1]!, repo: shorthand[2]!, path: "" };
-  return { error: "that does not look like a GitHub repository, folder, or SKILL.md URL" };
+  return { error: "that does not look like a GitHub or skills.sh repository, folder, or SKILL.md URL" };
 }
 
 const CONTENT_ENTRY = z.object({
@@ -135,6 +145,8 @@ export async function discoverSkillDirs(target: Target, fetcher: typeof fetch): 
   if (root.some((entry) => entry.type === "file" && entry.name === "SKILL.md")) {
     return [target.path];
   }
+  const wanted = target.skill?.toLowerCase();
+  const isWanted = (dir: string) => !wanted || dir.split("/").at(-1)!.toLowerCase() === wanted;
   const dirs = root.filter((entry) => entry.type === "dir");
   const found: string[] = [];
   const preferred = ["skills", ".claude", ".agents"];
@@ -153,14 +165,14 @@ export async function discoverSkillDirs(target: Target, fetcher: typeof fetch): 
       continue;
     }
     if (children.some((entry) => entry.type === "file" && entry.name === "SKILL.md")) {
-      found.push(base);
+      if (isWanted(base)) found.push(base);
       continue;
     }
     for (const child of children.filter((entry) => entry.type === "dir").slice(0, MAX_CHILDREN_PER_FOLDER)) {
       if (found.length >= MAX_SKILLS_PER_IMPORT) break;
       try {
         const inner = await listDir(target, child.path, fetcher);
-        if (inner.some((entry) => entry.type === "file" && entry.name === "SKILL.md")) found.push(child.path);
+        if (inner.some((entry) => entry.type === "file" && entry.name === "SKILL.md") && isWanted(child.path)) found.push(child.path);
       } catch (error) {
         if (error instanceof ImportLimitError || (error instanceof Error && error.name === "TimeoutError")) throw error;
         // unreadable child — skip
@@ -203,7 +215,13 @@ export async function fetchSkillFromSource(
       return { skills: [{ source: parsed.rawUrl, files: [{ path: "SKILL.md", content }] }] };
     }
     const dirs = await discoverSkillDirs(parsed, fetcher);
-    if (!dirs.length) return { error: "no SKILL.md found there — paste a skill folder or a repo with a skills/ directory" };
+    if (!dirs.length) {
+      return {
+        error: parsed.skill
+          ? `no skill named "${parsed.skill}" found there — check the exact name on the skills.sh page`
+          : "no SKILL.md found there — paste a skill folder or a repo with a skills/ directory",
+      };
+    }
     const skills: FetchedSkill[] = [];
     for (const dir of dirs) skills.push(await fetchSkillDir(parsed, dir, fetcher));
     return { skills };
