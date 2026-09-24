@@ -239,12 +239,14 @@ import {
   cancelChannelMessage,
   drainChannelMessages,
   holdChannelQueue,
+  headChannelGroup,
   queuedChannelMessage,
   queueChannelMessage,
   restoreChannelMessages,
   restoreHeldChannelQueue,
   resolveHeldReplyTarget,
   settleHeldChannelQueueHead,
+  type ChannelQueueItem,
 } from "./channel-queue.ts";
 import {
   acceptedSendMatch,
@@ -7077,6 +7079,9 @@ function drainQueuedSends() {
           },
         });
         resolve();
+        // M2: only this group left the queue, and a turn that never
+        // started publishes no completion to wake the groups behind it.
+        queueMicrotask(drainQueuedSends);
       }).catch(reject);
     }),
     // Provider completion can precede its dispatch promise: keep the queue
@@ -10913,6 +10918,11 @@ type StartGroupTurnOptions = {
   sender?: ResolvedSender;
   /** Who the ledger books this room turn's speakers to (see startTurn's `trigger`). */
   trigger?: UsageTrigger;
+  /** A drained queue's coalesced group (M2): one sender's contiguous
+   * in-window burst running as ONE follow-up. Each item lands as its own
+   * transcript line under its own queueId; `text` is the joined burst the
+   * responders are routed and titled on. */
+  queuedGroup?: ChannelQueueItem[];
 };
 
 function startGroupTurn(
@@ -10948,17 +10958,49 @@ function startGroupTurn(
   if (options.goalCoordinatorBotId && (channelMode !== "goal" || !requestedGoalCoordinator)) {
     throw Object.assign(new Error("the selected goal coordinator is not an active room member"), { status: 409 });
   }
-  const message = store.appendMessage(threadId, {
-    role: "user",
-    kind: "text",
-    text,
-    replyToId: replyTo?.id,
-    sendId,
-    channelMode,
-    queueId,
-    via: options.via,
-    sender: options.sender,
-  });
+  // A coalesced drain appends every queued line under its own queueId (the
+  // chips and sendId receipts stay per-item); the LAST line is the turn's
+  // user message, exactly like the 1:1 drain's userMessage.
+  const queuedGroup = options.queuedGroup;
+  const message = queuedGroup && queuedGroup.length > 0
+    ? (() => {
+        for (const item of queuedGroup.slice(0, -1)) {
+          store.appendMessage(threadId, {
+            role: "user",
+            kind: "text",
+            text: item.text,
+            replyToId: item.replyToId,
+            sendId: item.sendId,
+            channelMode: item.mode,
+            queueId: item.id,
+            via: item.via,
+            sender: item.sender,
+          });
+        }
+        const last = queuedGroup[queuedGroup.length - 1]!;
+        return store.appendMessage(threadId, {
+          role: "user",
+          kind: "text",
+          text: last.text,
+          replyToId: replyTo?.id,
+          sendId: last.sendId,
+          channelMode: last.mode,
+          queueId: last.id,
+          via: last.via,
+          sender: last.sender,
+        });
+      })()
+    : store.appendMessage(threadId, {
+        role: "user",
+        kind: "text",
+        text,
+        replyToId: replyTo?.id,
+        sendId,
+        channelMode,
+        queueId,
+        via: options.via,
+        sender: options.sender,
+      });
   // Admitted (see startTurn): the room's speakers are booked to this sender.
   if (options.trigger) turnTriggers.set(threadId, options.trigger);
   const titled = group.dm ? null : store.titleGroupTaskFromFirstMessage(group.id, text, threadId);
@@ -11125,17 +11167,30 @@ function drainQueuedChannelSends(): void {
       const group = store.group(groupId);
       return group ? groupIsWorking(group) : false;
     },
-    ({ groupId, threadId, text, replyToId, sendId, mode, id, via, sender, trigger }) => {
+    ({ groupId, threadId, items }) => {
       const group = store.group(groupId);
       const ownsThread = group?.dm
         ? group.threadId === threadId
         : Boolean(group && store.groupTaskByThread(group.id, threadId));
       if (!group || !ownsThread) return;
+      // The burst runs as ONE room turn: the joined text routes responders
+      // and titles the task, while every queued line still lands under its
+      // own queueId (chips and sendId receipts stay per-item).
+      const head = items[0]!;
+      const last = items[items.length - 1]!;
+      const joined = items.map((item) => item.text).join("\n\n");
       try {
-        startGroupTurn(groupId, text, resolveReplyTarget(threadId, replyToId), sendId, mode, id, { via, threadId, sender, trigger: queuedTurnTrigger({ trigger, sender }) });
+        startGroupTurn(groupId, joined, resolveReplyTarget(threadId, last.replyToId), last.sendId, last.mode, last.id, {
+          threadId,
+          sender: head.sender,
+          trigger: queuedTurnTrigger({ trigger: head.trigger, sender: head.sender }),
+          queuedGroup: items,
+        });
       } catch (error) {
-        if (!store.messagesFor(threadId).some((message) => message.queueId === id && message.role === "user")) {
-          store.appendMessage(threadId, { role: "user", kind: "text", text, replyToId, sendId, channelMode: mode, queueId: id, via, sender });
+        for (const item of items) {
+          if (!store.messagesFor(threadId).some((message) => message.queueId === item.id && message.role === "user")) {
+            store.appendMessage(threadId, { role: "user", kind: "text", text: item.text, replyToId: item.replyToId, sendId: item.sendId, channelMode: item.mode, queueId: item.id, via: item.via, sender: item.sender });
+          }
         }
         store.appendMessage(threadId, {
           role: "bot",
@@ -16461,7 +16516,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // turn — never both for the same words.
       const held = holdChannelQueue(current.id, targetThreadId, m[2]);
       if (!held) return json(res, 404, { error: "no such queued message" });
-      const [head] = held.items;
+      // M2: the head may be a coalesced group (one sender's contiguous
+      // burst); Steer folds that whole group into the live turn as one.
+      const headGroup = headChannelGroup(held.items);
+      const [head] = headGroup;
       const decision = admit("room-steer", {
         speakerPresent: Boolean(speaker),
         engineCanSteer: Boolean(instance?.adapter.capabilities.queueing && instance.adapter.steer),
@@ -16482,7 +16540,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // the check carries that invariant to the type system.
       const steered: SteerOutcome = instance?.adapter.steer
         ? await instance.adapter
-            .steer(targetThreadId, promptWithReply(head.text, replyTo, cfg.profile?.name?.trim() || "User"))
+            .steer(targetThreadId, promptWithReply(headGroup.map((item) => item.text).join("\n\n"), replyTo, cfg.profile?.name?.trim() || "User"))
             .catch((): SteerOutcome => "indeterminate")
         : "refused";
       // The steer was awaited adapter work: re-read every ownership
@@ -16501,25 +16559,25 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // speaker — and settle the head.
       const delivered = steered !== "refused";
       if (after && delivered && (steered === "indeterminate" || afterSpeakerBotId === speakerBotId)) {
-        const message = store.appendMessage(targetThreadId, {
+        const messages = headGroup.map((item) => store.appendMessage(targetThreadId, {
           role: "user",
           kind: "text",
-          text: head.text,
-          replyToId: head.replyToId,
-          sendId: head.sendId,
-          channelMode: head.mode,
-          queueId: head.id,
-          via: head.via,
+          text: item.text,
+          replyToId: item.replyToId,
+          sendId: item.sendId,
+          channelMode: item.mode,
+          queueId: item.id,
+          via: item.via,
           steered: true,
-          sender: head.sender,
-        });
+          sender: item.sender,
+        }));
         settleHeldChannelQueueHead(held);
         return json(res, 200, {
           ok: true,
           steered: true,
           threadId: targetThreadId,
-          messages: [message],
-          queueIds: [head.id],
+          messages,
+          queueIds: headGroup.map((item) => item.id),
         });
       }
       if (steered === "indeterminate" && !after) {

@@ -230,6 +230,10 @@ export interface FollowupPayload {
   /** Who the usage ledger books the turn these words start to. Absent on
    * rows written before this existed. */
   trigger?: UsageTrigger;
+  /** When the words were queued (epoch ms), so drain-time coalescing can
+   * tell a contiguous burst from hours-apart texts. Rows written before
+   * this existed read as queued at restore time. */
+  queuedAt?: number;
 }
 export type FollowupStatus = "pending" | "dispatching" | "interrupted" | "cancelled";
 export interface ChatFollowup {
