@@ -1567,8 +1567,10 @@ describe("ACP turns (fake CLI)", () => {
     });
 
     it("closes the idle process and resumes on the next turn", async () => {
-      process.env.OMB_ACP_SESSION_IDLE_MIN_MS = "50";
-      process.env.OMB_ACP_SESSION_IDLE_MS = "100";
+      // Ten seconds is the lowest window the floor allows now; exercise the
+      // close at the floor itself and give the poll room past it.
+      process.env.OMB_ACP_SESSION_IDLE_MIN_MS = "10000";
+      process.env.OMB_ACP_SESSION_IDLE_MS = "10000";
       countFile = join(scratch, "launches");
       rpcFile = join(scratch, "rpc.json");
       process.env.FAKE_ACP_LAUNCH_COUNT_FILE = countFile;
@@ -1579,7 +1581,7 @@ describe("ACP turns (fake CLI)", () => {
       // the close reason is only logged, never emitted — poll the native log
       // for it rather than sleeping a fixed window past the idle deadline
       await new Promise<void>((resolve, reject) => {
-        const deadline = Date.now() + 5_000;
+        const deadline = Date.now() + 20_000;
         const log = join(NATIVE_DIR, "t-pool-idle.ndjson");
         const check = () => {
           if (Date.now() > deadline) return reject(new Error("idle close was never logged"));
@@ -1606,7 +1608,7 @@ describe("ACP turns (fake CLI)", () => {
       // the dump is per-process and overwritten on spawn, so this is the resumed child
       expect(rpc()).toContain("session/load");
       expect(rpc()).toContain("initialize");
-    });
+    }, 30_000);
 
     it("respawns when the spawn contract changes", async () => {
       countFile = join(scratch, "launches");
