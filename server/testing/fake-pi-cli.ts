@@ -6,6 +6,7 @@
 // modes mirror how the real CLI misbehaves:
 //
 //   FAKE_PI_MODE   happy (default) | tooluse | permission | interleave | turn-error | no-models | exit-early
+//                  | compaction | prompt-reject
 //   FAKE_PI_MODELS comma-separated provider/model pairs (default "ollama-cloud/glm-5.2,openai/gpt-4o")
 //   FAKE_PI_DUMP   path to append {argv, env} JSON, so a test can assert argv shape
 //                  and env hygiene (no leaked secrets into the pi child).
@@ -97,6 +98,20 @@ const streamErrorTurn = () => {
     },
     usage: { input: 0, output: 0 },
   });
+  send({ type: "agent_end" });
+};
+
+// compaction: a happy turn whose context crosses the auto-compaction
+// threshold mid-run - compaction_start/end fire after the prompt ack and
+// before turn_end, the exact moment a receipt-based prompt split must
+// notice its delivery being summarized away.
+const streamCompactionTurn = () => {
+  send({ type: "agent_start" });
+  send({ type: "turn_start" });
+  send({ type: "compaction_start", reason: "threshold" });
+  send({ type: "compaction_end", reason: "threshold", result: undefined, aborted: false, willRetry: false });
+  send({ type: "message_update", usage: { input: 0, output: 0 }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "compacted" } });
+  send({ type: "turn_end", message: { stopReason: "end_turn", usage: { input: 12, output: 3 } }, usage: { input: 12, output: 3 } });
   send({ type: "agent_end" });
 };
 
@@ -217,6 +232,11 @@ function handle(cmd: any) {
       send({ type: "response", command: "set_thinking_level", success: true });
       return;
     case "prompt":
+      if (mode === "prompt-reject") {
+        // mirrors pi rejecting a prompt submitted while a compaction runs
+        send({ type: "response", command: "prompt", success: false, error: "fake pi: compaction in progress" });
+        return;
+      }
       if (process.env.FAKE_PI_DUMP) {
         try {
           appendFileSync(
@@ -233,6 +253,7 @@ function handle(cmd: any) {
       else if (mode === "permission") streamPermissionTurn();
       else if (mode === "interleave") streamInterleaveTurn();
       else if (mode === "turn-error") streamErrorTurn();
+      else if (mode === "compaction") streamCompactionTurn();
       else streamTurn();
       return;
     case "extension_ui_response":
