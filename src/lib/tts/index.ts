@@ -50,6 +50,10 @@ export class Speaker {
   private request: AbortController | null = null;
   private localUtterance: SpeechSynthesisUtterance | null = null;
   private settleLocalSpeech: ((finished: boolean) => void) | null = null;
+  /** Pause callback from the non-TTS audio source currently holding the
+   * voice (a voice-note bubble). Cleared by stop() before it runs, and by
+   * the holder's own release, so a stale element is never paused twice. */
+  private externalPause: (() => void) | null = null;
 
   subscribe(fn: (s: SpeechSnapshot) => void): () => void {
     this.watchers.add(fn);
@@ -74,6 +78,9 @@ export class Speaker {
 
   stop() {
     this.token += 1;
+    const external = this.externalPause;
+    this.externalPause = null;
+    external?.();
     this.request?.abort();
     this.request = null;
     this.settleLocalSpeech?.(false);
@@ -86,6 +93,22 @@ export class Speaker {
     if (this.settlePlayback) this.settlePlayback(false);
     else this.teardownAudio();
     if (this.snapshot.status !== "idle" || this.snapshot.error) this.set(IDLE);
+  }
+
+  /** Take the window's single voice for non-TTS playback — a voice-note
+   * bubble pressing play. Stops any utterance and pauses the previous
+   * external holder, the same one-voice rule speak() enforces on itself;
+   * starting TTS later pauses this holder through stop(). Returns a release
+   * function the holder calls when it stops or unmounts for its own reasons. */
+  claimExternalVoice(pause: () => void): () => void {
+    this.stop();
+    this.externalPause = pause;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      if (this.externalPause === pause) this.externalPause = null;
+    };
   }
 
   private teardownAudio() {
