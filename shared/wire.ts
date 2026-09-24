@@ -9,6 +9,7 @@
  * fails compilation until it is either declared here or explicitly listed
  * as server-private. */
 import type { ApprovalMode } from "./approval-mode.ts";
+import type { CommandAllowlistCandidate } from "./command-allowlist.ts";
 import type { ContentClass } from "./content-class.ts";
 import type { TurnDigest } from "./digest.ts";
 import type { BotAvatarCrop } from "./bot-avatar.ts";
@@ -102,6 +103,11 @@ export interface TaskUsage {
   context?: { tokens: number; window?: number };
 }
 
+/** Accounting for the currently displayed room thread, across all speakers. */
+export interface GroupThreadUsage extends TaskUsage {
+  lastSpeaker?: { botId: string; name: string };
+}
+
 /** One task = one conversation with its own context, thread and provider
  * session. Wire form: no resumeCursors or lastInstanceId — the harness's
  * own bookkeeping that no client has ever used. */
@@ -130,6 +136,11 @@ export interface WireTask {
   /** Epoch ms of the newest message, or createdAt when the thread has none.
    * Server-derived. Clients must not write it. */
   updatedAt?: number;
+  /** When the person snoozed this thread. 0 means "until new activity" and
+   * the store clears it the moment the thread wakes; a future epoch ms means
+   * "until then" and reads treat an expired value as absent, so no timer or
+   * migration is ever needed. Absent = not snoozed. */
+  snoozedUntil?: number;
   /** Defaults are copied when a task is created. */
   modelSelection?: ModelSelection;
   approvalMode?: ApprovalMode;
@@ -172,13 +183,41 @@ export interface InstalledPlaybook {
 }
 
 /** Listing provenance and connector intent retained for package details
- * and future re-export. It never means the apps are authorized. */
+ * and future re-export. It never means the apps are authorized. Every field
+ * after requiredApps is additive and optional: older records have none. */
 export interface InstalledPackageMetadata {
   id: string;
   name: string;
   release: string;
   requiredApps: Array<{ slug: string; label: string; reason: string; optional?: boolean }>;
+  /** Where it came from; absent on older records means "file". */
+  source?: "file" | "org";
+  /** file: a random id per import; org: derived from the organization and package. */
+  installId?: string;
+  /** This bot's key in the package, so a re-export keeps its identity. */
+  agentKey?: string;
+  /** Set when the bot was created from a package preset. */
+  presetKey?: string;
+  /** What the package suggested. Never applied: imported bots start on Ask. */
+  suggestedApproval?: "ask" | "auto";
+  /** org only */
+  publisher?: { organizationId: string; slug: string; name: string };
+  /** org only: "<publisher slug>/<package id>" */
+  ref?: string;
+  /** org only: the release bytes that were applied */
+  sha256?: string;
 }
+
+/** One service's connector tool grant: `"*"` widens to every tool on the
+ * service, an explicit list names exact tools. */
+export interface ConnectorToolGrant {
+  tools: "*" | string[];
+}
+
+/** Lowercased Composio service slug, e.g. `gmail`. */
+export const CONNECTOR_SLUG_PATTERN = /^[a-z0-9][a-z0-9_-]{0,80}$/;
+/** Composio tool names are upper-snake, e.g. `GMAIL_SEND_EMAIL`. */
+export const CONNECTOR_TOOL_NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,127}$/;
 
 /** A bot as a client may see it. Wire form: no provider session
  * bookkeeping (resumeCursors), no elevation journal (approvalGrant), no
@@ -260,6 +299,11 @@ export interface WireBot {
   peers?: string[];
   /** Whether this bot may use the workspace's connected apps. */
   composio?: boolean;
+  /** Which connected-app tools this bot may call, by service slug. Absent
+   * defers to the legacy `composio` boolean above (unset/true = every tool,
+   * false = none); an explicit `{}` grants no tools. Grants never travel in
+   * shareable exports and imported bots always land with none. */
+  connectorTools?: Record<string, ConnectorToolGrant>;
   /** Whether this bot gets the app's built-in browser. */
   browser?: boolean;
   /** Which of the app-wide MCP servers this bot mounts, by name. */
@@ -275,14 +319,34 @@ export interface WireBot {
   /** What the bot is doing right now; transient like busy. */
   activity?: BotActivity;
   createdAt: number;
+  /** Who may see this bot on a workspace several people share. Absent means
+   * everyone. Sent to admins only; a member's copy of a bot never carries it. */
+  visibility?: BotVisibility;
 }
 
+/** Who may see a bot: every signed-in person, admins only, or the listed
+ * addresses (and `@domain` entries) plus admins. See server/bot-visibility.ts. */
+export type BotVisibility = "everyone" | "admins" | { people: string[] };
+
 /** The person a user message is from, as the server resolved it from their
- * own session. Attribution only, never authority: nothing may be allowed or
- * refused because of it, and no request body can supply it. */
+ * own session. No request body can supply it. `name` is attribution only:
+ * nothing may be allowed or refused because of it. `id` is an opaque key the
+ * server derives from the authenticated session (the account email when
+ * there is one, else the paired session), and decides one thing only: on a
+ * workspace shared by several people, whose session may answer the card
+ * this request raised. */
 export interface ResolvedSender {
   name: string;
+  id?: string;
 }
+
+/** Who answered a card: a signed-in person (named as their messages are), the
+ * owner on this machine, or a session-less local caller on a shared server
+ * (`worker`: the Slack worker, or any other process on that machine). */
+export type CardAnswerer =
+  | { kind: "session"; name: string }
+  | { kind: "loopback" }
+  | { kind: "worker" };
 
 /** One transcript line. Serialized as stored — the durable delivery
  * identity (roomRequest) rides the wire unchanged. */
@@ -302,7 +366,10 @@ export interface WireMessage {
   };
   /** Durable provider output stored by the harness; renderers receive only
    * the allowlisted /api/attachments URL. */
-  attachments?: Array<{ kind: "image"; path: string; mime: string }>;
+  attachments?: Array<
+    | { kind: "image"; path: string; mime: string }
+    | { kind: "audio"; path: string; mime: string; durationMs?: number }
+  >;
   card?: OptionCardData;
   connector?: ConnectorCardData;
   secret?: SecretRequestCardData;
@@ -385,6 +452,8 @@ export interface OptionCardData {
    * verdict. */
   answeredText?: string;
   dismissed?: boolean;
+  /** Who settled the card, when a person or service answered it. */
+  answeredBy?: CardAnswerer;
   /** Present when this card is a live provider ask (approval/question). */
   requestId?: string;
   /** permission cards: the tool being requested. */
@@ -397,6 +466,8 @@ export interface OptionCardData {
   allowKey?: string;
   /** the provider can remember an allow for the rest of its session. */
   allowSession?: boolean;
+  /** Exact native command offered for an owner/admin to remember. */
+  commandAllowlist?: CommandAllowlistCandidate;
   /** Local actions never share remembered grants with cloud/tool approvals. */
   approvalScope?: "local-computer";
   /** A durable chat-created routine proposal. */
@@ -464,6 +535,8 @@ export interface GroupTask {
 /** A room as a client may see it: the record plus the computed working
  * flag (publicGroupState). */
 export interface WireGroup {
+  /** Computed from the usage ledger, not stored in groups.json. */
+  usage?: GroupThreadUsage | null;
   id: string;
   /** The active task's thread. Direct-message channels stay single-threaded. */
   threadId: string;
@@ -495,6 +568,10 @@ export interface WireGroup {
   /** New user-created rooms start with setup pending. */
   setupCompletedAt?: number | null;
   setupSkippedAt?: number | null;
+  /** The narrowest audience this room has ever had (see
+   * server/bot-visibility.ts): a bot leaving never widens who may see the
+   * transcript. Sent to admins only. */
+  audienceFloor?: BotVisibility;
   /** True while any member (or hand-off) is mid-turn. Computed at
    * projection time, never persisted. */
   working: boolean;
@@ -506,9 +583,13 @@ export interface WireGroup {
 // the app consumes, payload typed by the shape that actually goes over the
 // wire. Transport-owned frames (hello, ping) stay in src/lib/live-events.
 
+/** Why a steer-queue entry waits: a shared thread slot, or the bot's room
+ * turn (which runs one at a time per bot). */
+export type SteerQueueReason = "capacity" | "group-turn";
+
 /** Pending steer-queue chips, as `queuedSteerSnapshot` emits them and the
  * `bot.queued` frame carries them: threadId → queued items. */
-export type BotQueuedMessages = Record<string, Array<{ queueId: string; text: string; reason?: "capacity" }>>;
+export type BotQueuedMessages = Record<string, Array<{ queueId: string; text: string; reason?: SteerQueueReason }>>;
 
 export type ServerFrame =
   | { kind: "sections"; sections: string[] }

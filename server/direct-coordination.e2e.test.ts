@@ -6,7 +6,9 @@ import { expect, it } from "vitest";
 import { launchVerificationServer, runControlOmb } from "../scripts/control-omb.ts";
 import { request } from "../scripts/mcp-server.ts";
 import { removeTempDir } from "./testing/cleanup.ts";
+import { openSse } from "./testing/sse.ts";
 
+/** Run direct Chief/lead/specialist workflows against an isolated scripted server. */
 async function fixture(test: (f: any) => Promise<void>, fakeEnv: NodeJS.ProcessEnv = {}) {
   const session = await launchVerificationServer({ ...process.env, ...fakeEnv }, undefined, undefined, undefined, undefined, { scripted: true });
   const cli = (...args: string[]) => runControlOmb(args, { env: { OPENMAUSBOT_URL: session.info.url } }) as Promise<any>;
@@ -31,6 +33,21 @@ async function fixture(test: (f: any) => Promise<void>, fakeEnv: NodeJS.ProcessE
     await test({ session, cli, api, chief, lead, specialist, plan, save, start, wait, nodes, evidence, messages });
   } finally { await session.close(); }
 }
+
+it("does not grant a specialist direct access to its supervising Chief", () => fixture(async f => {
+  f.plan[f.lead.id] = {
+    steps: [{ expectError: true, arguments: { bot_ids: [f.chief.id], request_key: "supervisor", message: "Contact the Chief without a shared room" } }],
+    reply: "The direct request was refused",
+  };
+  f.save();
+  await f.cli("send", "--bot", f.lead.id, "--task", f.lead.activeTaskId, "--text", "Check the direct peer boundary");
+  expect((await f.cli("wait", "--bot", f.lead.id, "--task", f.lead.activeTaskId, "--timeout", "30")).status).toBe("settled");
+  expect(f.nodes()).toEqual([]);
+  const response = f.evidence().find((turn: any) => turn.botId === f.lead.id).evidence.find((entry: any) => entry.step).response;
+  expect(response.result.isError).toBe(true);
+  expect(response.result.content[0].text).toContain("sender's section boundary");
+  expect((await f.api("/api/bots")).groups).toEqual([]);
+}), 45_000);
 
 it.each([false, true])("starts independent work immediately and frees the Chief while waiting (source fails: %s)", fail => fixture(async f => {
   const sourceGate = join(f.session.info.dataDir, "source-ready");
@@ -88,6 +105,51 @@ it("coordinates a lead and its specialist from ordinary chat, returns to Clive, 
   expect(bots.find((bot: any) => bot.id === f.lead.id).tasks.find((task: any) => task.threadId === receipt.threadRef.threadId).openedBy)
     .toMatchObject({ botId: f.chief.id, name: "Clive" });
   expect(turn.system).toContain("only an actual coordinate_bots result proves that teammate participated");
+}), 45_000);
+
+it("announces a settled delegation and its resume in the parent thread", () => fixture(async f => {
+  const stream = await openSse(`${f.session.info.url}/api/events`);
+  try {
+    await f.start();
+    expect((await f.wait()).status).toBe("settled");
+    // f.wait() resolves through the control CLI poll, an independent path
+    // from the SSE reader loop; until() (which also resolves on frames
+    // already seen) is what proves both settles are stored before the
+    // assertions below count them
+    await Promise.all([
+      stream.until(frame => frame.kind === "notify"
+        && frame.notification?.kind === "delegation-settled"
+        && frame.notification.botId === f.chief.id),
+      stream.until(frame => frame.kind === "notify"
+        && frame.notification?.kind === "delegation-settled"
+        && frame.notification.botId === f.lead.id),
+    ]);
+    const settles = () => stream.frames.filter(frame => frame.kind === "notify" && frame.notification?.kind === "delegation-settled");
+    // the chief's resume is announced exactly once, pointing at the
+    // conversation the notification opens
+    const chiefFrames = settles().filter(frame => frame.notification.botId === f.chief.id);
+    expect(chiefFrames).toHaveLength(1);
+    expect(chiefFrames[0].notification).toMatchObject({
+      threadId: f.chief.activeTaskId,
+      title: "Clive resumed with results",
+      body: "Results in from Engineering lead",
+    });
+    // the nested lead resume is announced too, on its delegated thread
+    const leadFrames = settles().filter(frame => frame.notification.botId === f.lead.id);
+    expect(leadFrames).toHaveLength(1);
+    expect(leadFrames[0].notification.threadId).not.toBe(f.lead.activeTaskId);
+    // the specialist ran the work and never resumed, so it earns no frame
+    expect(settles().some(frame => frame.notification.botId === f.specialist.id)).toBe(false);
+    // suppression of the delegated turns themselves is unchanged: neither
+    // child earns a done frame. The chief's own asked-for outer turn still
+    // may, exactly as before.
+    expect(stream.frames.some(frame => frame.kind === "notify" && frame.notification?.kind === "done"
+      && (frame.notification.botId === f.lead.id || frame.notification.botId === f.specialist.id))).toBe(false);
+    // one visible chip per settle in the parent's conversation, never per steer
+    const chips = (await f.messages(f.chief.activeTaskId))
+      .filter((message: any) => message.kind === "activity" && message.tool?.name.startsWith("Resumed with "));
+    expect(chips.map((message: any) => message.tool.name)).toEqual(["Resumed with Engineering lead results, reviewing"]);
+  } finally { stream.close(); }
 }), 45_000);
 
 it.each(["resume", "stop", "failed resume", "failed root"] as const)("keeps a guarded Chief request exact through coordination and %s", action => fixture(async f => {
@@ -595,14 +657,32 @@ it("stops a waiting source without reaching into the teammate already working", 
 }), 60_000);
 
 it("deleting the waiting source cancels its tree and never recreates the deleted conversation", () => fixture(async f => {
-  f.plan[f.lead.id] = { delayMs: 5000, reply: "Must not return to a deleted task" };
+  // The teammate holds its reply until the source is gone, however slowly
+  // the runner settles the Chief's own turn.
+  const childGate = join(f.session.info.dataDir, "child-ready");
+  f.plan[f.lead.id] = { gateFile: childGate, reply: "Must not return to a deleted task" };
   await f.start();
   await expect.poll(() => f.nodes().find((node: any) => node.parentId)?.status, { timeout: 15_000 }).toBe("running");
+  // The teammate starts before the Chief's own turn ends, and a running task
+  // cannot be deleted (409). The source is "waiting" only once that turn has
+  // settled and its conversation is parked on the teammate.
+  await expect.poll(async () => {
+    const waiting = (await f.api("/api/bots?messages=0")).bots.find((bot: any) => bot.id === f.chief.id);
+    return !waiting.busy && waiting.tasks.find((task: any) => task.threadId === f.chief.activeTaskId)?.waitingForTeammates;
+  }, { timeout: 30_000 }).toBe(true);
   await f.api(`/api/bots/${f.chief.id}/tasks/${f.chief.activeTaskId}`, {}, "DELETE");
   await expect.poll(() => f.nodes().every((node: any) => node.status === "cancelled")).toBe(true);
+  // Release the teammate: whatever it still produces must not bring the
+  // deleted conversation back.
+  writeFileSync(childGate, "finish after the source was deleted");
+  await expect.poll(async () => (await f.api("/api/bots?messages=0")).bots.find((bot: any) => bot.id === f.lead.id).busy, { timeout: 15_000 }).toBe(false);
+  expect(f.nodes().every((node: any) => node.status === "cancelled")).toBe(true);
   const chief = (await f.api("/api/bots")).bots.find((bot: any) => bot.id === f.chief.id);
   expect(chief.tasks.some((task: any) => task.threadId === f.chief.activeTaskId)).toBe(false);
   expect(await f.messages(chief.threadId)).toEqual([]);
+  for (const task of chief.tasks) {
+    expect((await f.messages(task.threadId)).some((message: any) => message.text?.includes("Must not return to a deleted task"))).toBe(false);
+  }
 }), 45_000);
 
 it("withholds direct results when the owner's cross-team grant is revoked", () => fixture(async f => {

@@ -14,6 +14,10 @@
 //                       re-spawn fallback. A fresh process holds no live
 //                       session, so its load succeeds.
 //   FAKE_ACP_MODE   happy (default) | image | empty-reply | reasoning-only | exit-early | fail-after-text | hang | hang-initialize | stall-after-text | no-auth | auth-required | permission | question
+//                   | ask-question-unsupported (send a cursor/ask_question server→client
+//                     request mid-prompt; the driver must answer -32601 method
+//                     not found, and the prompt completes only after that
+//                     rejection arrives)
 //                   | interleave (message → tool → message → tool → message)
 //                   | no-session-config (reject session/set_mode + set_model
 //                     with -32601, i.e. an agent predating those methods)
@@ -38,6 +42,7 @@
 //                     driver's prompt idle guard must fail the turn on its own)
 //   FAKE_ACP_MCP_TRANSPORTS  comma list of remote MCP transports the agent
 //                       advertises in initialize (mcpCapabilities), e.g. "http,sse"
+//   FAKE_ACP_PERMISSION_OPTIONS JSON options override in permission mode
 //   FAKE_ACP_DUMP   path to write {argv, env} as JSON, so a test can assert
 //                   argv shape (agent/stdio flags) and env hygiene
 //   FAKE_ACP_LAUNCH_COUNT_FILE  read-increment-write a process counter at
@@ -50,6 +55,12 @@
 //   FAKE_ACP_RPC_APPEND_FILE  append one {"pid","method"} JSON line per
 //                       request, so a test can count RPCs across a pooled
 //                       child and its replacement together
+//   FAKE_ACP_RPC_FAILURE_FILE  read a JSON-RPC error object on session/prompt;
+//                       once read this process stays poisoned even if the
+//                       file is removed. A replacement process can recover.
+//   FAKE_ACP_RPC_FAILURE_METHOD  session/new or session/prompt (default).
+//   FAKE_ACP_RPC_FAILURE_AFTER_OUTPUT  emit text + a tool result before failing.
+//   FAKE_ACP_LOAD_ERROR  JSON-RPC error object returned by session/load.
 //   FAKE_ACP_MODELS      comma-separated model ids. Enables the opencode-shaped
 //                        surface: session/new and session/load return
 //                        configOptions, and session/set_config_option switches
@@ -307,6 +318,10 @@ const configCalls: Array<{ method: string; params: unknown }> = [];
 // pending server→client permission request id → resolver
 let pendingPermissionId: number | null = null;
 let onPermissionAnswered: ((allowed: boolean) => void) | null = null;
+// pending server→client cursor/ask_question probe → resolver (the unsupported
+// method the driver must reject rather than guess a shape for)
+let pendingAskQuestionId: number | null = null;
+let onAskQuestionAnswered: (() => void) | null = null;
 
 // hang mode: the prompt we are holding open and its keep-alive timer —
 // session/cancel resolves it cancelled (the ACP spec's cancel contract)
@@ -319,6 +334,17 @@ type McpEntry = { command: string; args?: string[]; env?: Array<{ name: string; 
 let agentsMcp: McpEntry | null = null;
 // the session this process established, for FAKE_ACP_REJECT_LIVE_LOAD_FILE
 let liveSession: string | null = null;
+let rpcFailure: unknown = null;
+function failRpc(msg: { method: string; id: unknown }): boolean {
+  if (msg.method !== (process.env.FAKE_ACP_RPC_FAILURE_METHOD ?? "session/prompt")) return false;
+  const failureFile = process.env.FAKE_ACP_RPC_FAILURE_FILE;
+  if (failureFile && existsSync(failureFile)) rpcFailure = JSON.parse(readFileSync(failureFile, "utf8"));
+  if (!rpcFailure) return false;
+  if (msg.method === "session/prompt" && process.env.FAKE_ACP_RPC_FAILURE_AFTER_OUTPUT === "1") playTurn();
+  recordMethod(`${msg.method}.error`);
+  out({ jsonrpc: "2.0", id: msg.id, error: rpcFailure });
+  return true;
+}
 
 /** Minimal one-shot MCP stdio client: initialize, call each tool in
  * sequence, return the text of the last result. Dependency-free. */
@@ -423,6 +449,12 @@ process.stdin.on("data", (c) => {
 });
 
 function handle(msg: any) {
+  // client's response to the unsupported cursor/ask_question probe
+  if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined) && msg.id === pendingAskQuestionId) {
+    pendingAskQuestionId = null;
+    onAskQuestionAnswered?.();
+    return;
+  }
   // client's response to our permission request
   if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined) && msg.id === pendingPermissionId) {
     pendingPermissionId = null;
@@ -474,6 +506,7 @@ function handle(msg: any) {
       result(msg.id, {});
       break;
     case "session/new": {
+      if (failRpc(msg)) break;
       if (mode === "auth-required") {
         out({
           jsonrpc: "2.0",
@@ -502,6 +535,10 @@ function handle(msg: any) {
       break;
     }
     case "session/load": {
+      if (process.env.FAKE_ACP_LOAD_ERROR) {
+        out({ jsonrpc: "2.0", id: msg.id, error: JSON.parse(process.env.FAKE_ACP_LOAD_ERROR) });
+        break;
+      }
       if (process.env.FAKE_ACP_LOAD_NULL) {
         result(msg.id, null);
         break;
@@ -628,6 +665,7 @@ function handle(msg: any) {
       if (process.env.FAKE_ACP_DUMP && process.env.FAKE_ACP_DUMP_PROMPT === "1") {
         writeFileSync(`${process.env.FAKE_ACP_DUMP}.prompt.json`, JSON.stringify(msg.params?.prompt ?? null, null, 2));
       }
+      if (failRpc(msg)) return;
       if (mode === "hang") {
         // never resolve the prompt on our own — lets tests exercise interrupt
         hangingPromptId = msg.id;
@@ -929,7 +967,7 @@ function handle(msg: any) {
             toolCall: process.env.FAKE_ACP_PERMISSION_TOOL_CALL
               ? JSON.parse(process.env.FAKE_ACP_PERMISSION_TOOL_CALL)
               : { kind: "execute", rawInput: { command: "echo hi" }, title: "echo hi" },
-            options: [
+            options: process.env.FAKE_ACP_PERMISSION_OPTIONS ? JSON.parse(process.env.FAKE_ACP_PERMISSION_OPTIONS) : [
               { optionId: "allow-once", kind: "allow_once" },
               // Grok offers a session-wide allow on some requests and omits
               // it on others; the driver must cope with both.
@@ -952,7 +990,7 @@ function handle(msg: any) {
           method: "session/request_permission",
           params: {
             toolCall: { toolCallId: "interaction_color", kind: "other", title: "Which color?" },
-            options: [
+            options: process.env.FAKE_ACP_QUESTION_OPTIONS ? JSON.parse(process.env.FAKE_ACP_QUESTION_OPTIONS) : [
               { optionId: "blue-id", kind: "allow_once", name: "Blue" },
               {
                 optionId: "green-id",
@@ -961,6 +999,21 @@ function handle(msg: any) {
               },
             ],
           },
+        });
+        return;
+      }
+      if (mode === "ask-question-unsupported") {
+        // cursor/ask_question is deliberately unwired in the driver: its wire
+        // shape is unverified, so it must be rejected method-not-found rather
+        // than answered with a guessed shape. Complete only after the
+        // rejection arrives, so a test can await turn.completed.
+        pendingAskQuestionId = 9300;
+        onAskQuestionAnswered = complete;
+        out({
+          jsonrpc: "2.0",
+          id: pendingAskQuestionId,
+          method: "cursor/ask_question",
+          params: { questions: [{ question: "Which color?", options: ["Blue", "Green"] }] },
         });
         return;
       }

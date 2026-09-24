@@ -6,7 +6,7 @@
 // These used to be POSIX-only: the fake CLI is a shebang script Windows
 // cannot exec, and the broker is a unix socket. Both now go through
 // resolveCliSpawn / permissionSocketPath, so they run everywhere.
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { connect, createServer as createNetServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
@@ -893,6 +893,39 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(sent[1].message.content.endsWith("two")).toBe(true);
   });
 
+  it("redelivers unchanged mention context on every tagged turn", async () => {
+    await create();
+    const dump = join(scratch, "mention.json");
+    const prompts = join(scratch, "mention-prompts.jsonl");
+    process.env.FAKE_CLAUDE_DUMP = dump;
+    process.env.FAKE_CLAUDE_PROMPTS = prompts;
+
+    const send = async (text: string, mentionTurn?: boolean) => {
+      await instance.adapter.sendTurn({
+        threadId: "t-mention",
+        text,
+        system: "You are Testy.\n\nTagged: @Testy",
+        systemStable: "You are Testy.",
+        systemVolatile: "Tagged: @Testy",
+        ...(mentionTurn ? { mentionTurn: true } : {}),
+      });
+      await recorder.until((e) => e.type === "turn.completed");
+    };
+    await send("one");
+    recorder.events.length = 0;
+    await send("two", true);
+
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    // the mention describes this turn, so the note rides it even though the
+    // volatile half is byte-identical to the one the session launched with
+    const sent = readFileSync(prompts, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(sent).toHaveLength(2);
+    expect(sent[0].message.content).toBe("one");
+    expect(sent[1].message.content).toContain("Tagged: @Testy");
+    expect(sent[1].message.content.endsWith("two")).toBe(true);
+    expect(seen.systemPrompt).toContain("Tagged: @Testy");
+  });
+
   it("still relaunches when the stable half of the prompt changes", async () => {
     await create();
     const dump = join(scratch, "stable.json");
@@ -1630,14 +1663,27 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await recorder.until((e) => e.type === "turn.completed");
   });
 
-  it("interrupt kills the turn and settles it as failed, not hung", async () => {
-    await create("hang");
-    await instance.adapter.sendTurn({ threadId: "t-int", text: "go" });
-    await recorder.until((e) => e.type === "session.started");
+  it.each([false, true])("interrupt kills the turn and settles it as interrupted, not hung (retained: %s)", async (retained) => {
+    const gate = join(scratch, "stop-interrupt.gate");
+    const dump = join(scratch, "stop-interrupt-dump.json");
+    await create("slow", { FAKE_CLAUDE_SLOW_FINISH_GATE: gate, FAKE_CLAUDE_DUMP: dump });
+    const threadId = `t-int-${retained}`;
+    if (retained) {
+      writeFileSync(gate, "finish");
+      const first = await instance.adapter.sendTurn({ threadId, text: "first" });
+      await recorder.until((e) => e.type === "turn.completed" && e.turnId === first.turnId);
+      rmSync(gate);
+      rmSync(dump);
+    }
+    const running = await instance.adapter.sendTurn({ threadId, text: "go" });
+    await recorder.until((e) => e.type === "item.completed" && e.itemType === "tool" && e.turnId === running.turnId);
+    const spawnedItsOwnProcess = existsSync(dump);
+    expect(spawnedItsOwnProcess).toBe(!retained);
 
-    await instance.adapter.interruptTurn("t-int");
-    const done = await recorder.until((e) => e.type === "turn.completed");
-    expect(done).toMatchObject({ ok: false, stopReason: "exit_before_result" });
+    await instance.adapter.interruptTurn(threadId);
+    const done = await recorder.until((e) => e.type === "turn.completed" && e.turnId === running.turnId);
+    expect(done).toMatchObject({ ok: false, stopReason: "interrupted" });
+    expect(recorder.events.filter((e) => e.type === "runtime.error")).toEqual([]);
   });
 
   it.each([false, true])("refuses steering and retires approvals after interrupt before process exit (retained=%s)", async (retained) => {
@@ -2113,6 +2159,35 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await instance.adapter.sendTurn({ threadId: "t-review-ask", text: "go", approvalMode: "ask", model: "claude-haiku-4-5" });
     await recorder.until((e) => e.type === "session.started" && e.threadId === "t-review-ask");
     expect(await raise("t-review-ask", "ask-ask")).toHaveProperty("nativeReview", undefined);
+  });
+
+  it("attaches exact native Bash command input with the launch directory only to shell permissions", async () => {
+    await create("hang");
+    const threadId = "t-command-descriptor";
+    await instance.adapter.sendTurn({ threadId, text: "go", cwd: scratch });
+    const conn = await connectSocket(permissionSocketPath(threadId));
+    const command = `printf '  ${"complete input ".repeat(30)}'\n  pwd  `;
+    try {
+      for (const [index, ask] of [
+        { tool: "Bash", input: { command }, expected: { command, cwd: realpathSync(scratch) } },
+        { tool: "Bash", input: { command, dangerouslyDisableSandbox: true }, expected: { command, cwd: realpathSync(scratch) } },
+        { tool: "Bash", input: { command: ["echo", "do not join argv"] }, expected: undefined },
+        { tool: "Bash", input: { description: "echo display only" }, expected: undefined },
+        { tool: "mcp__shell__run", input: { command }, expected: undefined },
+        { tool: "AskUserQuestion", kind: "question", input: { command, question: "Run this?" }, expected: undefined },
+      ].entries()) {
+        const id = `command-descriptor-${index}`;
+        conn.write(JSON.stringify({ t: "ask", id, ...ask }) + "\n");
+        const opened = await recorder.until((event) => event.type === "request.opened" && event.requestId === id);
+        expect(opened).toHaveProperty("command", ask.expected);
+        if (ask.input.dangerouslyDisableSandbox === true) expect(opened).toHaveProperty("requiresExplicitApproval", true);
+        await instance.adapter.respondToRequest(threadId, id, { behavior: ask.kind === "question" ? "answer" : "deny", message: "No" });
+      }
+    } finally {
+      conn.destroy();
+    }
+    await instance.adapter.interruptTurn(threadId);
+    await recorder.until((event) => event.type === "turn.completed");
   });
 
   it("brokers a permission ask into request.opened and answers over the socket", async () => {

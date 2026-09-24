@@ -8,6 +8,7 @@ import { join } from "node:path";
 
 import { writeFileAtomic } from "./atomic.ts";
 import { ensureSections, readSections, changeEmptySection } from "./section-context.ts";
+import type { TeamComputers } from "./team-computers.ts";
 import { removeBotFolder, soulFile, soulHash, writeSoulMirror } from "./bot-folder.ts";
 import type { BotProfilePatch } from "./bot-profile.ts";
 import { peerAllowKey, type PeerAction } from "./peer-approval-key.ts";
@@ -15,6 +16,7 @@ import { DATA_DIR, EVENTS_DIR, NATIVE_DIR, loadBrowserProfileIdAliases } from ".
 import * as mdb from "./message-db.ts";
 import { runCommand, type Command } from "./commands.ts";
 import { workspaceDir } from "./workspace.ts";
+import type { Destination } from "./surface.ts";
 import { newId, type ModelSelection } from "./contracts.ts";
 import { pickBotName } from "./names.ts";
 import { redactSecretsInText } from "./redact.ts";
@@ -26,11 +28,13 @@ import type { TeamSetupRequest, TeamSetupResult } from "../shared/team-setup.ts"
 import type { GroupGoalRunCardData } from "../shared/group-goal-run.ts";
 import { isMentionBoundary, isMentionNameContinuation } from "../shared/mention-boundary.ts";
 import type { HandedState } from "./delta-context.ts";
+import type { AgentPart, PartPair, RoomPart } from "./package-parts.ts";
 import type {
   BotActivity, GroupDefaultResponder, GroupTask as GroupTaskRecord, MausColor,
-  OptionCardData, TaskClosedBy, TaskOpenedBy, TaskUsage, WireBot, WireGroup,
+  ConnectorToolGrant, OptionCardData, TaskClosedBy, TaskOpenedBy, TaskUsage, WireBot, WireGroup,
   WireMessage, WireTask, BotProject as BotProjectRecord,
 } from "../shared/wire.ts";
+import { CONNECTOR_SLUG_PATTERN, CONNECTOR_TOOL_NAME_PATTERN } from "../shared/wire.ts";
 // Re-exported under their historical names so server-side importers keep working.
 export type {
   BotActivity, ConnectorCardData, GroupDefaultResponder, OptionCardData,
@@ -43,12 +47,21 @@ export type { InstalledPlaybook, InstalledPackageMetadata, MausColor, MausExpres
 /** One transcript line, serialized as stored — the shared wire shape. */
 export type Message = WireMessage;
 
-/** A room record: the shared wire shape minus the computed working flag,
- * which publicGroupState adds at projection time. */
-export type GroupRecord = Omit<WireGroup, "working">;
-/** Groups keep no private fields; the only projection work is the
- * transient `working` flag publicGroupState computes at broadcast time. */
-export type GroupWireProjection = GroupRecord & { working: boolean };
+/** Server-private: a group chat added from the organization's library, with
+ * its package key, member keys and per-part hashes (server/package-parts.ts). */
+export interface GroupPackageStamp {
+  installId: string;
+  key: string;
+  memberKeys: string[];
+  parts: Record<RoomPart, PartPair>;
+}
+
+/** A room record excludes working state and ledger usage, both computed by
+ * publicGroupState at projection time. */
+export type GroupRecord = Omit<WireGroup, "working" | "usage"> & { installedPackage?: GroupPackageStamp };
+/** The one private field is stripped; projection adds computed display fields. */
+export type GroupWirePrivateKeys = "installedPackage";
+export type GroupWireProjection = Omit<GroupRecord, GroupWirePrivateKeys> & Pick<WireGroup, "usage"> & { working: boolean };
 export type GroupWireProjectionIsExact = AssertExact<WireGroup, GroupWireProjection> & AssertSameKeys<WireGroup, GroupWireProjection>;
 export const groupWireProjectionIsExact: GroupWireProjectionIsExact = true;
 
@@ -77,12 +90,17 @@ export interface TaskRecord extends WireTask {
   appliedCompactionId?: string;
   contextFloor?: number;
   lastContextModel?: string;
+  /** Who pinned this conversation's surface: "user" when a person chose it
+   * (composer chip or thread setting), "auto" when a turn recorded where
+   * it landed. Absent means legacy/unknown: it may be a person's choice,
+   * so only positively identified auto pins yield to Works on changes. */
+  surfaceSource?: "user" | "auto";
 }
 
 /** TaskRecord fields no client may see. Everything else must be on WireTask:
  * the exactness assertion below fails to compile when either side drifts,
  * so a new server field forces a decision — wire-visible or private here. */
-export type TaskWirePrivateKeys = "resumeCursors" | "lastInstanceId" | "handedMessages" | "appliedCompactionId" | "contextFloor" | "lastContextModel";
+export type TaskWirePrivateKeys = "resumeCursors" | "lastInstanceId" | "handedMessages" | "appliedCompactionId" | "contextFloor" | "lastContextModel" | "surfaceSource";
 export type TaskWireProjection = Pick<TaskRecord, Exclude<keyof TaskRecord, TaskWirePrivateKeys>>;
 type AssertExact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
 type AssertSameKeys<A, B> = [keyof A] extends [keyof B] ? ([keyof B] extends [keyof A] ? true : never) : never;
@@ -95,14 +113,15 @@ export const taskWireProjectionIsExact: TaskWireProjectionIsExact = true;
  * returning WireTask means an undeclared server field cannot ride silently. */
 export function toWireTask(task: TaskRecord): WireTask {
   const { resumeCursors: _resumeCursors, lastInstanceId: _lastInstanceId, handedMessages: _handedMessages,
-    appliedCompactionId: _appliedCompactionId, contextFloor: _contextFloor, lastContextModel: _lastContextModel, ...wire } = task;
+    appliedCompactionId: _appliedCompactionId, contextFloor: _contextFloor, lastContextModel: _lastContextModel,
+    surfaceSource: _surfaceSource, ...wire } = task;
   return wire;
 }
 
 const TASK_PATCH_FIELDS = [
   "title", "projectId", "modelSelection", "approvalMode", "autoApprove", "alwaysAllow",
   "unread", "rewound", "archivedAt", "pinned", "pinnedMessageId", "resumeCursors", "lastInstanceId", "cwd",
-  "routineRunId", "surface", "appliedCompactionId", "contextFloor", "lastContextModel",
+  "routineRunId", "surface", "surfaceSource", "snoozedUntil", "appliedCompactionId", "contextFloor", "lastContextModel",
 ] as const satisfies readonly (keyof TaskRecord)[];
 export type TaskPatch = Partial<Pick<TaskRecord, typeof TASK_PATCH_FIELDS[number]>>;
 
@@ -155,6 +174,10 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
     if (typeof card.summary === "string") card.summary = scrub(card.summary);
     if (typeof card.held === "string") card.held = scrub(card.held);
     if (typeof card.answeredText === "string") card.answeredText = scrub(card.answeredText);
+    if (card.commandAllowlist && (
+      scrub(card.commandAllowlist.command) !== card.commandAllowlist.command ||
+      scrub(card.commandAllowlist.cwd) !== card.commandAllowlist.cwd
+    )) delete card.commandAllowlist;
     // Bot-authored question text sits behind the subtitle the same way a
     // routine's instructions do, so it is scrubbed on the same boundary.
     if (card.questionRequest) {
@@ -366,6 +389,9 @@ export interface BotRecord extends Omit<WireBot, "avatarUrl" | "tasks"> {
   lastProfileRequestId?: string;
   /** Receipt committed with a reviewed team batch; prevents replay after a lost response. */
   lastTeamSetupReceipt?: { requestId: string; result: TeamSetupResult };
+  /** Organization library only: each part's release and written hashes
+   * (server/package-parts.ts), for the later automatic update. */
+  packageBase?: Partial<Record<AgentPart, PartPair>>;
 }
 
 /** BotRecord fields no client may see, plus the two the projection
@@ -373,10 +399,63 @@ export interface BotRecord extends Omit<WireBot, "avatarUrl" | "tasks"> {
  * WireTask[], avatarUrl is coerced to always-present). The exactness
  * assertion fails to compile when either side drifts, so a new server
  * field forces a decision — wire-visible or private here. */
-export type BotWirePrivateKeys = "resumeCursors" | "tasks" | "avatarUrl" | "approvalGrant" | "lastProfileRequestId" | "lastTeamSetupReceipt";
+export type BotWirePrivateKeys = "resumeCursors" | "tasks" | "avatarUrl" | "approvalGrant" | "lastProfileRequestId" | "lastTeamSetupReceipt" | "packageBase";
 export type BotWireProjection = Pick<BotRecord, Exclude<keyof BotRecord, BotWirePrivateKeys>>;
 export type BotWireProjectionIsExact = AssertExact<Omit<WireBot, "avatarUrl" | "tasks">, BotWireProjection> & AssertSameKeys<Omit<WireBot, "avatarUrl" | "tasks">, BotWireProjection>;
 export const botWireProjectionIsExact: BotWireProjectionIsExact = true;
+
+/** Upper bounds keep a grants patch from becoming a persistence blob; they
+ * sit far above any real service's tool count. */
+export const CONNECTOR_SLUGS_MAX = 64;
+export const CONNECTOR_TOOLS_PER_SERVICE_MAX = 500;
+
+/** Validate and normalize a connectorTools value at the one boundary every
+ * writer shares (patchBot). Returns a canonical copy: slugs checked against
+ * the service pattern, tool lists deduplicated in order, `"*"` kept as-is.
+ * The legacy clear stays a JSON null at the API edge; here callers pass
+ * undefined to return a bot to boolean-only behavior. */
+export function parseConnectorTools(value: unknown): { ok: true; grants: Record<string, ConnectorToolGrant> } | { ok: false; error: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, error: "connectorTools must be an object of service slugs to tool grants" };
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > CONNECTOR_SLUGS_MAX) {
+    return { ok: false, error: `connectorTools may name at most ${CONNECTOR_SLUGS_MAX} services` };
+  }
+  const grants: Record<string, ConnectorToolGrant> = {};
+  for (const [slug, grant] of entries) {
+    if (!CONNECTOR_SLUG_PATTERN.test(slug)) {
+      return { ok: false, error: `connectorTools service slugs must be lowercase slugs (got "${slug}")` };
+    }
+    if (!grant || typeof grant !== "object" || Array.isArray(grant)) {
+      return { ok: false, error: `connectorTools.${slug} must be a grant like { tools: "*" } or { tools: ["TOOL_NAME"] }` };
+    }
+    const keys = Object.keys(grant);
+    if (keys.length !== 1 || keys[0] !== "tools") {
+      return { ok: false, error: `connectorTools.${slug} accepts only a tools field` };
+    }
+    const tools = (grant as { tools: unknown }).tools;
+    if (tools === "*") {
+      grants[slug] = { tools: "*" };
+      continue;
+    }
+    if (!Array.isArray(tools) || tools.length === 0) {
+      return { ok: false, error: `connectorTools.${slug}.tools must be "*" or a non-empty list of tool names (use {} to grant no tools)` };
+    }
+    if (tools.length > CONNECTOR_TOOLS_PER_SERVICE_MAX) {
+      return { ok: false, error: `connectorTools.${slug}.tools may list at most ${CONNECTOR_TOOLS_PER_SERVICE_MAX} tools` };
+    }
+    const names: string[] = [];
+    for (const tool of tools) {
+      if (typeof tool !== "string" || !CONNECTOR_TOOL_NAME_PATTERN.test(tool)) {
+        return { ok: false, error: `connectorTools.${slug}.tools names must be Composio tool names like GMAIL_SEND_EMAIL` };
+      }
+      if (!names.includes(tool)) names.push(tool);
+    }
+    grants[slug] = { tools: names };
+  }
+  return { ok: true, grants };
+}
 
 const BOTS_FILE = join(DATA_DIR, "bots.json");
 const GROUPS_FILE = join(DATA_DIR, "groups.json");
@@ -505,6 +584,7 @@ export class Store {
   groups: GroupRecord[] = [];
   private threads = new Map<string, ThreadState>();
   private defaultSelection: () => ModelSelection;
+  private completeNewBotSelection: (selection: ModelSelection) => ModelSelection;
   private listeners = new Set<(change: StoreChange) => void>();
   /** A broken team registry must not prevent loading independent chat data. */
   private registeringInitialSections = true;
@@ -512,8 +592,14 @@ export class Store {
    * that slot must not clear a concurrently running independent task. */
   private legacyActivities = new Map<string, BotActivity>();
 
-  constructor(defaultSelection: () => ModelSelection) {
+  constructor(
+    defaultSelection: () => ModelSelection,
+    /** Workspace-wide new-bot defaults (config newBots), applied to every
+     * new bot's selection whichever path created it. */
+    completeNewBotSelection: (selection: ModelSelection) => ModelSelection = (selection) => selection,
+  ) {
     this.defaultSelection = defaultSelection;
+    this.completeNewBotSelection = completeNewBotSelection;
     mkdirSync(DATA_DIR, { recursive: true });
     for (const file of [BOTS_FILE, GROUPS_FILE]) tightenRegistryFile(file);
     try {
@@ -770,6 +856,9 @@ export class Store {
     // After legacy transcripts are in SQLite, so the first boot sees their
     // newest message instead of stamping createdAt and jumping next launch.
     this.repairThreadUpdatedAts();
+    // After the roster is loaded, so identity resolution sees which opener
+    // ids are still live.
+    this.repairDuplicatePairConversations();
     this.registeringInitialSections = false;
   }
 
@@ -816,17 +905,60 @@ export class Store {
     if (groupsDirty) this.saveGroups();
   }
 
-  private saveBots(bots: BotRecord[] = this.bots) {
-    this.rememberSections([...this.bots, ...bots].map((bot) => bot.section));
+  /** At most one live pair row per (recipient, sender identity). Servers
+   * before identity-stable matching minted a second live pair row for a
+   * deleted-and-recreated sender while the predecessor's row dangled live
+   * forever; collapse those on load by keeping the row the resolver favors
+   * (first in the task list — the newest, actively used one) and demoting
+   * the rest to closed plain threads. History is kept, never deleted, and
+   * a demoted row is never re-adopted: adoption skips closed rows. Runs on
+   * every load and touches nothing in a store that already holds the
+   * invariant. */
+  private repairDuplicatePairConversations(): void {
+    let botsDirty = false;
+    type SweepTask = { openedBy?: TaskOpenedBy; closedBy?: TaskClosedBy };
+    const sweep = (tasks: SweepTask[] | undefined, repaired: () => void) => {
+      const pairs = new Map<string, SweepTask[]>();
+      for (const task of tasks ?? []) {
+        const by = task.openedBy;
+        if (by?.kind !== "pair" || task.closedBy) continue;
+        const identity = this.openerIdentity(by);
+        pairs.set(identity, [...(pairs.get(identity) ?? []), task]);
+      }
+      for (const rows of pairs.values()) {
+        // rows are in task-list order, the same order the resolver's
+        // find() favors: the first is the one it keeps using.
+        for (const duplicate of rows.slice(1)) {
+          const by = duplicate.openedBy!;
+          const identity = this.openerIdentity(by);
+          const { kind: _kind, ...opened } = by;
+          duplicate.openedBy = opened;
+          duplicate.closedBy = {
+            botId: identity,
+            name: this.bot(identity)?.name ?? by.name,
+            at: Date.now(),
+          };
+          repaired();
+        }
+      }
+    };
+    // Pair rows only ever live on bots: the resolver requires a bot
+    // recipient, and group tasks carry no peer stamps.
+    for (const bot of this.bots) sweep(bot.tasks, () => { botsDirty = true; });
+    if (botsDirty) this.saveBots();
+  }
+
+  private saveBots(bots: BotRecord[] = this.bots, registerSections = true) {
+    if (registerSections) this.rememberSections([...this.bots, ...bots].map((bot) => bot.section));
     writeFileAtomic(BOTS_FILE, JSON.stringify(bots.map(({ busy: _busy, activity: _activity, ...bot }) => ({
       ...bot,
       tasks: bot.tasks?.map(({ busy: _taskBusy, activity: _taskActivity, turnStartedAt: _taskTurnStarted, ...task }) => persistedPin(task)),
     })), null, 2), { mode: 0o600 });
   }
 
-  private saveGroups() {
-    this.rememberSections(this.groups.map((group) => group.section));
-    writeFileAtomic(GROUPS_FILE, JSON.stringify(this.groups.map(({ busyBotId: _busyBotId, turnStartedAt: _turnStartedAt, ...g }) => ({
+  private saveGroups(groups: GroupRecord[] = this.groups, registerSections = true) {
+    if (registerSections) this.rememberSections(groups.map((group) => group.section));
+    writeFileAtomic(GROUPS_FILE, JSON.stringify(groups.map(({ busyBotId: _busyBotId, turnStartedAt: _turnStartedAt, ...g }) => ({
       ...g,
       ...(g.tasks ? { tasks: g.tasks.map((task) => persistedPin(task)) } : {}),
     })), null, 2), { mode: 0o600 });
@@ -841,6 +973,50 @@ export class Store {
       if (!this.registeringInitialSections) throw error;
       console.warn(`[teams] Startup could not register team names; saved teams and shared instructions were left unchanged: ${(error as Error).message}`);
     }
+  }
+
+  /** Rename the same team, preserving its members and existing access grants. */
+  renameSection(name: string, nextName: string, computers?: TeamComputers): string | undefined {
+    if (!name || !this.sections.includes(name)) return "No such team";
+    nextName = nextName.trim();
+    if (!nextName || nextName.length > 60 || [...nextName].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) return "Team name must be 1 to 60 characters without control characters";
+    if (name === nextName) return undefined;
+    if (this.sections.includes(nextName) || computers?.forSection(nextName)) return "A team with that name already exists";
+    const members = this.bots.filter(bot => sectionKey(bot.section) === name);
+    const rooms = this.groups.filter(group => sectionKey(group.section) === name);
+    const affected = this.bots.filter(bot => members.includes(bot) || bot.managedSections?.some(section => sectionKey(section) === name));
+    if (affected.some(bot => bot.busy || bot.tasks?.some(task => task.busy)) || rooms.some(group => group.busyBotId)) {
+      return "Stop this team's active work before renaming the team";
+    }
+    // Keep the established empty-team lifecycle: old grants are revoked when
+    // an empty identity is removed, so recreating it cannot restore access.
+    if (!members.length && !rooms.length && !computers?.forSection(name)) return this.changeEmptySection(name, nextName);
+    const nextBots = this.bots.map(bot => ({ ...bot,
+      ...(members.includes(bot) ? { section: nextName } : {}),
+      ...(bot.managedSections ? { managedSections: [...new Set(bot.managedSections.map(section => sectionKey(section) === name ? nextName : section))] } : {}),
+    }));
+    const nextGroups = this.groups.map(group => rooms.includes(group) ? { ...group, section: nextName } : group);
+    let computerChanged = false;
+    try {
+      // Register the new name only after saving the records; otherwise the
+      // registry's duplicate-name check would reject this same rename.
+      this.saveBots(nextBots, false);
+      this.saveGroups(nextGroups, false);
+      computerChanged = computers?.renameSection(name, nextName) ?? false;
+      changeEmptySection(name, nextName);
+    } catch (error) {
+      this.saveBots(this.bots, false);
+      this.saveGroups(this.groups, false);
+      if (computerChanged) computers!.renameSection(nextName, name);
+      throw error;
+    }
+    // Preserve identities held by the schedulers and other store consumers.
+    for (let i = 0; i < nextBots.length; i++) Object.assign(this.bots[i], nextBots[i]);
+    for (let i = 0; i < nextGroups.length; i++) Object.assign(this.groups[i], nextGroups[i]);
+    for (const bot of affected) this.emit({ type: "bot", botId: bot.id });
+    for (const room of rooms) this.emit({ type: "group", groupId: room.id });
+    this.emit({ type: "sections" });
+    return undefined;
   }
 
   /** Empty-only changes cannot merge teams or silently change anybody's access. */
@@ -864,6 +1040,39 @@ export class Store {
       for (const bot of revoked) this.emit({ type: "bot", botId: bot.id });
     }
     changeEmptySection(name, nextName);
+    this.emit({ type: "sections" });
+    return undefined;
+  }
+
+  /** Remove the team, keeping its bots, rooms and conversations in General. */
+  deleteSection(name: string): string | undefined {
+    if (!name || !this.sections.includes(name)) return "No such team";
+    const members = this.bots.filter(bot => sectionKey(bot.section) === name);
+    const rooms = this.groups.filter(group => sectionKey(group.section) === name);
+    if (members.some(bot => bot.busy || bot.tasks?.some(task => task.busy)) || rooms.some(group => group.busyBotId)) {
+      return "Stop this team's active work before deleting the team";
+    }
+    if (this.bots.filter(bot => bot.chiefOfStaff && (!sectionKey(bot.section) || sectionKey(bot.section) === name)).length > 1) {
+      return "General already has a Chief of Staff. Move or change this team's Chief before deleting the team";
+    }
+    const nextBots = this.bots.map(bot => ({ ...bot,
+      ...(sectionKey(bot.section) === name ? { section: undefined } : {}),
+      ...(bot.managedSections ? { managedSections: bot.managedSections.filter(section => sectionKey(section) !== name) } : {}),
+    }));
+    const nextGroups = this.groups.map(group => sectionKey(group.section) === name ? { ...group, section: undefined } : group);
+    try {
+      this.saveBots(nextBots);
+      this.saveGroups(nextGroups);
+      changeEmptySection(name, null);
+    } catch (error) {
+      this.saveBots();
+      this.saveGroups();
+      throw error;
+    }
+    for (let i = 0; i < nextBots.length; i++) Object.assign(this.bots[i], nextBots[i]);
+    for (let i = 0; i < nextGroups.length; i++) Object.assign(this.groups[i], nextGroups[i]);
+    for (const bot of this.bots) this.emit({ type: "bot", botId: bot.id });
+    for (const group of rooms) this.emit({ type: "group", groupId: group.id });
     this.emit({ type: "sections" });
     return undefined;
   }
@@ -943,7 +1152,7 @@ export class Store {
     );
   }
 
-  patchGroup(id: string, patch: Partial<Pick<GroupRecord, "name" | "memberIds" | "defaultResponder" | "bulletin" | "unread" | "busyBotId" | "cwd" | "pinnedMessageId" | "section" | "setupCompletedAt" | "setupSkippedAt">>): GroupRecord | null {
+  patchGroup(id: string, patch: Partial<Pick<GroupRecord, "name" | "memberIds" | "defaultResponder" | "bulletin" | "unread" | "busyBotId" | "cwd" | "pinnedMessageId" | "section" | "setupCompletedAt" | "setupSkippedAt" | "audienceFloor" | "installedPackage">>): GroupRecord | null {
     const group = this.group(id);
     if (!group) return null;
     if (Object.prototype.hasOwnProperty.call(patch, "section")) {
@@ -1383,8 +1592,10 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
   }
 
   /** Fork the conversation: a new user message that replaces `sourceId`
-   * (same parent, new text) and becomes the active leaf. */
-  branchMessage(threadId: string, sourceId: string, text: string): Message | null {
+   * (same parent, new text) and becomes the active leaf. `sendId` is the
+   * client's identity for this edit, so its instant bubble reconciles onto
+   * the canonical message and a network retry cannot fork twice. */
+  branchMessage(threadId: string, sourceId: string, text: string, sendId?: string): Message | null {
     const t = this.thread(threadId);
     const source = t.messages.find((m) => m.id === sourceId);
     if (!source) return null;
@@ -1396,6 +1607,7 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
       text,
       parentId: source.parentId ?? null,
       replyToId: source.replyToId,
+      ...(sendId ? { sendId } : {}),
     };
     t.messages.push(full);
     t.activeLeafId = full.id;
@@ -1458,11 +1670,17 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
     return this.bots.find((b) => b.threadId === threadId || b.tasks?.some((t) => t.threadId === threadId)) ?? null;
   }
 
+  /** The one place a new bot's selection is decided: the caller's choice, or
+   * the workspace default, completed with the workspace's new-bot defaults. */
+  private newBotSelection(requested?: ModelSelection): ModelSelection {
+    return this.completeNewBotSelection(requested ?? this.defaultSelection());
+  }
+
   createBot(
     profile: Partial<
       Pick<
         BotRecord,
-        "name" | "title" | "description" | "soul" | "color" | "mascotExpression" | "mascotBody" | "modelSelection" | "section"
+        "name" | "title" | "description" | "soul" | "color" | "mascotExpression" | "mascotBody" | "modelSelection" | "section" | "visibility"
       >
     > = {},
     opts: {
@@ -1486,8 +1704,10 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
       color: profile.color ?? COLORS[this.bots.length % COLORS.length],
       ...(profile.mascotExpression ? { mascotExpression: profile.mascotExpression } : {}),
       ...(profile.mascotBody ? { mascotBody: profile.mascotBody } : {}),
+      // Restricted from its first frame: no one else is ever told it exists.
+      ...(profile.visibility && profile.visibility !== "everyone" ? { visibility: structuredClone(profile.visibility) } : {}),
       unread: false,
-      modelSelection: profile.modelSelection ?? this.defaultSelection(),
+      modelSelection: this.newBotSelection(profile.modelSelection),
       resumeCursors: {},
       createdAt: Date.now(),
     };
@@ -1544,12 +1764,16 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
       if (operation.action === "create") {
         if (at >= 0 || !operation.threadId || !operation.fields.name || !operation.fields.modelSelection) throw new Error("Invalid new bot in team setup");
         const createdAt = Date.now();
+        const modelSelection = this.newBotSelection(operation.fields.modelSelection);
         next = { id: operation.botId, threadId: operation.threadId, name: operation.fields.name,
           title: "", description: "", soul: "", notifications: true, color: COLORS[nextBots.length % COLORS.length], unread: false,
-          modelSelection: operation.fields.modelSelection, resumeCursors: {}, createdAt, ...operation.fields,
+          resumeCursors: {}, createdAt, ...operation.fields, modelSelection,
           approvalMode: "ask", autoApprove: false, composio: false, approvePeerComms: false,
+          // A Chief's new teammate is seen by exactly the Chief's audience:
+          // a restricted Chief never creates a bot everyone sees.
+          ...(chief.visibility && chief.visibility !== "everyone" ? { visibility: structuredClone(chief.visibility) } : {}),
           tasks: [{ threadId: operation.threadId, title: UNTITLED_THREAD, createdAt, updatedAt: createdAt, resumeCursors: {},
-            modelSelection: structuredClone(operation.fields.modelSelection), approvalMode: "ask", autoApprove: false,
+            modelSelection: structuredClone(modelSelection), approvalMode: "ask", autoApprove: false,
             unread: false, activity: "idle", busy: false }],
         };
         nextBots.unshift(next);
@@ -1566,19 +1790,20 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
         }));
         nextBots[at] = next;
       }
+      if (operation.fields.chiefOfStaff === false) delete next.managedSections;
       next.section = sectionKey(next.section) || undefined;
       if (operation.fields.soul !== undefined) { next.soulHash = soulHash(operation.fields.soul); next.soulDrift = false; }
       changed.push(next);
     }
     const result: TeamSetupResult = { state: "applied", newTeams: request.newTeams, bots: changed.map((bot, index) => ({
-      id: bot.id, name: bot.name, section: bot.section, modelSelection: structuredClone(bot.modelSelection),
+      id: bot.id, name: bot.name, section: bot.section, modelSelection: structuredClone(bot.modelSelection), chiefOfStaff: Boolean(bot.chiefOfStaff),
       action: request.operations[index].action === "create" ? "created" : "updated",
     })) };
     const chiefAt = nextBots.findIndex((bot) => bot.id === chief.id);
     const nextChief = { ...nextBots[chiefAt], lastTeamSetupReceipt: { requestId: request.requestId, result } };
     // Only the newly-created teams explicitly named in the human review may
     // extend this Chief's reach. Existing teams require owner settings.
-    if (request.newTeams.length) {
+    if (request.newTeams.length && nextChief.chiefOfStaff) {
       nextChief.managedSections = managedSections;
     }
     nextBots[chiefAt] = nextChief;
@@ -1637,6 +1862,15 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
   patchBot(id: string, patch: Partial<BotRecord>): BotRecord | null {
     const bot = this.bot(id);
     if (!bot) return null;
+    // Grants are the one field whose shape every writer must share, so the
+    // store normalizes them itself: API patches arrive pre-validated, import
+    // paths pass {}, and an internal caller that skips the parser still
+    // lands canonical data or stops here.
+    if (patch.connectorTools !== undefined) {
+      const parsed = parseConnectorTools(patch.connectorTools);
+      if (!parsed.ok) throw new Error(parsed.error);
+      patch = { ...patch, connectorTools: parsed.grants };
+    }
     // Runtime revocations must become effective in memory even when disk is
     // unavailable. Profile edits use the separate atomic path below.
     Object.assign(bot, patch);
@@ -1748,6 +1982,34 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
     return { ok: true, bots: ids.map((id) => this.bot(id)!) };
   }
 
+  /** Apply only the membership edits the user made, in one bots-file write. */
+  updateTeamMembers(section: string, addIds: string[], removeIds: string[]):
+    { ok: true; bots: BotRecord[] } | { ok: false; reason: "unavailable" | "chief-conflict" | "membership-changed" } {
+    const key = sectionKey(section);
+    if (!key || !this.sections.includes(key)) return { ok: false, reason: "unavailable" };
+    const adds = new Set(addIds), removes = new Set(removeIds);
+    const ids = new Set([...adds, ...removes]);
+    for (const id of ids) {
+      const bot = this.bot(id);
+      if (!bot || bot.hidden) return { ok: false, reason: "unavailable" };
+      if (adds.has(id) && removes.has(id)) return { ok: false, reason: "membership-changed" };
+      if (removes.has(id) && sectionKey(bot.section) !== key) return { ok: false, reason: "membership-changed" };
+    }
+    const next = this.bots.map(bot => ids.has(bot.id)
+      ? { ...bot, section: adds.has(bot.id) ? key : undefined } : bot);
+    for (const destination of [key, ""]) {
+      if (next.filter(bot => bot.chiefOfStaff && sectionKey(bot.section) === destination).length > 1) {
+        return { ok: false, reason: "chief-conflict" };
+      }
+    }
+    if (ids.size) {
+      this.saveBots(next);
+      for (let i = 0; i < next.length; i++) if (ids.has(next[i].id)) Object.assign(this.bots[i], next[i]);
+      for (const botId of ids) this.emit({ type: "bot", botId });
+    }
+    return { ok: true, bots: this.bots.filter(bot => ids.has(bot.id)) };
+  }
+
   /** Legacy bot/room activity occupies its own slot; direct conversations
    * use setTaskActivity so settling one thread cannot clear another. */
   setActivity(botId: string, activity: BotActivity): BotRecord | null {
@@ -1771,6 +2033,13 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
     task.busy = busy;
     if (busy && !wasBusy) task.turnStartedAt = Date.now();
     else if (!busy) delete task.turnStartedAt;
+    // Reaching here means the thread just did something — exactly the
+    // "activity" an until-activity snooze waits for, including settling
+    // back to idle after a turn. Persist the wake like any task change.
+    if (task.snoozedUntil === 0) {
+      task.snoozedUntil = undefined;
+      this.saveBots();
+    }
     this.refreshBotActivity(bot);
     this.emit({ type: "bot", botId });
     return bot;
@@ -1808,6 +2077,42 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
     if (changed.length) this.saveBots();
     for (const bot of changed) this.emit({ type: "bot", botId: bot.id });
     return changed;
+  }
+
+  /** Company instance ids became stable across re-enrolment. Moves every
+   * saved reference to an old id onto its replacement in one save: model
+   * choices, native resume cursors and handed-message records. An entry that
+   * already exists under the new id wins over the old one. */
+  renameInstances(ids: ReadonlyMap<string, string>): number {
+    const touches = (record?: Record<string, unknown>) => Boolean(record && Object.keys(record).some(key => ids.has(key)));
+    const rename = <T>(record: Record<string, T>): Record<string, T> => {
+      const next: Record<string, T> = {};
+      for (const [key, value] of Object.entries(record)) {
+        const target = ids.get(key);
+        if (!target) next[key] = value;
+        else if (!Object.prototype.hasOwnProperty.call(record, target)) next[target] = value;
+      }
+      return next;
+    };
+    const changed: BotRecord[] = [];
+    for (const bot of this.bots) {
+      let dirty = false;
+      const selected = ids.get(bot.modelSelection.instanceId);
+      if (selected) { bot.modelSelection = { ...bot.modelSelection, instanceId: selected }; dirty = true; }
+      if (touches(bot.resumeCursors)) { bot.resumeCursors = rename(bot.resumeCursors); dirty = true; }
+      for (const task of bot.tasks ?? []) {
+        const taskSelected = task.modelSelection && ids.get(task.modelSelection.instanceId);
+        if (task.modelSelection && taskSelected) { task.modelSelection = { ...task.modelSelection, instanceId: taskSelected }; dirty = true; }
+        if (touches(task.resumeCursors)) { task.resumeCursors = rename(task.resumeCursors); dirty = true; }
+        if (task.handedMessages && touches(task.handedMessages)) { task.handedMessages = rename(task.handedMessages); dirty = true; }
+        const last = task.lastInstanceId && ids.get(task.lastInstanceId);
+        if (last) { task.lastInstanceId = last; dirty = true; }
+      }
+      if (dirty) changed.push(bot);
+    }
+    if (changed.length) this.saveBots();
+    for (const bot of changed) this.emit({ type: "bot", botId: bot.id });
+    return changed.length;
   }
 
   setResumeCursor(botId: string, instanceId: string, cursor: unknown, threadId?: string) {
@@ -2052,6 +2357,11 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
         Object.assign(task, { [key]: structuredClone(patch[key]) });
       }
     }
+    // "Until new activity" ends the moment the thread has something new for
+    // the person, and every unread wake funnels through patchTask — so this
+    // one hook is the whole activity alarm. A time-based snooze is left to
+    // its clock: attention overrides it on screen without clearing it.
+    if (task.snoozedUntil === 0 && patch.unread === true) task.snoozedUntil = undefined;
     if (typeof patch.title === "string") task.title = patch.title.trim().slice(0, 80) || UNTITLED_THREAD;
     if (Object.prototype.hasOwnProperty.call(patch, "pinned") && task.pinned !== true) delete task.pinned;
     if (bot.threadId === threadId) this.mirrorActiveTask(bot, task);
@@ -2059,6 +2369,26 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
     this.saveBots();
     this.emit({ type: "bot", botId });
     return task;
+  }
+
+  /** A Works on change is the newest explicit choice, so this bot's
+   * machine-recorded pins that now point somewhere else give way. A pin a
+   * person set, a legacy pin with unknown provenance, and a pin that already
+   * matches the new destination survive. Returns how many pins were cleared. */
+  clearAutoSurfacePins(botId: string, destination: Destination): number {
+    const bot = this.bot(botId);
+    if (!bot?.tasks) return 0;
+    let cleared = 0;
+    for (const task of bot.tasks) {
+      if (task.surface === undefined || task.surfaceSource !== "auto" || task.surface === destination) continue;
+      task.surface = undefined;
+      task.surfaceSource = undefined;
+      cleared++;
+    }
+    if (!cleared) return 0;
+    this.saveBots();
+    this.emit({ type: "bot", botId });
+    return cleared;
   }
 
   /** Model/provider changes are one configuration transaction: never publish
@@ -2202,6 +2532,18 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
    *   interleave in one transcript. `label` names that thread; the caller
    *   closes it once its result has been reported. A pair conversation
    *   never auto-closes. */
+
+  /** The identity a peer-opened row belongs to: its opener's id while that
+   * bot lives, else the one live bot the stamp's name still points at —
+   * what a deleted-and-recreated same-name bot inherits — else the dead id
+   * itself. A name two live bots share resolves to nobody's twin:
+   * ambiguous means unmatched, never a wrong merge. */
+  private openerIdentity(openedBy: TaskOpenedBy): string {
+    if (this.bot(openedBy.botId)) return openedBy.botId;
+    const named = this.bots.filter((bot) => bot.name === openedBy.name);
+    return named.length === 1 ? named[0].id : openedBy.botId;
+  }
+
   resolvePairConversation(
     sender: Pick<BotRecord, "id" | "name">,
     recipientId: string,
@@ -2210,7 +2552,13 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
     if (!this.bot(recipientId)) return null;
     const title = `@${sender.name}`;
     const opener = (kind: "pair" | "work", at = Date.now()): TaskOpenedBy => ({ botId: sender.id, name: sender.name, kind, at });
-    const fromSender = this.tasks(recipientId).filter((task) => task.openedBy?.botId === sender.id);
+    // Identity-stable: the sender's own rows, plus ones a deleted
+    // predecessor opened when the stamp's name still points at exactly
+    // this bot — a same-name recreation inherits the conversation instead
+    // of minting a twin while the old row dangles live. A name two live
+    // bots share matches nobody's inheritance: refusing the fallback can
+    // cost a new row, never merge two bots' histories.
+    const fromSender = this.tasks(recipientId).filter((task) => task.openedBy && this.openerIdentity(task.openedBy) === sender.id);
     let pair = fromSender.find((task) => task.openedBy?.kind === "pair");
     if (!pair) {
       const lastActivity = (task: TaskRecord) =>
@@ -2239,6 +2587,14 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
       // A conversation the sender closed after reading a result is picked
       // back up, never replaced: closing is only the sidebar's idle state.
       if (pair.closedBy) this.setTaskClosedBy(recipientId, pair.threadId, null);
+      // An inherited row carries the predecessor's id; rebind it to the
+      // live bot so the name fallback is needed only once — a namesake
+      // appearing later cannot claim the row. The hour it was opened
+      // stays: inheritance is not a new conversation.
+      const inherited = pair.openedBy;
+      if (inherited && inherited.botId !== sender.id) {
+        this.setTaskOpenedBy(recipientId, pair.threadId, { ...inherited, botId: sender.id, name: sender.name });
+      }
       return { task: pair, created: false };
     }
     // The brief is never a title. An 80-character slice of an assignment
