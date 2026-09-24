@@ -8,7 +8,8 @@ import { z } from "zod";
 import { normalizeImageGenerationUrl, type ImageGenerationConfig } from "../shared/image-generation.ts";
 
 import { writeFileAtomic } from "./atomic.ts";
-import { EFFORT_LEVELS } from "../shared/wire.ts";
+import { newBotDefaultsSchema, type NewBotDefaults } from "./new-bot-defaults.ts";
+import { EFFORT_LEVELS, type EffortLevel } from "../shared/wire.ts";
 import { isModelVariant, type InstanceConfigMap, type ModelSelection } from "./contracts.ts";
 import { PROVIDER_ICON_PRESETS, providerIconError } from "../shared/provider-icon.ts";
 import type { McpServerSpec } from "./contracts.ts";
@@ -315,12 +316,40 @@ const instanceConfigSchema = z.object({
 });
 const instanceConfigMapSchema = z.record(z.string(), instanceConfigSchema);
 const defaultModelSelectionSchema = z.object({
-  instanceId: z.string().trim().min(1),
-  model: z.string().trim().min(1),
+  instanceId: z.string().trim().min(1).max(200),
+  model: z.string().trim().min(1).max(500),
   effort: z.enum(EFFORT_LEVELS).optional(),
   variant: z.string().refine(isModelVariant, "invalid model variant").optional(),
 }).refine((selection) => selection.variant === undefined || selection.effort === undefined,
   "choose either a model variant or an effort level");
+const threadsConfigSchema = z.object({
+  maxConcurrentPerBot: z.number().int().min(1).max(MAX_CONCURRENT_BOT_THREADS),
+  /** Cap each per-thread events/ and native/ NDJSON log at this many
+   * bytes; absent (the default) keeps today's unbounded growth (#1280). */
+  eventLogMaxBytes: z.number().int().min(MIN_THREAD_EVENT_LOG_BYTES).max(MAX_THREAD_EVENT_LOG_BYTES).optional(),
+  /** Days a closed or archived thread's event logs survive (#1280).
+   * Absent keeps them forever. */
+  eventLogRetentionDays: z.number().int().min(1).max(3650).optional(),
+  /** Days a closed thread waits before auto-archive (#1280). Absent
+   * keeps auto-archive off, the default. */
+  autoArchiveDays: z.number().int().min(1).max(3650).optional(),
+}).strict();
+/** Workspace-wide defaults every new bot starts with (Store.createBot). */
+const newBotsConfigSchema = z.object({
+  /** Effort for a new bot whose model selection names none. */
+  effort: z.enum(EFFORT_LEVELS).optional(),
+}).strict();
+/** PATCH newBots: null clears a default back to absent (no level is sent). */
+const newBotsPatchSchema = z.object({
+  effort: newBotsConfigSchema.shape.effort.nullable(),
+}).strict();
+/** PATCH threads: every knob is independently patchable, and null clears an
+ * event-log knob back to its absent (off) default. */
+const threadsPatchSchema = threadsConfigSchema.extend({
+  maxConcurrentPerBot: threadsConfigSchema.shape.maxConcurrentPerBot.optional(),
+  eventLogMaxBytes: threadsConfigSchema.shape.eventLogMaxBytes.nullable(),
+  eventLogRetentionDays: threadsConfigSchema.shape.eventLogRetentionDays.nullable(),
+});
 const appConfigSchema = z.object({
   /** Verified by the dedicated domain endpoint, never a generic config patch. */
   customDomain: z.string().optional(),
@@ -328,12 +357,15 @@ const appConfigSchema = z.object({
    * addresses or `@domain` entries; admins get every scope, members chat only. */
   signIn: z.object({ admins: z.array(z.string().max(320)).max(500).optional(), members: z.array(z.string().max(320)).max(5000).optional() }).optional(),
   defaultModelSelection: defaultModelSelectionSchema.optional(),
+  newBotDefaults: newBotDefaultsSchema.optional(),
+  newBots: newBotsConfigSchema.optional(),
   /** CLI-only launch preferences. Never enable remote access implicitly. */
   cliStartup: z.object({
     access: z.enum(["local", "tunnel", "tailscale", "public-url"]),
     publicUrl: z.string().url().optional(),
     phone: z.enum(["ios", "android"]).optional(),
   }).optional(),
+  mistral: z.object({ key: optionalText }).optional(),
   xai: z.object({ key: optionalText, url: optionalText }).optional(),
   /** Anthropic API key for Claude Code billed per token, handed only to
    * Claude instances; `url` only for a proxy or a test double. Never a
@@ -413,8 +445,8 @@ const appConfigSchema = z.object({
       "Use a model ID without control characters",
     ).optional(),
   }).optional(),
-  /** Non-secret profile details shown in the sidebar. */
-  profile: z.object({ name: optionalText, email: optionalText }).optional(),
+  /** Non-secret profile details; aboutMe is shared with every bot. */
+  profile: z.object({ name: optionalText, email: optionalText, aboutMe: z.string().max(24_000).optional() }).optional(),
   /** UI language override (BCP-47, lowercase). Empty/absent = follow the
    * system language. Unknown tags degrade to English in the renderer. */
   language: optionalText,
@@ -424,18 +456,11 @@ const appConfigSchema = z.object({
     compactAt: z.number().positive().max(10_000_000).optional(),
     autoCompact: z.boolean().optional(),
   }).optional(),
-  threads: z.object({
-    maxConcurrentPerBot: z.number().int().min(1).max(MAX_CONCURRENT_BOT_THREADS),
-    /** Cap each per-thread events/ and native/ NDJSON log at this many
-     * bytes; absent (the default) keeps today's unbounded growth (#1280). */
-    eventLogMaxBytes: z.number().int().min(MIN_THREAD_EVENT_LOG_BYTES).max(MAX_THREAD_EVENT_LOG_BYTES).optional(),
-    /** Days a closed or archived thread's event logs survive (#1280).
-     * Absent keeps them forever. */
-    eventLogRetentionDays: z.number().int().min(1).max(3650).optional(),
-    /** Days a closed thread waits before auto-archive (#1280). Absent
-     * keeps auto-archive off, the default. */
-    autoArchiveDays: z.number().int().min(1).max(3650).optional(),
-  }).strict().optional(),
+  threads: threadsConfigSchema.optional(),
+  /** The authorization decision log (server/decision-log.ts): days of month
+   * files kept, at least; OMB_DECISION_RETENTION_DAYS wins when set. */
+  decisions: z.object({ retentionDays: z.number().int().min(1).max(3650).optional() }).strict().optional(),
+
   localVm: localVmConfigSchema.optional(),
   features: featureConfigSchema.optional(),
   onboarding: onboardingConfigSchema.optional(),
@@ -452,7 +477,8 @@ const appConfigSchema = z.object({
 const storedAppConfigSchema = appConfigSchema.extend({
   browserProfiles: storedBrowserProfilesSchema.optional(),
 });
-const appConfigPatchSchema = appConfigSchema.omit({ instances: true, mcpServers: true, cliStartup: true, customDomain: true });
+const appConfigPatchSchema = appConfigSchema.omit({ instances: true, mcpServers: true, cliStartup: true, customDomain: true })
+  .extend({ threads: threadsPatchSchema.optional(), newBots: newBotsPatchSchema.optional() });
 const jsonObjectSchema = z.record(z.string(), z.json());
 
 export interface AppConfig {
@@ -460,6 +486,10 @@ export interface AppConfig {
   signIn?: { admins?: string[]; members?: string[] };
   /** Preferred selection for newly created bots; existing bots keep theirs. */
   defaultModelSelection?: ModelSelection;
+  /** UI creation template. Saving it never mutates a bot or grants access. */
+  newBotDefaults?: NewBotDefaults;
+  /** Defaults for newly created bots that no model selection carries. */
+  newBots?: { effort?: EffortLevel };
   cliStartup?: {
     access: "local" | "tunnel" | "tailscale" | "public-url";
     publicUrl?: string;
@@ -468,8 +498,10 @@ export interface AppConfig {
   mcpServers?: Record<string, unknown>;
   language?: string;
   xai?: { key?: string; url?: string };
+  mistral?: { key?: string };
   anthropic?: { key?: string; url?: string };
   budgets?: { monthlyUsd?: number; warnAtPercent?: number };
+  decisions?: { retentionDays?: number };
   billing?: { currency?: string; prices?: Record<string, { inputPerMillion: number; outputPerMillion: number; cachedInputPerMillion?: number }> };
   openaiCompat?: { key?: string; url?: string; model?: string; provider?: string };
   composio?: { apiKey?: string; userId?: string; sessionId?: string };
@@ -479,7 +511,7 @@ export interface AppConfig {
   opencodeGo?: { apiKey?: string };
   tts?: { key?: string; fishKey?: string; voice?: string; provider?: "elevenlabs" | "fish" | "system" | "chatterbox" | "xai"; baseUrl?: string; model?: string };
   imageGen?: ImageGenerationConfig;
-  profile?: { name?: string; email?: string };
+  profile?: { name?: string; email?: string; aboutMe?: string };
   rooms?: { turnTimeoutMinutes: number; handoffLifetimeMinutes?: number; handoffMinRunwayMinutes?: number; handoffHardCapMinutes?: number };
   threads?: { maxConcurrentPerBot: number; eventLogMaxBytes?: number; eventLogRetentionDays?: number; autoArchiveDays?: number };
   context?: { rebuildBytes?: number; compactAt?: number; autoCompact?: boolean };
@@ -636,7 +668,9 @@ export function roomHandoffLimits(cfg: AppConfig): RoomHandoffLimitsMs {
   };
 }
 
-export function maxConcurrentBotThreads(cfg: AppConfig): number {
+/** Accepts a full config or a parsed patch: the concurrency limit may be
+ * read from either, and a patch may legitimately omit it. */
+export function maxConcurrentBotThreads(cfg: { threads?: { maxConcurrentPerBot?: number } }): number {
   return cfg.threads?.maxConcurrentPerBot ?? DEFAULT_MAX_CONCURRENT_BOT_THREADS;
 }
 
@@ -801,6 +835,8 @@ export function loadConfig(): AppConfig {
   // Anything that saves a credential mid-session must keep process.env in
   // step (syncCredentialEnv below), or the value injected at boot would
   // shadow the save until the next launch.
+  cfg.mistral = { ...cfg.mistral };
+  if (process.env.MISTRAL_API_KEY !== undefined) cfg.mistral.key = process.env.MISTRAL_API_KEY;
   cfg.xai = { ...cfg.xai };
   if (process.env.XAI_API_KEY !== undefined) cfg.xai.key = process.env.XAI_API_KEY;
   // Deliberately not ANTHROPIC_API_KEY: a key in the server's own env is
@@ -844,9 +880,10 @@ export function loadConfig(): AppConfig {
  * user cleared the credential, so the var is dropped and the (now empty)
  * file value is authoritative again. Fields absent from the patch are
  * untouched. */
-export function syncCredentialEnv(patch: Partial<AppConfig>): void {
+export function syncCredentialEnv(patch: Partial<Omit<AppConfig, "threads" | "newBots">>): void {
   const secrets: Array<[value: string | undefined, name: string]> = [
     [patch.xai?.key, "XAI_API_KEY"],
+    [patch.mistral?.key, "MISTRAL_API_KEY"],
     [patch.anthropic?.key, "OMB_ANTHROPIC_API_KEY"],
     [patch.openaiCompat?.key, "OPENAI_COMPAT_API_KEY"],
     [patch.composio?.apiKey, "COMPOSIO_API_KEY"],
@@ -884,6 +921,7 @@ export function syncCredentialEnv(patch: Partial<AppConfig>): void {
  * child these are someone else's keys riding along in `...process.env`. */
 export const WORKSPACE_CREDENTIAL_ENV = [
   "XAI_API_KEY",
+  "MISTRAL_API_KEY",
   "OMB_ANTHROPIC_API_KEY",
   "OMB_ANTHROPIC_API_URL",
   "OMB_HOSTED_MODEL_TOKEN",
@@ -905,9 +943,32 @@ export const WORKSPACE_CREDENTIAL_ENV = [
   "OMB_USER_DATA",
 ] as const;
 
-/** Drop every workspace credential from a child-process env (in place). */
+/** Secrets of whoever operates this server, not of the workspace: the license
+ * key, a fleet container's installation credential, and everything a hosting
+ * control plane injects under `OMB_CLOUD_` (the readiness token, the bootstrap
+ * document and its gateway token). Only this process reads them. The prefix
+ * ends in an underscore on purpose: `OMB_CLOUDFLARED_PATH` is not one of them.
+ * What an engine is meant to receive arrives under another name through its
+ * instance environment (the hosted model token as ANTHROPIC_API_KEY or
+ * OPENMAUSBOT_COMPANY_API_KEY), so nothing here is ever an engine's input. */
+export const CONTROL_PLANE_ENV = ["OMB_LICENSE_KEY", "OMB_INSTALLATION_CREDENTIAL"] as const;
+export const CONTROL_PLANE_ENV_PREFIX = "OMB_CLOUD_";
+
+/** Drop every control-plane secret from a child-process env (in place). No
+ * driver allowlist re-admits these. Names compare case-insensitively because
+ * Windows environments do. */
+export function stripControlPlaneEnv(env: Record<string, string | undefined>): void {
+  for (const key of Object.keys(env)) {
+    const name = key.toUpperCase();
+    if (name.startsWith(CONTROL_PLANE_ENV_PREFIX) || (CONTROL_PLANE_ENV as readonly string[]).includes(name)) delete env[key];
+  }
+}
+
+/** Drop every workspace credential, and every control-plane secret, from a
+ * child-process env (in place). */
 export function stripWorkspaceCredentialEnv(env: Record<string, string | undefined>): void {
   for (const key of WORKSPACE_CREDENTIAL_ENV) delete env[key];
+  stripControlPlaneEnv(env);
 }
 
 /** Env names a provider CLI might read as its own billing identity. A spawned
@@ -925,13 +986,30 @@ export const PROVIDER_CREDENTIAL_ENV = [
   "OPENAI_API_KEY",
   "OPENCODE_API_KEY",
   "XAI_API_KEY",
+  "MISTRAL_API_KEY",
   "CURSOR_API_KEY",
   "CURSOR_AUTH_TOKEN",
 ] as const;
 
+const configSaveListeners = new Set<(before: JsonObject, after: JsonObject) => void>();
+
+/** Told, synchronously, what each saveConfig wrote: the file before and
+ * after. The admin activity log (server/admin-activity.ts) records the
+ * change for whoever's request made it. A listener must not throw. */
+export function onConfigSaved(listener: (before: JsonObject, after: JsonObject) => void): () => void {
+  configSaveListeners.add(listener);
+  return () => { configSaveListeners.delete(listener); };
+}
+
 /** Merge a partial config into ~/.openmausbot/config.json (secrets never
  * echoed back — callers report configured-or-not booleans only). */
-export function saveConfig(patch: Partial<AppConfig>, options: { replaceInstances?: boolean } = {}): void {
+export function saveConfig(
+  patch: Partial<Omit<AppConfig, "threads" | "newBots">> & {
+    threads?: z.output<typeof threadsPatchSchema>;
+    newBots?: z.output<typeof newBotsPatchSchema>;
+  },
+  options: { replaceInstances?: boolean } = {},
+): void {
   const p = join(DATA_DIR, "config.json");
   let disk: JsonObject = {};
   try {
@@ -940,18 +1018,29 @@ export function saveConfig(patch: Partial<AppConfig>, options: { replaceInstance
   } catch {
     /* first write */
   }
-  const checkedPatch = appConfigSchema.partial().parse(patch);
+  const checkedPatch = appConfigSchema.partial().extend({ threads: threadsPatchSchema.optional(), newBots: newBotsPatchSchema.optional() }).parse(patch);
+  const before = configSaveListeners.size ? structuredClone(disk) : disk;
   // A write is the durable migration point. Preserve every other raw key in
   // config.json, but never write #567's mixed-case or duplicate profile ids
   // back after we have successfully recognized the legacy list.
   const storedProfiles = storedBrowserProfilesSchema.safeParse(disk.browserProfiles);
   if (storedProfiles.success) disk.browserProfiles = storedProfiles.data;
-  for (const key of ["xai", "anthropic", "openaiCompat", "composio", "box", "opencodeGo", "tts", "imageGen", "profile", "rooms", "threads", "context", "localVm", "features", "budgets", "billing", "onboarding", "browserEngine"] as const) {
+  for (const key of ["xai", "anthropic", "mistral", "openaiCompat", "composio", "box", "opencodeGo", "tts", "imageGen", "profile", "rooms", "threads", "context", "localVm", "features", "budgets", "billing", "decisions", "onboarding", "browserEngine", "newBots"] as const) {
     const section = checkedPatch[key];
     if (!section) continue;
     const current = jsonObjectSchema.safeParse(disk[key]);
     const merged: JsonObject = current.success ? { ...current.data } : {};
+    // parseStoredConfig requires threads.maxConcurrentPerBot, so creating
+    // the section with only an event-log knob must still persist a valid
+    // concurrency default.
+    if (key === "threads" && !current.success) merged.maxConcurrentPerBot = DEFAULT_MAX_CONCURRENT_BOT_THREADS;
     Object.assign(merged, section);
+    // null is the patch's explicit "remove this key" marker (the threads
+    // event-log knobs and newBots.effort use it); a key the patch omits
+    // keeps its value.
+    for (const [sectionKey, sectionValue] of Object.entries(section as Record<string, unknown>)) {
+      if (sectionValue === null) delete merged[sectionKey];
+    }
     disk[key] = merged;
   }
   if (checkedPatch.vps !== undefined) disk.vps = normalizeVpsConfig(checkedPatch.vps);
@@ -963,6 +1052,23 @@ export function saveConfig(patch: Partial<AppConfig>, options: { replaceInstance
   // an effort level omitted from the new selection.
   if (checkedPatch.defaultModelSelection !== undefined) {
     disk.defaultModelSelection = checkedPatch.defaultModelSelection;
+    if (disk.newBotDefaults) {
+      const previousDefaults = newBotDefaultsSchema.parse(disk.newBotDefaults);
+      disk.newBotDefaults = newBotDefaultsSchema.parse({
+        ...previousDefaults,
+        profile: { ...previousDefaults.profile, modelSelection: checkedPatch.defaultModelSelection },
+      });
+    }
+  }
+  // Replace the complete template so clearing a field, file or routine
+  // cannot revive an old value through the general section merge above.
+  if (checkedPatch.newBotDefaults !== undefined) {
+    disk.newBotDefaults = checkedPatch.newBotDefaults;
+    if (checkedPatch.newBotDefaults.profile.modelSelection) {
+      disk.defaultModelSelection = checkedPatch.newBotDefaults.profile.modelSelection;
+    } else {
+      delete disk.defaultModelSelection;
+    }
   }
   if (checkedPatch.cliStartup !== undefined) disk.cliStartup = checkedPatch.cliStartup;
   // Custom MCP mutations go through their own dedicated local API, but
@@ -989,6 +1095,14 @@ export function saveConfig(patch: Partial<AppConfig>, options: { replaceInstance
     );
     if (routingConflict) throw Object.assign(new Error(routingConflict), { status: 409 });
     disk.browserProfiles = nextProfiles;
+    if (disk.newBotDefaults) {
+      const defaults = newBotDefaultsSchema.parse(disk.newBotDefaults);
+      const profileId = defaults.profile.browserProfile;
+      if (profileId && profileId !== "guest" && !nextProfiles.some(profile => profile.id === profileId)) {
+        delete defaults.profile.browserProfile;
+        disk.newBotDefaults = defaults;
+      }
+    }
   }
   if (checkedPatch.instances) {
     const currentInstances = jsonObjectSchema.safeParse(disk.instances);
@@ -1028,6 +1142,13 @@ export function saveConfig(patch: Partial<AppConfig>, options: { replaceInstance
   }
   mkdirSync(DATA_DIR, { recursive: true });
   writeFileAtomic(p, JSON.stringify(disk, null, 2), { mode: 0o600 });
+  for (const listener of configSaveListeners) {
+    try {
+      listener(before, disk);
+    } catch (error) {
+      console.warn(`config: a save listener failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 }
 
 /** Set one instance's `config.cli` ("" clears the override back to the
@@ -1094,6 +1215,7 @@ interface InstanceCliUpdate {
  * environment of an unrelated child process. */
 function injectedEnvironment(cfg: AppConfig, driver: string): Map<string, string> {
   const environment = new Map<string, string>();
+  if (driver === "mistral" && cfg.mistral?.key) environment.set("MISTRAL_API_KEY", cfg.mistral.key);
   if (driver === "grok" && cfg.xai?.key) environment.set("XAI_API_KEY", cfg.xai.key);
   // The workspace Anthropic key reaches Claude Code as the variable it
   // reads, carried in the instance environment so the driver can tell a
@@ -1140,6 +1262,7 @@ export function instanceConfigs(cfg: AppConfig): InstanceConfigMap {
     opencodeGo: { driver: "opencodeGo" },
     computer: { driver: "boxAgent" },
     openaiCompat: { driver: "openai-compat" },
+    mistral: { driver: "mistral" },
     qwen: { driver: "qwenAgent" },
     hermes: { driver: "hermesAgent" },
     pi: { driver: "piAgent" },
@@ -1155,6 +1278,7 @@ export function instanceConfigs(cfg: AppConfig): InstanceConfigMap {
   const PRODUCT_FLEET_ADDITIONS = {
     cursor: { driver: "cursorAgent" },
     openaiCompat: { driver: "openai-compat" },
+    mistral: { driver: "mistral" },
     ...CUSTOM_ONLY,
   } as const;
   const configured = cfg.instances && Object.keys(cfg.instances).length ? cfg.instances : null;

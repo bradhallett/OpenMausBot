@@ -1546,10 +1546,27 @@ public struct CompanionClient: Sendable {
         ).message
     }
 
-    public func edit(botId: String, messageId: String, text: String, threadId: String? = nil) async throws {
+    /// Fork the conversation at a user message. Returns the computer's new
+    /// message when the response carries one. `sendId` makes a retry of the
+    /// same edit answer with the existing fork instead of forking twice.
+    @discardableResult
+    public func edit(
+        botId: String,
+        messageId: String,
+        text: String,
+        threadId: String? = nil,
+        sendId: String? = nil
+    ) async throws -> Message? {
         var body = ["text": text]
         if let threadId { body["threadId"] = threadId }
-        try await send(try makeRequest("POST", "/api/bots/\(botId)/messages/\(messageId)/edit", body: body))
+        if let sendId { body["sendId"] = sendId }
+        let (data, response) = try await perform(
+            try makeRequest("POST", "/api/bots/\(botId)/messages/\(messageId)/edit", body: body)
+        )
+        try Self.check(response, data)
+        // The fork already happened; an unreadable body only costs the early
+        // swap, and the event stream still delivers the same fork.
+        return (try? JSONDecoder().decode(EditResponse.self, from: data))?.message
     }
 
     public func setActiveBranch(botId: String, messageId: String, threadId: String? = nil) async throws -> String {
@@ -1575,12 +1592,37 @@ public struct CompanionClient: Sendable {
         try await send(try makeRequest("PATCH", "/api/bots/\(botId)/tasks/\(threadId)", body: ["title": title]))
     }
 
+    /// Snooze a bot thread: 0 sleeps until its next activity, a timestamp
+    /// (epoch milliseconds) until that moment, and nil wakes it now — JSON
+    /// null is how "stop snoozing" travels, not an omitted field.
+    public func snoozeTask(botId: String, threadId: String, snoozedUntil: Double?) async throws {
+        try await send(try makeRequest(
+            "PATCH", "/api/bots/\(botId)/tasks/\(threadId)",
+            body: ["snoozedUntil": snoozedUntil ?? NSNull()]
+        ))
+    }
+
     /// Archive puts a thread away without deleting it; `nil` brings it
     /// back. The server accepts any epoch timestamp to archive and JSON null
     /// to unarchive, matching the desktop's thread row action.
     public func archiveTask(botId: String, threadId: String, archivedAt: Double?) async throws {
         try await send(try makeRequest("PATCH", "/api/bots/\(botId)/tasks/\(threadId)", body: [
             "archivedAt": archivedAt ?? NSNull(),
+        ]))
+    }
+
+    public func setTaskPinned(botId: String, threadId: String, pinned: Bool) async throws {
+        try await send(try makeRequest("PATCH", "/api/bots/\(botId)/tasks/\(threadId)", body: [
+            "pinned": pinned,
+        ]))
+    }
+
+    /// `title` is the thread's current title. An older server ignores `pinned`
+    /// and would turn a body without `title` into an empty rename.
+    public func setRoomTaskPinned(groupId: String, threadId: String, pinned: Bool, title: String) async throws {
+        try await send(try makeRequest("PATCH", "/api/groups/\(groupId)/tasks/\(threadId)", body: [
+            "pinned": pinned,
+            "title": title,
         ]))
     }
 

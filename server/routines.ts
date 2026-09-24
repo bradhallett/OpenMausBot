@@ -10,6 +10,8 @@ import { redactSecretsInText } from "./redact.ts";
 import type { GroupGoalRunStatus } from "../shared/group-goal-run.ts";
 import type { RoutineRequestOperation } from "../shared/routine-request.ts";
 import { normalizeCronSchedule, nextCronRuns, type RoutineCronSchedule } from "../shared/routine-schedule.ts";
+import { isRoutineProblemRun } from "../shared/routines.ts";
+import { ROUTINE_PARTS, type PartPair, type RoutinePart } from "./package-parts.ts";
 
 export interface RoutineIntervalWindow {
   start: string;
@@ -107,9 +109,34 @@ export interface Routine {
   sourceThreadId?: string;
   /** Stable visible report destination; execution still gets a fresh task. */
   resultsThreadId?: string;
+  /** Server-private: added from the organization's library. Never on the
+   * wire (routineWithHealth drops it); packageStamps() reads it. */
+  installedPackage?: RoutinePackageStamp;
   nextRunAt: number | null;
   createdAt: number;
   updatedAt: number;
+}
+
+/** Which organization install a routine came from, its key in the package,
+ * and each part's release and written hashes (server/package-parts.ts). */
+export interface RoutinePackageStamp {
+  installId: string;
+  key: string;
+  parts: Record<RoutinePart, PartPair>;
+}
+
+const HASH = /^[a-f0-9]{64}$/;
+function loadInstalledPackage(value: unknown): RoutinePackageStamp | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const stamp = value as Partial<RoutinePackageStamp>;
+  if (typeof stamp.installId !== "string" || !/^[a-f0-9]{32}$/.test(stamp.installId) || typeof stamp.key !== "string" || !stamp.key || stamp.key.length > 80) return undefined;
+  const parts = stamp.parts as Record<string, Partial<PartPair>> | undefined;
+  if (!parts || typeof parts !== "object" || !ROUTINE_PARTS.every((part) => HASH.test(String(parts[part]?.r)) && HASH.test(String(parts[part]?.w)))) return undefined;
+  return {
+    installId: stamp.installId,
+    key: stamp.key,
+    parts: Object.fromEntries(ROUTINE_PARTS.map((part) => [part, { r: parts[part]!.r!, w: parts[part]!.w! }])) as Record<RoutinePart, PartPair>,
+  };
 }
 
 export interface RoutineRun {
@@ -779,8 +806,10 @@ export class RoutineManager {
               overlap: routine.overlap === "queue" ? "queue" : undefined,
               skippedRuns: Number.isSafeInteger(routine.skippedRuns) && routine.skippedRuns! > 0 ? routine.skippedRuns : undefined,
               lastSkippedAt: Number.isSafeInteger(routine.lastSkippedAt) && routine.lastSkippedAt! >= 0 && routine.lastSkippedAt! <= MAX_DATE_MS ? routine.lastSkippedAt : undefined,
+              installedPackage: loadInstalledPackage(routine.installedPackage),
             };
             if (loaded.timeoutMinutes === undefined) delete loaded.timeoutMinutes;
+            if (loaded.installedPackage === undefined) delete loaded.installedPackage;
             delete loaded.failureStreak;
             return [loaded];
           })
@@ -869,7 +898,27 @@ export class RoutineManager {
       .sort((a, b) => (b.finishedAt ?? b.createdAt) - (a.finishedAt ?? a.createdAt) || b.createdAt - a.createdAt);
     const success = outcomes.findIndex(run => run.status === "completed");
     const failures = success < 0 ? outcomes.length : success;
-    return { ...cloneRoutine(routine), ...(failures ? { failureStreak: failures } : {}) };
+    const { installedPackage: _installedPackage, ...visible } = cloneRoutine(routine);
+    return { ...visible, ...(failures ? { failureStreak: failures } : {}) };
+  }
+
+  /** Routines added from the organization's library, with their stamps. */
+  packageStamps(): Array<{ routineId: string; botId: string; enabled: boolean; stamp: RoutinePackageStamp }> {
+    return this.routines.flatMap((routine) => routine.installedPackage
+      ? [{ routineId: routine.id, botId: routine.botId, enabled: routine.enabled, stamp: structuredClone(routine.installedPackage) }]
+      : []);
+  }
+
+  /** Record which organization install a just-created routine belongs to. */
+  stampInstalledPackage(id: string, stamp: RoutinePackageStamp): boolean {
+    const clean = loadInstalledPackage(stamp);
+    if (!clean) throw new Error("Invalid routine package stamp");
+    if (!this.routines.some((routine) => routine.id === id)) return false;
+    this.commitMutation(() => {
+      const routine = this.routines.find((candidate) => candidate.id === id)!;
+      routine.installedPackage = clean;
+    });
+    return true;
   }
 
   /** Whether this computer should stay awake for routines: a run is in
@@ -1347,6 +1396,25 @@ export class RoutineManager {
       this.emitRun(run);
     }
     return cloneRun(run);
+  }
+
+  /** Clear every failure indicator at once: stamp seenAt on each unseen
+   * failed/missed run in one committed save, then emit the updated runs so
+   * connected clients drop their dots immediately. A failed save rolls the
+   * stamps back so a retry still finds the unseen runs. */
+  markAllSeen(): RoutineRun[] {
+    if (!this.runs.some((run) => !run.seenAt && isRoutineProblemRun(run))) return [];
+    const stampAt = this.now();
+    const updated: RoutineRun[] = [];
+    this.commitMutation(() => {
+      for (const run of this.runs) {
+        if (run.seenAt || !isRoutineProblemRun(run)) continue;
+        run.seenAt = stampAt;
+        updated.push(run);
+      }
+    });
+    for (const run of updated) this.emitRun(run);
+    return updated.map(cloneRun);
   }
 
   get isTicking(): boolean { return this.ticking; }

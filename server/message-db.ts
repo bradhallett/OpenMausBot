@@ -16,7 +16,9 @@ import { DatabaseSync } from "node:sqlite";
 
 import { DATA_DIR } from "./config.ts";
 import { peerProvenanceAuthor } from "./peer-provenance.ts";
+import type { ResolvedSender, SteerQueueReason } from "../shared/wire.ts";
 import type { Message } from "./store.ts";
+import type { UsageTrigger } from "./usage-ledger.ts";
 
 const DB_FILE = () => join(DATA_DIR, "messages.db");
 
@@ -217,11 +219,17 @@ export interface FollowupPayload {
   prompt?: string;
   replyToId?: string;
   sendId?: string;
-  reason?: "capacity";
+  reason?: SteerQueueReason;
   unattended?: boolean;
   peerAsk?: Message["peerAsk"];
   mode?: "chat" | "goal";
   via?: "api";
+  /** Who queued these words. Absent on the owner's own sends and on every
+   * row written before this existed; both read as the profile name. */
+  sender?: ResolvedSender;
+  /** Who the usage ledger books the turn these words start to. Absent on
+   * rows written before this existed. */
+  trigger?: UsageTrigger;
 }
 export type FollowupStatus = "pending" | "dispatching" | "interrupted" | "cancelled";
 export interface ChatFollowup {
@@ -464,6 +472,25 @@ export function setActiveLeaf(threadId: string, leafId: string | null): void {
     .run(threadId, leafId);
 }
 
+/** Newest message timestamp per thread. One grouped read, chunked under
+ * SQLite's variable limit. Threads with no rows are absent. */
+export function latestMessageAts(threadIds: readonly string[]): Map<string, number> {
+  const ids = [...new Set(threadIds.filter((id) => id.length > 0))];
+  const out = new Map<string, number>();
+  const chunk = 400;
+  for (let i = 0; i < ids.length; i += chunk) {
+    const slice = ids.slice(i, i + chunk);
+    const placeholders = slice.map(() => "?").join(", ");
+    const rows = db()
+      .prepare(`SELECT thread_id, MAX(at) AS at FROM messages WHERE thread_id IN (${placeholders}) GROUP BY thread_id`)
+      .all(...slice) as Array<{ thread_id: string; at: number }>;
+    for (const row of rows) {
+      if (typeof row.at === "number" && Number.isFinite(row.at)) out.set(row.thread_id, row.at);
+    }
+  }
+  return out;
+}
+
 export function deleteThread(threadId: string): void {
   writeFollowups((connection) => {
     connection.prepare("DELETE FROM chat_followups WHERE thread_id = ?").run(threadId);
@@ -485,6 +512,15 @@ export interface SearchHit {
   matchLength: number;
   /** room messages: which member said it */
   from?: string;
+}
+
+/** Every thread whose stored messages mention `fragment` anywhere (an
+ * attachment's file name, say). A scan, like search; used only to decide
+ * whether a member on a workspace with a restricted bot may fetch a file. */
+export function threadsReferencing(fragment: string): string[] {
+  if (!fragment) return [];
+  const rows = db().prepare("SELECT DISTINCT thread_id FROM messages WHERE instr(json, ?) > 0").all(fragment) as Array<{ thread_id: string }>;
+  return rows.map((row) => row.thread_id);
 }
 
 /** Case-insensitive substring search over text messages, newest first.

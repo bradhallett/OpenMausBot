@@ -126,6 +126,10 @@ beforeAll(async () => {
     OMB_STATIC_DIR: join(home, "static"), OMB_BROWSER_CONNECTION: join(home, "browser-connection.json"),
     OMB_ENTERPRISE_DIR: layer, OMB_LICENSE_KEY: "fixture-only", OMB_ADMIN_URL: "https://admin.example.test",
     OMB_ADMIN_WORKSPACE: "acme", OMB_PUBLIC_URL: `https://${HOST}`,
+    // These cases exercise portal sessions and set fixtures up over loopback,
+    // so they keep the owner explicitly. A hosted workspace's default
+    // (service) has its own case at the end, which drops this override.
+    OMB_LOOPBACK_TRUST: "owner",
   }, stdio: ["ignore", "pipe", "pipe"] });
   child.stdout?.on("data", (chunk) => log += chunk); child.stderr?.on("data", (chunk) => log += chunk);
   const deadline = Date.now() + 20_000;
@@ -162,7 +166,7 @@ describe("hosted bridge in the full server", () => {
   });
   it("accepts a portal session, enforces outages/demotion, and issues only current permissions on reauthentication", async () => {
     const cookie = await login();
-    expect((await call("/api/auth/session", { cookie })).body.scopes).toEqual(["admin", "client"]);
+    expect((await call("/api/auth/session", { cookie })).body).toMatchObject({ scopes: ["admin", "client"], hosted: true });
     expect((await call("/", { cookie })).body).toContain("Fixture workspace");
     state("admin", true);
     expect((await call("/api/auth/session", { cookie })).status).toBe(503);
@@ -171,7 +175,7 @@ describe("hosted bridge in the full server", () => {
     state("member");
     expect((await call("/api/auth/session", { cookie })).status).toBe(401);
     const memberCookie = await login();
-    expect((await call("/api/auth/session", { cookie: memberCookie })).body.scopes).toEqual(["client"]);
+    expect((await call("/api/auth/session", { cookie: memberCookie })).body).toMatchObject({ scopes: ["client"], hosted: true });
     expect((await call("/api/auth/sessions", { cookie: memberCookie })).status).toBe(403);
   });
   it("closes an existing quiet event stream within fifteen seconds of remote revocation", async () => {
@@ -295,8 +299,10 @@ describe("hosted bridge in the full server", () => {
     await policyHealth(false);
     await refuseFullTask();
   }, 25_000);
-  it("withdraws hosted readiness immediately when the running server's entitlement expires", async () => {
-    state("admin", false, { expiresAt: new Date(Date.now() + 8_000).toISOString() });
+  it("withdraws hosted readiness the moment the running server's license grace period ends", async () => {
+    // Expired a week ago less eight seconds: still inside the 7-day grace
+    // (server/enterprise.ts LICENSE_GRACE_DAYS), which ends mid-test.
+    state("admin", false, { expiresAt: new Date(Date.now() + 8_000 - 7 * 24 * 60 * 60_000).toISOString() });
     await restart({ OMB_ADMIN_MEMBERSHIP: "portal", OMB_SHARED_WORKSPACE_FULL_ACCESS: "1" });
     expect((await call("/api/health/hosted")).status).toBe(200);
     await policyHealth(true);
@@ -312,4 +318,98 @@ describe("hosted bridge in the full server", () => {
     await policyHealth(false);
     await refuseFullTask();
   }, 25_000);
+  it("offers the Slack management link for real agents to hosted admins and members, without sharing credentials", async () => {
+    state();
+    await restart({ OMB_ADMIN_MEMBERSHIP: "portal" });
+    const botId = await policyBot();
+    const path = `/api/bots/${botId}/slack-management`;
+    const cookie = await login();
+    const management = await call(path, { cookie });
+    expect(management.status).toBe(200);
+    expect(management.body).toEqual({ available: true,
+      managementUrl: `https://admin.example.test/slack?workspace=acme&bot=${botId}` });
+    expect((await call("/api/bots/missing-agent/slack-management", { cookie })).status).toBe(404);
+    expect((await call(`/api/bots/${botId}`, { local: true, method: "PATCH", body: { hidden: true } })).status).toBe(200);
+    expect((await call(path, { cookie })).status).toBe(404);
+    expect((await call(`/api/bots/${botId}`, { local: true, method: "PATCH", body: { hidden: false } })).status).toBe(200);
+    state("member");
+    expect((await call(path, { cookie })).status).toBe(401);
+    // A member reads Bot Settings too: same link, and Admin decides what its visitor may do.
+    const memberCookie = await login();
+    expect((await call("/api/auth/session", { cookie: memberCookie })).body.scopes).toEqual(["client"]);
+    const asMember = await call(path, { cookie: memberCookie });
+    expect(asMember.status).toBe(200);
+    expect(asMember.body).toEqual(management.body);
+    expect((await call(path, { cookie: memberCookie, method: "POST", body: {} })).status).toBe(403);
+    // No credential at all: the gate refuses a remote stranger before the route table runs.
+    const stranger = await call(path);
+    expect(stranger.status).toBe(403);
+    expect(JSON.stringify(stranger.body)).not.toContain("admin.example.test");
+    state();
+    await restart({ OMB_ADMIN_MEMBERSHIP: "local" });
+    expect((await call(path, { local: true })).body).toEqual({ available: false });
+    policyEvidence.push({ slackManagement: management.body, memberStatus: asMember.status, localMembershipAvailable: false });
+  }, 30_000);
+  it("treats a session-less local caller as a service by default: the Slack worker's calls work, admin changes need a session", async () => {
+    state();
+    await restart({ OMB_ADMIN_MEMBERSHIP: "portal", OMB_SHARED_WORKSPACE_FULL_ACCESS: "1", OMB_LOOPBACK_TRUST: undefined });
+    expect(log).toContain("local requests: service trust (hosted workspace)");
+    const admin = await login();
+    const adminSession = (await call("/api/auth/session", { cookie: admin })).body;
+    expect(adminSession.scopes).toEqual(["admin", "client"]);
+    const catalog = await call("/api/instances", { cookie: admin });
+    const provider = catalog.body.instances.find((instance: any) => instance.instanceId === "claude");
+    const created = await call("/api/bots", { method: "POST", cookie: admin, body: {
+      name: "Service trust fixture", requireAvailableModel: true, modelSelection: { instanceId: "claude", model: provider.models.default },
+    } });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const botId = created.body.bot.id as string;
+
+    // What the loopback caller is, and the worker's whole path (cloud server/slack-worker.ts).
+    expect((await call("/api/auth/session", { local: true })).body).toMatchObject({ kind: "loopback", scopes: ["client"], trust: "service" });
+    const health = await call("/api/health", { local: true });
+    expect(health.status).toBe(200);
+    expect(health.body.capabilities).toMatchObject({ guardedMessages: 1, guardedRequests: 1, sharedWorkspaceFullAccess: 1 });
+    expect((await call("/api/bots?messages=0", { local: true })).status).toBe(200);
+    const task = await call(`/api/bots/${botId}/tasks`, { method: "POST", local: true, body: { title: "Slack · C1 · 1.0", approvalMode: "full" } });
+    expect(task.status, JSON.stringify(task.body)).toBe(201);
+    const threadId = task.body.task.threadId as string;
+    const page = await call(`/api/threads/${threadId}/messages?limit=0`, { local: true });
+    expect(page.status).toBe(200);
+    const sendId = "slackjob_0123456789abcdef";
+    const sent = await call(`/api/bots/${botId}/messages/guarded`, { method: "POST", local: true, body: {
+      threadId, text: "hello from Slack", sendId, expectedActiveLeafId: page.body.activeLeafId ?? null, expectedApprovalMode: "full",
+    } });
+    expect(sent.status, JSON.stringify(sent.body)).toBe(202);
+    expect((await call(`/api/bots/${botId}/requests/${sendId}?threadId=${threadId}`, { local: true })).status).toBe(200);
+
+    // Admin changes from a bot's shell are refused, and leave nothing changed.
+    const refused: Array<[string, string, unknown?]> = [
+      ["PUT", "/api/config", { budgets: { monthlyUsd: 0 } }],
+      ["POST", "/api/webhooks", { name: "Backdoor", prompt: "hi", botId }],
+      ["GET", "/api/auth/sessions"],
+      ["DELETE", `/api/auth/sessions/${adminSession.id}`],
+      ["POST", "/api/bots", { name: "Rogue" }],
+      ["PATCH", `/api/bots/${botId}`, { approvalMode: "auto", acknowledgeLocalAuto: true }],
+      ["POST", `/api/bots/${botId}/messages`, { text: "unguarded", threadId }],
+      ["GET", "/api/config"],
+    ];
+    for (const [method, path, body] of refused) {
+      const response = await call(path, { method, local: true, ...(body === undefined ? {} : { body }) });
+      expect(response.status, `${method} ${path}`).toBe(403);
+      expect(response.body.error).toMatch(/shared server/);
+    }
+    expect((await call("/api/auth/session", { cookie: admin })).status).toBe(200);
+    const bots = (await call("/api/bots?messages=0", { local: true })).body.bots;
+    expect(bots.some((bot: any) => bot.name === "Rogue")).toBe(false);
+    expect(bots.find((bot: any) => bot.id === botId).approvalMode).not.toBe("auto");
+
+    // A real session still administers the workspace, and Settings learns who manages people.
+    expect((await call("/api/config", { method: "PUT", cookie: admin, body: { decisions: { retentionDays: 365 } } })).status).toBe(200);
+    const config = (await call("/api/config", { cookie: admin })).body;
+    expect(config.decisions).toEqual({ retentionDays: 365 });
+    expect(config.budgets.monthlyUsd).toBeUndefined();
+    expect(config.membership).toEqual({ authority: "portal", pairingCodes: false, peopleUrl: "https://admin.example.test/people?workspace=acme" });
+    policyEvidence.push({ loopbackTrust: "service", refused: refused.map(([method, path]) => `${method} ${path}`), membership: config.membership });
+  }, 30_000);
 });

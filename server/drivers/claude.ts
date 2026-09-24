@@ -6,7 +6,7 @@
 //
 // Integrations become MCP servers on the CLI:
 //   - Composio Sessions (connected apps → tools) over streamable HTTP
-//   - the bot's cloud computer (box.ascii.dev) via server/computer-proxy.ts
+//   - the bot's cloud computer (boat.dev) via server/computer-proxy.ts
 //     — screenshot/exec/open_url, the CUA-on-the-box bridge
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
@@ -44,6 +44,7 @@ import {
   resolveInjectId,
 } from "./local-inject.ts";
 import { appendNative } from "./native.ts";
+import { permissionCommand, permissionLaunchCwd } from "./permission-command.ts";
 import { SPAWNED_PROXIES } from "../proxy-paths.ts";
 import { extractMcpImages } from "../mcp-tool-images.ts";
 import {
@@ -391,6 +392,7 @@ export const STATIC_CLAUDE_MODELS: ModelCatalog = {
   options: [
     { id: "claude-fable-5-1", label: "Claude Fable 5.1" },
     { id: "claude-fable-5", label: "Claude Fable 5" },
+    { id: "claude-opus-5-5", label: "Claude Opus 5.5", contextWindow: 1_000_000 },
     { id: "claude-opus-5", label: "Claude Opus 5" },
     { id: "claude-sonnet-5", label: "Claude Sonnet 5" },
     { id: "claude-haiku-4-5", label: "Claude Haiku 4.5" },
@@ -999,7 +1001,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
        * the truth — this is. null until init, or on a CLI that omits it. */
       nativePermissionMode: string | null;
       /** the running turn, or null between turns */
-      turn: { turnId: string; input: SendTurnInput; retryAbort: AbortController; settled: boolean; sawStreamDelta: boolean; authFailed?: boolean } | null;
+      turn: { turnId: string; input: SendTurnInput; retryAbort: AbortController; settled: boolean; sawStreamDelta: boolean; authFailed?: boolean; stopRequested?: boolean } | null;
       idleTimer: ReturnType<typeof setTimeout> | null;
       closing: boolean;
       stderr: string;
@@ -1333,6 +1335,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       // parallel bot work must use the harness's durable delegate_bot path.
       env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
       const cwd = turn.cwd ?? homedir();
+      const commandCwd = permissionLaunchCwd(cwd);
       // Everything that shapes the process, minus session/turn-specific temp
       // paths. Their contents are represented directly in the key instead.
       const privateFileFlags = new Set(["--mcp-config", "--settings"]);
@@ -1364,6 +1367,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         if (live.idleTimer) clearTimeout(live.idleTimer);
         live.turn = { turnId, input: turn, retryAbort, settled: false, sawStreamDelta: false };
         active.set(threadId, { stop: () => {
+          if (live.turn) live.turn.stopRequested = true;
           closeSession(threadId, "interrupted");
           retry.cancelled = true;
           retryAbort.abort();
@@ -1371,12 +1375,13 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         }, turnId, broker: live.broker });
         emit({ ...base(threadId, turnId), type: "turn.started" });
         const volatile = turn.systemVolatile ?? "";
-        const message = volatile === live.volatile
+        const message = volatile === live.volatile && !turn.mentionTurn
           ? promptMsg
           : claudeUserMessage(withVolatileNote(turn.text, volatile), turn.images);
         live.volatile = volatile;
+        const running = live.turn;
         const written = await writeUser(live, threadId, message);
-        if (!written) {
+        if (!written && !running?.stopRequested) {
           active.delete(threadId);
           live.turn = null;
           closeSession(threadId, "stdin write failed");
@@ -1453,6 +1458,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
                 requestType: ask.kind,
                 tool: ask.tool,
                 summary: askSummary(ask),
+                command: ask.kind === "permission" && ask.tool === "Bash"
+                  ? permissionCommand(ask.input.command, commandCwd) : undefined,
+                requiresExplicitApproval: ask.kind === "permission" && ask.tool === "Bash" && ask.input.dangerouslyDisableSandbox === true || undefined,
                 nativeReview,
                 // the proxy hands Claude its own suggested rules on `always`;
                 // host control stays one action at a time
@@ -1746,7 +1754,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         // a turn still running when the process died is a failed turn; a
         // process that exited between turns (idle close, contract change)
         // is just a session ending
-        if (session.turn && !session.turn.settled) {
+        if (session.turn?.stopRequested && !session.turn.settled) {
+          settle(false, "interrupted");
+        } else if (session.turn && !session.turn.settled) {
           // A retained process may be running a later user turn. Its close
           // handler must retry that request, not the process's first prompt.
           const { turnId, input: turn, retryAbort } = session.turn;
@@ -1924,6 +1934,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       });
 
       const stop = () => {
+        if (session.turn) session.turn.stopRequested = true;
         // taskkill is asynchronous on Windows. Retire steering and approvals
         // now, before a still-connected child can submit more work.
         closeSession(threadId, "interrupted");
@@ -1938,7 +1949,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       // stdin stays OPEN: that is what keeps the session alive for a
       // mid-turn steer or the next turn; closeSession() ends it.
       if (!(await writeUser(session, threadId, promptMsg))) {
-        settle(false, "stdin_write_failed");
+        if (!session.turn?.stopRequested) settle(false, "stdin_write_failed");
         closeSession(threadId, "stdin write failed");
       }
 

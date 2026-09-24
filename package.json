@@ -1,7 +1,7 @@
 {
   "name": "openmausbot",
   "private": true,
-  "version": "0.1.85",
+  "version": "0.1.87",
   "description": "A local-first chat app for running a team of AI agents.",
   "homepage": "https://github.com/milind-soni/OpenMausBot",
   "repository": {
@@ -36,6 +36,7 @@
     "dev:server": "node --experimental-strip-types server/index.ts",
     "mcp": "node --experimental-strip-types scripts/mcp-server.ts",
     "control:omb": "node --experimental-strip-types scripts/control-omb.ts",
+    "eval": "node --experimental-strip-types evals/runners/run-evals.ts",
     "dev:desktop": "node scripts/prepare-cloudflared.mjs --current && electron .",
     "build": "tsc -b && tsc -p tsconfig.server.json && vite build",
     "typecheck": "tsc -b && tsc -p tsconfig.server.json",
@@ -93,6 +94,7 @@
     "katex": "^0.18.7",
     "lucide-react": "^0.539.0",
     "mdast-util-from-markdown": "^2.0.3",
+    "mermaid": "^12.0.0",
     "posthog-js": "^1.415.6",
     "qrcode-terminal": "0.12.0",
     "qrcode.react": "^4.2.0",
