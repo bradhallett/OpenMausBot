@@ -911,11 +911,15 @@ export const PiDriver: ProviderDriver<PiConfig> = {
         send({ type: "prompt", message, ...(images.length ? { images } : {}) });
         void accepted.then(
           () => {
-            if (pendingReceipt && !compactionObserved) {
+            if (!pendingReceipt || compactionObserved) return;
+            try {
               writePromptSplitReceipt("pi", pendingReceipt.key, pendingReceipt.receipt);
+            } catch {
+              /* an unwritten receipt only re-delivers the full prompt next turn */
             }
           },
           (err: Error) => {
+            if (settled) return;
             emit({
               ...base(threadId, turnId),
               type: "runtime.error",
