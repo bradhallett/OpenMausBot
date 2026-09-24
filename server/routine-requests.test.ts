@@ -1229,7 +1229,10 @@ describe("RoutineRequestService", () => {
       behavior: "allow",
     })).toMatchObject({ claimed: true, state: "invalid", status: 409 });
     expect(routines.listRoutines()[0]).toMatchObject({ name: "Changed elsewhere", enabled: true });
-    expect(store.messagesFor("thread-a")[0]!.card?.held).toMatch(/changed after this confirmation card/);
+    const dead = store.messagesFor("thread-a")[0]!.card!;
+    expect(dead.held).toMatch(/changed after this confirmation card/);
+    expect(dead.expired).toBe(true);
+    expect(dead.options).toEqual([]);
   });
 
   it("keeps a pending manage confirmation valid across recurring scheduler progress", async () => {
@@ -1519,7 +1522,7 @@ describe("RoutineRequestService", () => {
       behavior: "allow",
     })).toMatchObject({ claimed: true, state: "invalid", status: 409 });
     expect(routines.listRoutines()[0]!.schedule.type).toBe("daily");
-    expect(store.messagesFor("thread-a")[0]!.card?.held).toMatch(/now in the past/);
+    expect(store.messagesFor("thread-a")[0]!.card).toMatchObject({ expired: true, held: expect.stringMatching(/now in the past/) });
   });
 
   it("never resumes a one-time routine with no future occurrence", async () => {
@@ -1676,7 +1679,7 @@ describe("cross-bot routine targeting", () => {
     expect(result).toMatchObject({ claimed: true, state: "invalid", status: 404 });
     expect(routines.listRoutines()).toHaveLength(0);
     // the refusal is written back onto the card so the user sees why
-    expect(store.messagesFor("thread-a")[0]?.card?.held).toMatch(/no longer exists/);
+    expect(store.messagesFor("thread-a")[0]?.card).toMatchObject({ expired: true, held: expect.stringMatching(/no longer exists/) });
   });
 });
 

@@ -5228,6 +5228,56 @@ describe("harness HTTP API", () => {
     }
   });
 
+  it("supersedes an earlier pending credential card when the same key is asked for again", async () => {
+    let botId: string | undefined;
+    try {
+      expect((await api("PUT", "/api/config", { box: { token: "" } })).status).toBe(200);
+      const bot = (await api("POST", "/api/bots")).body.bot;
+      botId = bot.id;
+      const token = await mintTestCapability(BASE, bot.id, bot.threadId);
+      const request = (reason: string) => fetch(`${BASE}/api/internal/request-credential`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          fromBotId: bot.id,
+          fromThreadId: bot.threadId,
+          credentialId: "openaiImageApiKey",
+          reason,
+        }),
+      });
+
+      const first = await request("needed for the first task");
+      expect(first.status).toBe(201);
+      const firstCard = (await first.json()) as { messageId: string };
+      const second = await request("needed for the second task");
+      expect(second.status).toBe(201);
+      const secondCard = (await second.json()) as { messageId: string };
+      expect(secondCard.messageId).not.toBe(firstCard.messageId);
+
+      const state = (await api("GET", "/api/bots?messages=20")).body.bots
+        .find((candidate: { id: string }) => candidate.id === bot.id);
+      const card = (id: string) => state?.messages
+        .find((message: { id: string }) => message.id === id);
+      expect(card(firstCard.messageId)?.secret).toMatchObject({ superseded: true });
+      expect(card(secondCard.messageId)?.secret?.superseded).toBeUndefined();
+
+      // The replaced card is dead everywhere: dismissing it must not answer
+      // the newer request or resurrect the old one's continuation.
+      const stale = await api("POST", `/api/bots/${bot.id}/secret-cards/${firstCard.messageId}/dismiss`, {
+        threadId: bot.threadId,
+      });
+      expect(stale.status).toBe(409);
+      expect(stale.body.error).toMatch(/superseded by a newer one/i);
+      const fresh = await api("POST", `/api/bots/${bot.id}/secret-cards/${secondCard.messageId}/dismiss`, {
+        threadId: bot.threadId,
+      });
+      expect(fresh).toMatchObject({ status: 200, body: { dismissed: true } });
+    } finally {
+      if (botId) await api("DELETE", `/api/bots/${botId}`);
+      await api("PUT", "/api/config", { box: { token: "" } });
+    }
+  });
+
   it("keeps credential-card ownership stable while an encrypted phone save is in flight", async () => {
     const isolatedHome = mkdtempSync(join(tmpdir(), "omb-phone-secret-races-"));
     const isolatedData = join(isolatedHome, ".openmausbot");

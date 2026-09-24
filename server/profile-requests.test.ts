@@ -256,7 +256,13 @@ describe("ProfileRequestService", () => {
     const stale = service.resolve({ botId: bot.id, threadId: bot.threadId, requestId: b.requestId, behavior: "allow" });
     expect(stale).toMatchObject({ claimed: true, state: "invalid", status: 409 });
     expect((stale as { error: string }).error).toBe("This bot's profile changed after this card was prepared. Ask the bot to review it and propose again.");
-    expect(store.messagesFor(bot.threadId).at(-1)!.card!.held).toContain("changed after this card");
+    // The dead card settles expired: no options left to press, one line
+    // telling the human to ask for a fresh proposal.
+    const dead = store.messagesFor(bot.threadId).at(-1)!.card!;
+    expect(dead.held).toContain("changed after this card");
+    expect(dead.expired).toBe(true);
+    expect(dead.options).toEqual([]);
+    expect(dead.answered).toBeUndefined();
     expect(store.bot(bot.id)!.title).toBe("");
   });
 
@@ -426,7 +432,7 @@ describe("propose_profile working folder (cwd)", () => {
     const result = service.resolve({ botId: bot.id, threadId: bot.threadId, requestId, behavior: "allow" });
     expect(result).toMatchObject({ claimed: true, state: "invalid", status: 409 });
     expect(store.bot(bot.id)!.cwd).toBeUndefined();
-    expect(store.messagesFor(bot.threadId).at(-1)!.card!.held).toMatch(/that folder doesn't exist/);
+    expect(store.messagesFor(bot.threadId).at(-1)!.card!).toMatchObject({ expired: true, options: [], held: expect.stringMatching(/that folder doesn't exist/) });
   });
 
   it("a folder change elsewhere makes an open card stale, since cwd is part of the revision", () => {
