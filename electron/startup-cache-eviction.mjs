@@ -61,25 +61,37 @@ export function startupCacheEvictionDecision({ currentVersion, persistedVersion 
  * - userData: string — the app's userData directory
  * - currentVersion: string — this build's version (app.getVersion())
  * - clearCache(): Promise — session.defaultSession.clearCache()
- * - readVersion(userData) / rememberVersion(userData, version) — overridable persistence
+ * - readVersion(userData) / rememberVersion(userData, version) — optional persistence;
+ *   defaults to the exported file-backed pair, overridable for tests
  * - log(line) — optional
  *
  * The new version is remembered only after a successful clear: if clearing
  * fails, the old record stands and the next launch retries the eviction.
  */
-export async function evictStartupCacheOnce(deps) {
-  const persistedVersion = deps.readVersion(deps.userData);
-  const decision = startupCacheEvictionDecision({ currentVersion: deps.currentVersion, persistedVersion });
+// Persistence defaults to the file-backed pair above so a caller that wires
+// only userData/currentVersion/clearCache/log still boots: a call site that
+// once omitted it threw a TypeError before the cache cleared or any window
+// opened.
+export async function evictStartupCacheOnce({
+  userData,
+  currentVersion,
+  clearCache,
+  readVersion = readLastRunVersion,
+  rememberVersion = rememberLastRunVersion,
+  log,
+}) {
+  const persistedVersion = readVersion(userData);
+  const decision = startupCacheEvictionDecision({ currentVersion, persistedVersion });
   if (decision.evict) {
     try {
-      await deps.clearCache();
+      await clearCache();
     } catch (error) {
-      deps.log?.(`startup HTTP cache clear failed (${decision.reason}): ${error?.message ?? error}`);
+      log?.(`startup HTTP cache clear failed (${decision.reason}): ${error?.message ?? error}`);
       return { ...decision, cleared: false, remembered: false };
     }
-    deps.log?.(`startup HTTP cache cleared (${decision.reason}: ${persistedVersion ?? "unknown"} -> ${deps.currentVersion})`);
+    log?.(`startup HTTP cache cleared (${decision.reason}: ${persistedVersion ?? "unknown"} -> ${currentVersion})`);
   }
-  const remembered = deps.rememberVersion(deps.userData, deps.currentVersion);
-  if (!remembered) deps.log?.("could not record the last-run version; the startup cache clear will repeat next launch");
+  const remembered = rememberVersion(userData, currentVersion);
+  if (!remembered) log?.("could not record the last-run version; the startup cache clear will repeat next launch");
   return { ...decision, cleared: decision.evict, remembered };
 }

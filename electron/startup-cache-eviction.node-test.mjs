@@ -61,6 +61,30 @@ test("the eviction runs once per version: first launch clears, relaunch does not
   }
 });
 
+test("the production wiring shape works without injected persistence (regression)", async () => {
+  // electron/main.mjs passes exactly userData, currentVersion, clearCache,
+  // and log. A call site that omits the persistence pair once threw a
+  // TypeError before the cache cleared or any window opened, so this shape
+  // must boot on the module's file-backed defaults, end to end.
+  const dir = mkdtempSync(join(tmpdir(), "omb-startup-cache-"));
+  const clears = [];
+  const productionShape = (currentVersion) => ({
+    userData: dir,
+    currentVersion,
+    clearCache: async () => { clears.push(currentVersion); },
+    log() {},
+  });
+  try {
+    assert.deepEqual(await evictStartupCacheOnce(productionShape("0.2.0")), { evict: true, reason: "no-persisted-version", cleared: true, remembered: true });
+    // the default persistence really wrote the record the next launch reads
+    assert.equal(readLastRunVersion(dir), "0.2.0");
+    assert.deepEqual(await evictStartupCacheOnce(productionShape("0.2.0")), { evict: false, reason: "same-version", cleared: false, remembered: true });
+    assert.deepEqual(clears, ["0.2.0"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a failed clear is retried on the next launch, not recorded as done", async () => {
   const dir = mkdtempSync(join(tmpdir(), "omb-startup-cache-"));
   const logs = [];
