@@ -50,7 +50,8 @@ export function VoiceNoteBubble({
 
   if (!url) return null;
 
-  const giveBackVoice = () => {
+  const giveBackVoice = (release?: () => void) => {
+    if (release && releaseRef.current !== release) return;
     releaseRef.current?.();
     releaseRef.current = null;
   };
@@ -58,16 +59,21 @@ export function VoiceNoteBubble({
   const toggle = () => {
     const audio = audioRef.current;
     if (!audio) return;
-    if (playing) {
+    // the element's own paused state, not the playing flag: media play
+    // events are queued, so a second click before onPlay fires must still
+    // read as "playing" and pause instead of claiming and playing again
+    if (!audio.paused) {
       audio.pause();
       return;
     }
     // claim before play: the Speaker's stop() path silences call mode and
     // any other note first, then this element takes the voice
     releaseRef.current?.();
-    releaseRef.current = speaker.claimExternalVoice(() => audio.pause());
-    // a refused play() never fires pause, so the claim comes back here
-    void audio.play().catch(() => giveBackVoice());
+    const release = speaker.claimExternalVoice(() => audio.pause());
+    releaseRef.current = release;
+    // a refused play() never fires pause, so the claim comes back here —
+    // but only if this attempt's claim is still the active one
+    void audio.play().catch(() => giveBackVoice(release));
   };
 
   const seek = (next: number) => {
@@ -91,7 +97,10 @@ export function VoiceNoteBubble({
         }}
         onTimeUpdate={(event) => setTime(event.currentTarget.currentTime)}
         onPlay={() => setPlaying(true)}
-        onPause={() => {
+        onPause={(event) => {
+          // a queued pause can land after playback already resumed; only
+          // a pause that stuck gives the voice back
+          if (!event.currentTarget.paused) return;
           setPlaying(false);
           giveBackVoice();
         }}

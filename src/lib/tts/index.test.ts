@@ -123,6 +123,19 @@ describe("external voice claims", () => {
     expect(second).toHaveBeenCalledTimes(1);
   });
 
+  it("a stale release cannot clear a newer claim that reuses the same callback", () => {
+    const speaker = new Speaker();
+    const pause = vi.fn();
+    const releaseFirst = speaker.claimExternalVoice(pause);
+
+    speaker.claimExternalVoice(pause);
+
+    expect(pause).toHaveBeenCalledTimes(1);
+    releaseFirst();
+    speaker.stop();
+    expect(pause).toHaveBeenCalledTimes(2);
+  });
+
   it("starting an utterance pauses the holder — call mode takes the voice", async () => {
     vi.stubGlobal(
       "fetch",

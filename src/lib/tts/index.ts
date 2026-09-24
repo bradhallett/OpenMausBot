@@ -50,10 +50,12 @@ export class Speaker {
   private request: AbortController | null = null;
   private localUtterance: SpeechSynthesisUtterance | null = null;
   private settleLocalSpeech: ((finished: boolean) => void) | null = null;
-  /** Pause callback from the non-TTS audio source currently holding the
-   * voice (a voice-note bubble). Cleared by stop() before it runs, and by
-   * the holder's own release, so a stale element is never paused twice. */
-  private externalPause: (() => void) | null = null;
+  /** The non-TTS audio source currently holding the voice (a voice-note
+   * bubble). Identity is the claim object, not the pause callback, so a
+   * caller reusing one callback cannot let an older release clear a newer
+   * claim. Cleared by stop() before it runs, and by the holder's own
+   * release, so a stale element is never paused twice. */
+  private externalClaim: { pause: () => void } | null = null;
 
   subscribe(fn: (s: SpeechSnapshot) => void): () => void {
     this.watchers.add(fn);
@@ -78,9 +80,9 @@ export class Speaker {
 
   stop() {
     this.token += 1;
-    const external = this.externalPause;
-    this.externalPause = null;
-    external?.();
+    const external = this.externalClaim;
+    this.externalClaim = null;
+    external?.pause();
     this.request?.abort();
     this.request = null;
     this.settleLocalSpeech?.(false);
@@ -102,12 +104,13 @@ export class Speaker {
    * function the holder calls when it stops or unmounts for its own reasons. */
   claimExternalVoice(pause: () => void): () => void {
     this.stop();
-    this.externalPause = pause;
+    const claim = { pause };
+    this.externalClaim = claim;
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      if (this.externalPause === pause) this.externalPause = null;
+      if (this.externalClaim === claim) this.externalClaim = null;
     };
   }
 
