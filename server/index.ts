@@ -4097,7 +4097,7 @@ async function waitForChatRoomMember(
 
 /** The peer's newest stored message, across every task it owns: the recency
  * the live roster breaks ties with. A bot with no messages yet falls back
- * to its oldest task's creation, which keeps a freshly created teammate
+ * to its newest task's creation, which keeps a freshly created teammate
  * ahead of a silent veteran only when it really is the newer arrival. */
 function newestPeerActivityAt(botId: string): number {
   let newest = 0;
