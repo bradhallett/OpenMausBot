@@ -354,15 +354,14 @@ const LIVE_ROSTER_OPEN = "[LIVE TEAMMATES]";
 const LIVE_ROSTER_CLOSE = "[/LIVE TEAMMATES]";
 
 /** A peer label for the live fence: clipped like every roster field, and
- * with the fence's own markers stripped. Names and ids are user-editable —
- * including through team import — so a peer named "[/LIVE TEAMMATES]" would
- * otherwise close the block early and let whatever follows it read as the
- * harness's own words instead of data. Marker prefixes strip too, with an
- * optional trailing bracket: the clip can truncate a marker mid-way, and
- * the brackets the template itself adds would otherwise complete the
- * truncated prefix back into a real fence marker. */
+ * with every bracket taken out, the same discipline as peerName. Names and
+ * ids are user-editable — including through team import — so label text
+ * that keeps a "[" could assemble a fence marker however a strip works:
+ * whole, truncated by the clip, or reassembled from nested marker text
+ * once an inner marker is removed. A label with no brackets cannot form
+ * either marker, and the fence's own stay the only two. */
 const liveRosterLabel = (value: string): string =>
-  clip(value, ROSTER_NAME_MAX).replace(/\[\/?LIVE TEAMMATES\]?/gi, "").trim();
+  clip(value.replace(/[[\]]/g, " "), ROSTER_NAME_MAX);
 
 /** The live roster as it rides a coordination brief: bounded, ordered, and
  * honest about what it left out. Renders nothing for a team with neither a
