@@ -438,6 +438,39 @@ describe("PiDriver turns (fake CLI)", () => {
     expect(second.message).toBe("Standing rules.\n\nMemory: likes quiet hours.\n\nsecond");
   });
 
+  it("honors upstream willRetry agent_end frames through post-run compaction recovery", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-pi-compaction-recovery-upstream-"));
+    const dump = join(dir, "dump.jsonl");
+    await create("compaction-recovery-upstream", { FAKE_PI_DUMP: dump });
+    const threadId = "t-pi-compaction-recovery-upstream-" + randomUUID();
+    const prompts = () =>
+      readFileSync(dump, "utf8").split("\n").filter(Boolean)
+        .map((line) => JSON.parse(line) as { prompt?: { message?: string } })
+        .filter((row) => row.prompt).map((row) => row.prompt!.message!);
+    const send = async (text: string, cursor?: string) => {
+      const { turnId } = await instance.adapter.sendTurn({
+        threadId,
+        text,
+        system: "Standing rules.\n\nMemory: likes quiet hours.",
+        systemStable: "Standing rules.",
+        systemVolatile: "Memory: likes quiet hours.",
+        ...(cursor ? { resumeCursor: cursor } : {}),
+      });
+      await recorder.until((e) => e.type === "turn.completed" && e.turnId === turnId);
+      const session = recorder.events.find((e) => e.type === "session.started" && e.turnId === turnId) as { sessionId: string };
+      return { message: prompts().at(-1)!, cursor: session.sessionId };
+    };
+
+    // Upstream pi marks the pre-recovery agent_end with willRetry: true and
+    // closes the run with agent_settled; settling on the unmarked frame the
+    // way older drivers treated turn_end would kill the child before the
+    // overflow-recovery compaction could invalidate the receipt.
+    const first = await send("first");
+    expect(first.message).toBe("Standing rules.\n\nMemory: likes quiet hours.\n\nfirst");
+    const second = await send("second", first.cursor);
+    expect(second.message).toBe("Standing rules.\n\nMemory: likes quiet hours.\n\nsecond");
+  });
+
   it("re-anchors the full prompt after eight bare turns on one session", async () => {
     const dir = mkdtempSync(join(tmpdir(), "omb-pi-reanchor-"));
     const dump = join(dir, "dump.jsonl");

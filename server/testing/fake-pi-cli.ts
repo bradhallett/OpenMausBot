@@ -6,7 +6,8 @@
 // modes mirror how the real CLI misbehaves:
 //
 //   FAKE_PI_MODE   happy (default) | tooluse | permission | interleave | question-select | question-input
-//                  | turn-error | no-models | exit-early | compaction | compaction-recovery | prompt-reject
+//                  | turn-error | no-models | exit-early | compaction | compaction-recovery
+//                  | compaction-recovery-upstream | prompt-reject
 //   FAKE_PI_MODELS comma-separated provider/model pairs (default "ollama-cloud/glm-5.2,openai/gpt-4o")
 //   FAKE_PI_DUMP   path to append {argv, env} JSON, so a test can assert argv shape
 //                  and env hygiene (no leaked secrets into the pi child).
@@ -136,6 +137,28 @@ const streamCompactionRecoveryTurn = () => {
     send({ type: "message_update", usage: { input: 0, output: 0 }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "ok" } });
     send({ type: "turn_end", message: { stopReason: "end_turn", usage: { input: 4, output: 1 } }, usage: { input: 4, output: 1 } });
     send({ type: "agent_end", isTerminal: true });
+  }, 30);
+};
+
+// compaction-recovery-upstream: the same post-run overflow recovery in
+// upstream pi's dialect — agent_end frames carry willRetry instead of
+// isTerminal, and the run closes with agent_settled after the final
+// agent_end.
+const streamCompactionRecoveryUpstreamTurn = () => {
+  send({ type: "agent_start" });
+  send({ type: "turn_start" });
+  send({ type: "message_update", usage: { input: 0, output: 0 }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "recovered" } });
+  send({ type: "turn_end", message: { stopReason: "end_turn", usage: { input: 12, output: 3 } }, usage: { input: 12, output: 3 } });
+  send({ type: "agent_end", willRetry: true });
+  setTimeout(() => {
+    send({ type: "compaction_start", reason: "overflow" });
+    send({ type: "compaction_end", reason: "overflow", result: undefined, aborted: false, willRetry: true });
+    send({ type: "agent_start" });
+    send({ type: "turn_start" });
+    send({ type: "message_update", usage: { input: 0, output: 0 }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "ok" } });
+    send({ type: "turn_end", message: { stopReason: "end_turn", usage: { input: 4, output: 1 } }, usage: { input: 4, output: 1 } });
+    send({ type: "agent_end", willRetry: false });
+    send({ type: "agent_settled" });
   }, 30);
 };
 
@@ -300,6 +323,7 @@ function handle(cmd: any) {
       else if (mode === "turn-error") streamErrorTurn();
       else if (mode === "compaction") streamCompactionTurn();
       else if (mode === "compaction-recovery") streamCompactionRecoveryTurn();
+      else if (mode === "compaction-recovery-upstream") streamCompactionRecoveryUpstreamTurn();
       else streamTurn();
       return;
     case "extension_ui_response":

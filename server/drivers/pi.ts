@@ -434,8 +434,9 @@ interface PiEvent {
   // turn_end / message_end
   message?: { stopReason?: string; errorMessage?: string; usage?: { input?: number; output?: number } };
   usage?: { input?: number; output?: number };
-  // agent_end
+  // agent_end / agent_settled
   isTerminal?: boolean;
+  willRetry?: boolean;
   // extension_ui_request
   id?: string;
   method?: string;
@@ -882,13 +883,28 @@ export const PiDriver: ProviderDriver<PiConfig> = {
             return;
           }
           case "agent_end": {
-            // isTerminal !== false is the RPC contract's terminal settle.
-            // isTerminal: false means maintenance or async delivery has
-            // scheduled more work (post-run compaction, a retry), so the
+            // Two dialects mark a non-terminal agent_end: upstream pi sets
+            // willRetry: true when an automatic retry follows (overflow
+            // recovery runs compaction and retries as a fresh run), and the
+            // omp fork sets isTerminal: false while maintenance or async
+            // delivery has more work scheduled. Either marker means the
             // session may still rewrite the turn that carried this
             // session's standing prompt — keep listening so those events
             // can drop the prompt-split receipt.
-            if (evt.isTerminal === false) return;
+            if (evt.isTerminal === false || evt.willRetry === true) return;
+            if (agentEndTimer) {
+              clearTimeout(agentEndTimer);
+              agentEndTimer = null;
+            }
+            finishRun();
+            return;
+          }
+          case "agent_settled": {
+            // upstream pi's explicit fully-settled guarantee: no automatic
+            // retry, compaction retry, or queued continuation remains.
+            // Usually settles one frame after the final agent_end already
+            // did; kept as its own terminal signal so the driver never
+            // depends on which dialect the configured cli speaks.
             if (agentEndTimer) {
               clearTimeout(agentEndTimer);
               agentEndTimer = null;
