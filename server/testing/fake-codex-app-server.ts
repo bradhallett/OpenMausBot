@@ -6,7 +6,7 @@
 //
 //   FAKE_CODEX_MODE   happy (default) | approval | resume | stream | windows-command |
 //                     mcp-elicitation | mcp-app-approval | mcp-form | permissions-approval | question |
-//                     multi-question | empty-question | malformed-question | config-profile |
+//                     multi-question | mixed-question | empty-question | malformed-question | config-profile |
 //                     config-profile-unsupported | config-read-error | image |
 //                     logged-in-stdout | logged-out | unauthorized | late-request
 //   FAKE_CODEX_LAUNCH_CRASHES  die at turn/start (before ack) with transient stderr,
@@ -27,6 +27,7 @@
 //   FAKE_CODEX_ASK_HOLD        question modes: record the ask reply and hold the turn open, for
 //                              timeout tests that advance the clock
 //   FAKE_CODEX_DUMP   path to write {pid, argv, env, calls, decision} as JSON
+//   FAKE_CODEX_APPROVAL_REQUEST JSON {method, params} override in approval mode
 //   FAKE_CODEX_ACCOUNT_EMAIL  synthetic ChatGPT identity (default ada@example.test)
 //   FAKE_CODEX_ACCOUNT_MODE   chatgpt (default) | api-key | none | unsupported | error | hang
 //   FAKE_CODEX_RESUME_ERROR   JSON-RPC error object to reject thread/resume
@@ -663,8 +664,15 @@ process.stdin.on("data", (chunk) => {
               },
             },
           });
-        } else if (mode === "question" || mode === "multi-question" || mode === "empty-question" || mode === "malformed-question") {
-          // one card per ask: a single question vs a bundled pair vs none vs a malformed shape
+        } else if (
+          mode === "question" ||
+          mode === "multi-question" ||
+          mode === "mixed-question" ||
+          mode === "empty-question" ||
+          mode === "malformed-question"
+        ) {
+          // one card per ask: a single question vs a bundled pair vs a
+          // broken-plus-valid pair vs none vs a malformed shape
           out({
             jsonrpc: "2.0",
             id: 101,
@@ -678,6 +686,11 @@ process.stdin.on("data", (chunk) => {
                     question: "Ship today?",
                     options: ["Yes", "No", "Maybe", "Later", "Soon", "Never"].map((label) => ({ label })),
                   }]
+                : mode === "mixed-question"
+                ? [
+                    { id: "q-broken", question: "   ", options: [{ label: "Broken choice" }] },
+                    { id: "q-review", question: "Who reviews?", options: [{ label: "Ada" }, { label: "Lin" }] },
+                  ]
                 : mode === "empty-question"
                 ? []
                 : [
@@ -688,7 +701,10 @@ process.stdin.on("data", (chunk) => {
           });
         } else if (mode === "approval" || mode === "windows-command") {
           const approvalCommand = mode === "windows-command" ? command : "rm -rf scratch";
-          out({ jsonrpc: "2.0", id: 100, method: "execCommandApproval", params: { command: approvalCommand } });
+          const approval = process.env.FAKE_CODEX_APPROVAL_REQUEST
+            ? JSON.parse(process.env.FAKE_CODEX_APPROVAL_REQUEST)
+            : { method: "execCommandApproval", params: { command: approvalCommand } };
+          out({ jsonrpc: "2.0", id: 100, ...approval });
           // turn continues from the approval response handler above
         } else {
           finishTurn();
