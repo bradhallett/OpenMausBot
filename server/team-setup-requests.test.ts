@@ -229,7 +229,15 @@ describe("reviewed Chief team setup", () => {
     } }]);
     expect(card.detail).toContain('Title: "Researcher" → "Research lead"');
     expect(card.detail).toContain('Section: "Work" → "Engineering"');
-    expect(card.detail).toContain("Default engine/model: claude/sonnet → codex/gpt-fixture");
+    expect(card.detail).toContain("Default engine/model: claude/sonnet (no variant) → codex/gpt-fixture (no variant)");
+  });
+  it("shows the model variant on the current selection and its absence on the proposed one", () => {
+    const h = harness();
+    h.peer.modelSelection = { instanceId: "claude", model: "sonnet", variant: "high" };
+    const card = h.propose([{ action: "update", botId: h.peer.id, fields: {
+      modelSelection: { instanceId: "codex", model: "gpt-fixture" },
+    } }]);
+    expect(card.detail).toContain("Default engine/model: claude/sonnet (variant high) → codex/gpt-fixture (no variant)");
   });
 });
 

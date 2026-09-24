@@ -11,8 +11,13 @@ import type { TeamSetupFields, TeamSetupOperation, TeamSetupRequest, TeamSetupRe
 const section = (value?: string) => value?.trim() || "";
 const teamName = z.string().trim().min(1).max(60).refine(fitsOnOneLine).refine((value) => redactSecretsInText(value) === value, "Team names cannot contain credentials");
 const FIELD_LABELS: Record<string, string> = { name: "Name", title: "Title", description: "Description", section: "Section" };
+// The variant rides ModelSelection, and a proposal that omits it removes it,
+// so the review text says both states outright: set on the current
+// selection, explicitly absent on the proposed one. Otherwise a bot with a
+// configured variant shows a before value that hides the setting changing
+// under it.
 const modelSelectionText = (selection: ModelSelection) =>
-  `${selection.instanceId}/${selection.model}${selection.effort ? ` (effort ${selection.effort})` : ""}`;
+  `${selection.instanceId}/${selection.model}${selection.variant ? ` (variant ${selection.variant})` : " (no variant)"}${selection.effort ? ` (effort ${selection.effort})` : ""}`;
 const fieldsSchema = z.object({
   chiefOfStaff: z.boolean().optional(),
   name: z.string().optional(), title: z.string().optional(), description: z.string().optional(), soul: z.string().optional(),
