@@ -1803,11 +1803,13 @@ describe("ACP snapshot", () => {
     // The child env inherits process.env (core.ts childEnv), so a developer
     // machine with a real FACTORY_API_KEY exported would otherwise satisfy
     // every case here and prove nothing about the on-disk lookup.
+    // Windows resolves the driver home from USERPROFILE first, so every
+    // case pins both to its scratch home like the qwen turn test does.
     const make = (environment: Record<string, string>) =>
       DroidAgentDriver.create({
         instanceId: "droid-auth",
         displayName: undefined,
-        environment: { FACTORY_API_KEY: "", ...environment },
+        environment: { FACTORY_API_KEY: "", ...(environment.HOME ? { USERPROFILE: environment.HOME } : {}), ...environment },
         enabled: true,
         config: { cli: FAKE_CLI, fullAuto: false },
       });
@@ -1872,7 +1874,7 @@ describe("ACP snapshot", () => {
     const instance = await DroidAgentDriver.create({
       instanceId: "droid-models",
       displayName: undefined,
-      environment: { HOME: scratch },
+      environment: { HOME: scratch, USERPROFILE: scratch },
       enabled: true,
       config: { cli: FAKE_CLI, fullAuto: false },
     });
