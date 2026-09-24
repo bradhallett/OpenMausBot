@@ -864,6 +864,11 @@ export const PiDriver: ProviderDriver<PiConfig> = {
           }
           case "turn_end":
           {
+            // a killed child can still flush one buffered frame after the
+            // turn settled (the abort path's cancelled turn_end is the
+            // common one); arming the grace timer then would leak it past
+            // a turn that is already complete.
+            if (settled) return;
             const sr = evt.message?.stopReason;
             // toolUse means pi ran a tool and auto-continues next turn to
             // answer — the run is not over, and the next turn_end carries
