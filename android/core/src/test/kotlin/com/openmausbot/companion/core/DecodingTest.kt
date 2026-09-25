@@ -629,4 +629,52 @@ class DecodingTest {
         )
         assertNull(plain.tool?.claudeUpdate)
     }
+
+    @Test
+    fun connectorGrantsSummarizeAllCountAndNonePerService() {
+        val overview = decodeFixture<BotOverview>("bot-overview-grants")
+
+        assertEquals(
+            mapOf(
+                "gmail" to BotOverviewGrant.AllTools,
+                "slack" to BotOverviewGrant.ToolCount(2),
+                "notion" to BotOverviewGrant.NoTools,
+            ),
+            overview.connectorGrants,
+        )
+        // The plain fixture predates grants; absence must read as absence.
+        assertNull(decodeFixture<BotOverview>("bot-overview").connectorGrants)
+    }
+
+    @Test
+    fun unrecognizedConnectorGrantShapesDoNotBreakTheOverview() {
+        val overview = CompanionJson.decodeFromString<BotOverview>(
+            """
+            {
+              "who": {"name": "Kiwi", "title": "", "blurb": "", "soulLead": ""},
+              "connectorGrants": {
+                "gmail": {"tools": ["GMAIL_SEND_EMAIL"]},
+                "future": "partial",
+                "slack": 3,
+                "odd": null,
+                "calendar": -1,
+                "fractional": 1.5
+              }
+            }
+            """.trimIndent(),
+        )
+
+        // Recognized siblings still decode…
+        assertEquals(BotOverviewGrant.ToolCount(3), overview.connectorGrants?.get("slack"))
+        // …and every unrecognized shape reads as unknown rather than failing.
+        mapOf(
+            "gmail" to "an object",
+            "future" to "an unknown word",
+            "odd" to "null",
+            "calendar" to "a negative count",
+            "fractional" to "a non-integer count",
+        ).forEach { (slug, shape) ->
+            assertEquals(BotOverviewGrant.Unrecognized, overview.connectorGrants?.get(slug), "$slug sent $shape")
+        }
+    }
 }

@@ -276,6 +276,23 @@ class ProfileClientTest {
         assertEquals("voice-1", body.getValue("voiceId").jsonPrimitive.content)
     }
 
+    @Test
+    fun overviewGrantsReachTheProfileSheetThroughTheSameClient() = runBlocking {
+        server.enqueue(json(fixtureText("bot-overview-grants")))
+
+        val overview = client.overview("bot-1")
+
+        assertEquals("GET", server.takeRequest().method)
+        assertEquals(
+            mapOf(
+                "gmail" to BotOverviewGrant.AllTools,
+                "slack" to BotOverviewGrant.ToolCount(2),
+                "notion" to BotOverviewGrant.NoTools,
+            ),
+            overview.connectorGrants,
+        )
+    }
+
     private fun json(body: String, code: Int = 200): MockResponse = MockResponse()
         .setResponseCode(code)
         .setHeader("Content-Type", "application/json")

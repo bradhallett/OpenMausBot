@@ -3,6 +3,7 @@ package com.openmausbot.companion.ui
 import com.openmausbot.companion.core.AvatarCrop
 import com.openmausbot.companion.core.Bot
 import com.openmausbot.companion.core.BotProfilePatch
+import com.openmausbot.companion.core.BotOverviewGrant
 import com.openmausbot.companion.core.ConfigStatus
 import com.openmausbot.companion.core.Voice
 import com.openmausbot.companion.core.VoiceProvider
@@ -47,6 +48,12 @@ data class VoiceChoice(
     val enabled: Boolean,
 )
 
+/** One read-only row of the profile sheet's Connected apps section. */
+data class ConnectorGrantRow(
+    val service: String,
+    val summary: String,
+)
+
 object ProfileRules {
     /** `String(prompt.trimming….prefix(400))` in `generateImage`. */
     const val GENERATE_PROMPT_LIMIT: Int = 400
@@ -61,6 +68,18 @@ object ProfileRules {
     const val AVATAR_FOOTER: String =
         "PNG, JPEG, GIF, or WebP, up to 10 MB. Images are stored on your paired computer " +
             "and loaded with this phone's pairing token."
+
+    // Grants are assigned per bot on the computer (the web grant editor);
+    // the phone only reads the overview's summary back. The footer says so,
+    // the way the closed voice states explain a repair this form cannot offer.
+    const val CONNECTED_APPS: String = "Connected apps"
+
+    const val CONNECTED_APPS_FOOTER: String =
+        "Tool grants are assigned in OpenMausBot on your computer. This phone shows them read-only."
+
+    private const val GRANTS_ALL: String = "Every tool"
+
+    private const val GRANTS_NONE: String = "No tools"
 
     private const val GENERATE_READY_FOOTER: String =
         "Generation uses the shared image provider configured on your computer. No provider " +
@@ -356,5 +375,38 @@ object ProfileRules {
         AvatarCrop.CIRCLE -> "Circle"
         AvatarCrop.ROUNDED -> "Rounded"
         AvatarCrop.SQUARE -> "Square"
+    }
+
+    /**
+     * The Connected apps section's rows, in the server's order. An unknown
+     * summary shape has no row to draw — [BotOverviewGrant.Unrecognized] is
+     * skipped, not guessed at — and absent grants draw the section not at all.
+     */
+    fun connectorGrantRows(grants: Map<String, BotOverviewGrant>?): List<ConnectorGrantRow> =
+        grants?.mapNotNull { (slug, grant) ->
+            when (grant) {
+                BotOverviewGrant.AllTools -> ConnectorGrantRow(serviceLabel(slug), GRANTS_ALL)
+                BotOverviewGrant.NoTools -> ConnectorGrantRow(serviceLabel(slug), GRANTS_NONE)
+                is BotOverviewGrant.ToolCount -> ConnectorGrantRow(
+                    service = serviceLabel(slug),
+                    summary = if (grant.count == 0) {
+                        GRANTS_NONE
+                    } else {
+                        "${grant.count} tool" + if (grant.count == 1) "" else "s"
+                    },
+                )
+                BotOverviewGrant.Unrecognized -> null
+            }
+        } ?: emptyList()
+
+    /**
+     * The summary names services by slug ("gmail", "google_calendar"); the
+     * row shows the same name with separators spaced and the first letter
+     * raised, and nothing stronger: the catalog's display labels stay on the
+     * computer, and this section must not invent its own.
+     */
+    private fun serviceLabel(slug: String): String {
+        val spaced = slug.replace('_', ' ').replace('-', ' ').trim()
+        return if (spaced.isEmpty()) slug else spaced.replaceFirstChar { it.uppercase() }
     }
 }

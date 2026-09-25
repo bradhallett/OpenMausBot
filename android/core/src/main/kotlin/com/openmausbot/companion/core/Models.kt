@@ -27,6 +27,7 @@ import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
 /** The one JSON configuration used for every sidecar payload. */
@@ -1248,6 +1249,60 @@ data class BotOverviewWho(val name: String, val title: String, val blurb: String
 @Serializable
 data class BotOverviewRecent(val at: Double, val summary: String)
 
+/**
+ * One connected-app service's tool grants, as the overview summarizes them:
+ * every tool, a count of named tools, or none. A value this build does not
+ * recognize decodes as [Unrecognized] and is not rendered, so a newer
+ * computer's summary cannot stop the overview from decoding — the same
+ * policy unknown attachment kinds already follow.
+ */
+@Serializable(with = BotOverviewGrantSerializer::class)
+sealed interface BotOverviewGrant {
+    /** `tools: "*"` on the computer: the whole service is granted. */
+    data object AllTools : BotOverviewGrant
+
+    /** A specific tool allowlist; the overview carries only its size. */
+    data class ToolCount(val count: Int) : BotOverviewGrant
+
+    /** The service is granted nothing. */
+    data object NoTools : BotOverviewGrant
+
+    /** A future summary shape. Decodable, never rendered. */
+    data object Unrecognized : BotOverviewGrant
+}
+
+object BotOverviewGrantSerializer : KSerializer<BotOverviewGrant> {
+    override val descriptor: SerialDescriptor =
+        PrimitiveSerialDescriptor("BotOverviewGrant", PrimitiveKind.STRING)
+
+    override fun deserialize(decoder: Decoder): BotOverviewGrant {
+        val input = decoder as? JsonDecoder
+            ?: throw SerializationException("BotOverviewGrant can only be decoded from JSON")
+        val primitive = input.decodeJsonElement() as? JsonPrimitive
+            ?: return BotOverviewGrant.Unrecognized
+        val count = primitive.longOrNull
+        return when {
+            primitive.content == "all" -> BotOverviewGrant.AllTools
+            primitive.content == "none" -> BotOverviewGrant.NoTools
+            count != null && count in 0..Int.MAX_VALUE.toLong() -> BotOverviewGrant.ToolCount(count.toInt())
+            else -> BotOverviewGrant.Unrecognized
+        }
+    }
+
+    override fun serialize(encoder: Encoder, value: BotOverviewGrant) {
+        val output = encoder as? JsonEncoder
+            ?: throw SerializationException("BotOverviewGrant can only be encoded as JSON")
+        output.encodeJsonElement(
+            when (value) {
+                BotOverviewGrant.AllTools -> JsonPrimitive("all")
+                BotOverviewGrant.NoTools -> JsonPrimitive("none")
+                is BotOverviewGrant.ToolCount -> JsonPrimitive(value.count)
+                BotOverviewGrant.Unrecognized -> JsonNull
+            },
+        )
+    }
+}
+
 @Serializable
 data class BotOverview(
     val who: BotOverviewWho,
@@ -1255,6 +1310,12 @@ data class BotOverview(
     val reaches: List<String> = emptyList(),
     val wont: List<String> = emptyList(),
     val recent: List<BotOverviewRecent> = emptyList(),
+    /**
+     * Per-service connector tool grants, summarized. Absent on computers
+     * older than per-bot grants: the legacy all-or-nothing `composio`
+     * behavior stands and nothing new is drawn.
+     */
+    val connectorGrants: Map<String, BotOverviewGrant>? = null,
 )
 
 /** Native server sessions returned by POST /api/auth/pair. */
