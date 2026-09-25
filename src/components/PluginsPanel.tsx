@@ -724,18 +724,16 @@ export function PluginsPanel() {
                     : t("connectors.section.available")}
                 {tab === "marketplace" && !search && pagination
                   && (pagination.stalled || (pagination.totalItems !== undefined && pagination.items < pagination.totalItems)) && (
-                  <span
-                    className="ml-2 font-normal"
-                    title={pagination.reason
-                      ? t("connectors.marketplace.partialReason", { reason: pagination.reason })
-                      : undefined}
-                  >
+                  <span className="ml-2 font-normal">
                     {pagination.totalItems !== undefined && pagination.items < pagination.totalItems
                       ? t("connectors.marketplace.partialCount", {
                         shown: pagination.items.toLocaleString(),
                         total: pagination.totalItems.toLocaleString(),
                       })
                       : t("connectors.marketplace.partialStalled")}
+                    {pagination.reason
+                      ? ` — ${t("connectors.marketplace.partialReason", { reason: pagination.reason })}`
+                      : null}
                   </span>
                 )}
               </div>
