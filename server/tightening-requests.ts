@@ -409,11 +409,14 @@ export class TighteningRequestService {
         // The first attempt committed the authority change and the durable
         // receipt, then died before it could settle the card or record
         // history. This retry settles the card, so it also writes the row
-        // that attempt never reached: the card still carries the
-        // pre-change snapshot, and the live bot is the after state.
-        const fresh = this.store.bot(payload.targetBotId);
-        if (fresh) {
-          recordAuthorityChange(payload.targetBotId, "bot", `card:${message.id}`, payload.before, this.snapshotOf(fresh));
+        // that attempt never reached — from the card's own frozen inputs,
+        // never the live bot: the revision guard proved live state equaled
+        // payload.before at apply, so the validated post-card state is the
+        // committed change, while a live snapshot could fold in later owner
+        // edits and attribute them to this card.
+        const recorded = validateTightening(payload.before, payload.intents);
+        if (recorded.ok) {
+          recordAuthorityChange(payload.targetBotId, "bot", `card:${message.id}`, payload.before, recorded.after);
         }
         return { claimed: true, state: "already_settled", behavior: "allow" };
       }
