@@ -248,6 +248,17 @@ export class TighteningRequestService {
     });
   }
 
+  /** Disable every named skill, or report the first failure together with
+   * the names still outstanding. Shared by the fresh apply and the
+   * receipt-backed retry so both leave the same trail. */
+  private applySkillDisables(botId: string, names: string[]): { ok: true } | { ok: false; error: string; outstanding: string[] } {
+    for (let index = 0; index < names.length; index += 1) {
+      const disabled = this.disableSkill!(botId, names[index]!);
+      if (!disabled.ok) return { ok: false, error: disabled.error, outstanding: names.slice(index) };
+    }
+    return { ok: true };
+  }
+
   propose(args: {
     botId: string;
     threadId: string;
@@ -356,11 +367,25 @@ export class TighteningRequestService {
     }
     if (card.answered) return { claimed: true, state: "already_settled", behavior: card.answered };
 
+    let emergency = false;
+    let outstandingSkills: string[] = [];
     try {
       const target = this.store.bot(payload.targetBotId);
       // The authority change and receipt share one durable write. If saving
-      // the card failed afterward, a retry only settles it; it never reapplies.
+      // the card failed afterward, a retry only settles it; it never
+      // reapplies authority — but it does finish any skills a failed
+      // attempt left enabled, so a partial disable can never strand the card.
       if (target?.lastTighteningRequestId === payload.requestId) {
+        const enabled = new Set(this.enabledSkills?.(payload.targetBotId) ?? []);
+        const remaining = (payload.intents.skills ?? []).filter((name) => enabled.has(name));
+        if (remaining.length && !this.disableSkill) {
+          throw new TighteningRequestError("Skill changes are not available in this workspace", 400);
+        }
+        const finished = this.applySkillDisables(payload.targetBotId, remaining);
+        if (!finished.ok) {
+          outstandingSkills = finished.outstanding;
+          throw new TighteningRequestError(finished.error, 409);
+        }
         const settled = this.store.patchMessage(args.threadId, message.id, {
           card: { ...card, answered: "allow", held: undefined, tighteningRequest: { ...payload, appliedAt: payload.appliedAt ?? this.now() } },
         });
@@ -385,7 +410,7 @@ export class TighteningRequestService {
       // card: a card that sat open can only ever apply a reduction.
       const checked = validateTightening(current, payload.intents);
       if (!checked.ok) throw new TighteningRequestError(checked.error, 409);
-      const emergency = payload.intents.approvalMode !== undefined &&
+      emergency = payload.intents.approvalMode !== undefined &&
         (current.approvalMode === "full" || current.approvalMode === "custom") &&
         payload.intents.approvalMode === "ask";
       if (this.targetBusy?.(target.id) && !emergency) {
@@ -397,14 +422,10 @@ export class TighteningRequestService {
         }
       }
 
-      // Skills first: a failure here leaves the bot untouched and the card
-      // open, so the human can retry after fixing whatever the store named.
+      // The capability check runs before any mutation: a workspace that
+      // cannot touch skills must not half-apply the card.
       if (payload.intents.skills?.length && !this.disableSkill) {
         throw new TighteningRequestError("Skill changes are not available in this workspace", 400);
-      }
-      for (const name of payload.intents.skills ?? []) {
-        const disabled = this.disableSkill!(target.id, name);
-        if (!disabled.ok) throw new TighteningRequestError(disabled.error, 409);
       }
 
       const patch: Parameters<TighteningRequestStore["patchBot"]>[1] = { lastTighteningRequestId: payload.requestId };
@@ -420,6 +441,17 @@ export class TighteningRequestService {
       if (payload.intents.mcpServers !== undefined) patch.mcpServers = [...checked.after.mcpServers];
       if (!this.store.patchBot(target.id, patch)) throw new TighteningRequestError(NO_SUCH_BOT, 404);
 
+      // Skills disable AFTER the receipt write. Each disable persists on
+      // its own, so a failure midway can leave part of the list done — but
+      // the receipt is already durable, which turns every retry into the
+      // branch above: finish the remainder, never reapply authority, and
+      // never leave the card permanently stale.
+      const skills = this.applySkillDisables(target.id, payload.intents.skills ?? []);
+      if (!skills.ok) {
+        outstandingSkills = skills.outstanding;
+        throw new TighteningRequestError(skills.error, 409);
+      }
+
       const appliedAt = this.now();
       const settled = this.store.patchMessage(args.threadId, message.id, {
         card: { ...card, answered: "allow", held: undefined, tighteningRequest: { ...payload, appliedAt } },
@@ -431,9 +463,11 @@ export class TighteningRequestService {
       const status = error instanceof TighteningRequestError ? error.status : 400;
       const detail = error instanceof Error ? error.message : String(error);
       const saved = this.store.bot(payload.targetBotId)?.lastTighteningRequestId === payload.requestId;
-      const notice = card.dismissed && card.options.length === 0
-        ? "Permissions tightened. Recording the operation receipt could not finish; the changes will not be applied again."
-        : "Permissions tightened. Confirm again to finish recording this decision; the changes will not be applied again.";
+      const notice = outstandingSkills.length
+        ? `Permissions tightened. Confirm again to finish disabling: ${redactSecretsInText(outstandingSkills.join(", "))}`
+        : card.dismissed && card.options.length === 0
+          ? "Permissions tightened. Recording the operation receipt could not finish; the changes will not be applied again."
+          : "Permissions tightened. Confirm again to finish recording this decision; the changes will not be applied again.";
       try {
         this.store.patchMessage(args.threadId, message.id, {
           card: { ...card, held: saved ? notice : redactSecretsInText(detail).slice(0, 500) },
@@ -442,6 +476,7 @@ export class TighteningRequestService {
       if (saved) return {
         claimed: true, state: "applied", targetBotId: payload.targetBotId,
         fields: INTENT_KEYS.filter((key) => payload.intents[key] !== undefined),
+        ...(emergency ? { emergencyStop: true } : {}),
       };
       return { claimed: true, state: "invalid", error: detail, status };
     }

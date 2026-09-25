@@ -342,19 +342,84 @@ describe("card plumbing", () => {
     expect(bot.composio).toBe(false);
   });
 
-  it("leaves the bot untouched when a skill disable fails, and surfaces the store's error", () => {
-    const { store, service, bot } = harness({ skills: ["pdf"], mode: "full" });
+  it("writes the receipt before skills, so a failed disable retries instead of stranding the card", () => {
+    const { store, bot } = harness({ skills: ["pdf"], mode: "full" });
     const failing = new TighteningRequestService({
       store,
       enabledSkills: () => ["pdf"],
       disableSkill: () => ({ ok: false as const, error: 'no imported skill named "pdf"' }),
     });
     const card = failing.propose({ botId: bot.id, threadId: bot.threadId, intents: { approvalMode: "ask", skills: ["pdf"] }, reason: "r" });
-    const result = failing.resolve({ botId: bot.id, threadId: bot.threadId, requestId: card.requestId, behavior: "allow" });
-    expect(result).toMatchObject({ state: "invalid", status: 409, error: 'no imported skill named "pdf"' });
-    expect(bot.approvalMode).toBe("full");
-    expect(bot.lastTighteningRequestId).toBeUndefined();
-    void service;
+    const first = failing.resolve({ botId: bot.id, threadId: bot.threadId, requestId: card.requestId, behavior: "allow" });
+    // The authority change and receipt are durable; the skill failure is
+    // surfaced on the card for a retry, not silently dropped.
+    expect(first).toMatchObject({ state: "applied" });
+    expect(bot.approvalMode).toBe("ask");
+    expect(bot.lastTighteningRequestId).toBe(card.requestId);
+    const held = store.messagesFor(bot.threadId).find((m) => m.card?.requestId === card.requestId)?.card?.held;
+    expect(held).toContain("finish disabling: pdf");
+
+    const disabled: string[] = [];
+    const healed = new TighteningRequestService({
+      store,
+      enabledSkills: () => (disabled.length ? [] : ["pdf"]),
+      disableSkill: (_botId, name) => {
+        disabled.push(name);
+        return { ok: true as const };
+      },
+    });
+    const second = healed.resolve({ botId: bot.id, threadId: bot.threadId, requestId: card.requestId, behavior: "allow" });
+    expect(second).toMatchObject({ state: "already_settled" });
+    expect(disabled).toEqual(["pdf"]);
+    const settled = store.messagesFor(bot.threadId).find((m) => m.card?.requestId === card.requestId)?.card;
+    expect(settled?.answered).toBe("allow");
+  });
+
+  it("finishes only the skills a failed attempt left enabled", () => {
+    const { store, bot } = harness({ skills: ["a", "b"], mode: "full" });
+    const done = new Set<string>();
+    let failNext = true;
+    const service = new TighteningRequestService({
+      store,
+      enabledSkills: () => ["a", "b"].filter((name) => !done.has(name)),
+      disableSkill: (_botId, name) => {
+        if (name === "b" && failNext) return { ok: false as const, error: "store busy" };
+        done.add(name);
+        return { ok: true as const };
+      },
+    });
+    const card = service.propose({ botId: bot.id, threadId: bot.threadId, intents: { skills: ["a", "b"] }, reason: "r" });
+    const first = service.resolve({ botId: bot.id, threadId: bot.threadId, requestId: card.requestId, behavior: "allow" });
+    expect(first).toMatchObject({ state: "applied" });
+    expect([...done]).toEqual(["a"]);
+    const held = store.messagesFor(bot.threadId).find((m) => m.card?.requestId === card.requestId)?.card?.held;
+    expect(held).toContain("finish disabling: b");
+
+    failNext = false;
+    const second = service.resolve({ botId: bot.id, threadId: bot.threadId, requestId: card.requestId, behavior: "allow" });
+    expect(second).toMatchObject({ state: "already_settled" });
+    expect([...done]).toEqual(["a", "b"]);
+  });
+
+  it("carries emergencyStop through the committed-change fallback", () => {
+    const { bot } = harness({ mode: "full" });
+    class BrittleMessages extends MemoryStore {
+      patchMessage(): never {
+        throw new Error("disk full");
+      }
+    }
+    const brittleStore = new BrittleMessages();
+    brittleStore.bots.set(bot.id, bot);
+    const brittle = new TighteningRequestService({
+      store: brittleStore,
+      mountedMcpServers: (record) => [...(record.mcpServers ?? [])],
+    });
+    const card = brittle.propose({ botId: bot.id, threadId: bot.threadId, intents: { approvalMode: "ask" }, reason: "r" });
+    // patchBot commits the downgrade; recording the decision on the card
+    // then fails. The fallback must still stop the running turn.
+    const result = brittle.resolve({ botId: bot.id, threadId: bot.threadId, requestId: card.requestId, behavior: "allow" });
+    expect(result).toMatchObject({ state: "applied", emergencyStop: true });
+    expect(bot.approvalMode).toBe("ask");
   });
 
   it("carries intents and the before snapshot on the card, without new wire fields", () => {
