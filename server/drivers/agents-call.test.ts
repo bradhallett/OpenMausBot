@@ -109,7 +109,7 @@ describe("propose_profile", () => {
 
   it("passes boolean toggles through with the other fields", async () => {
     const calls: Array<{ path: string; body: any }> = [];
-    const result = await callTool("propose_profile", { description: "Calmer replies.", notifications: false, speakReplies: true }, context({
+    const result = await callTool("propose_profile", { description: "Calmer replies.", notifications: false, speakReplies: true, reason: "Use calmer replies." }, context({
       client: {
         api: async (path, init) => {
           calls.push({ path, body: JSON.parse(String(init?.body)) });
@@ -126,8 +126,7 @@ describe("propose_profile", () => {
           fromBotId: "bot-voice",
           fromThreadId: "thread-voice",
           changes: { description: "Calmer replies.", notifications: false, speakReplies: true },
-          reason: undefined,
-          forBotId: undefined,
+          reason: "Use calmer replies.",
         },
       },
     ]);
