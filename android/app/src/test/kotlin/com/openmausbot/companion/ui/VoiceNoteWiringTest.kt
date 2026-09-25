@@ -244,7 +244,9 @@ class VoiceNoteWiringTest {
         compose.waitUntil(10_000) {
             // Query every poll so the download coroutine gets its frame sync;
             // click only while no fetch has been recorded so a late poll can
-            // never start the sibling row, recovering early failures via Retry.
+            // never start the sibling row. The first bubble's Retry control
+            // wins over any Play node: after a failed download its sibling
+            // still shows Play, and clicking that would start the wrong note.
             val plays = compose.onAllNodesWithContentDescription("Play voice note").fetchSemanticsNodes()
             val pauses = compose.onAllNodesWithContentDescription("Pause voice note").fetchSemanticsNodes()
             val retries = compose.onAllNodesWithText("Retry").fetchSemanticsNodes()
@@ -253,12 +255,14 @@ class VoiceNoteWiringTest {
                 (plays.isNotEmpty() || retries.isNotEmpty())
             ) {
                 when {
+                    retries.isNotEmpty() -> compose.onAllNodesWithText("Retry")[0].performClick()
                     plays.isNotEmpty() -> compose.onAllNodesWithContentDescription("Play voice note")[0].performClick()
-                    else -> compose.onAllNodesWithText("Retry")[0].performClick()
                 }
             }
             player.playback.value?.playing == true
         }
+        // The fetch that started playback belongs to the first bubble's message.
+        assertEquals("/api/threads/first/messages/a/file", requests.single().path)
 
         // A late decode failure parks only the clip that actually failed.
         compose.runOnIdle { engine?.onError?.invoke() }
