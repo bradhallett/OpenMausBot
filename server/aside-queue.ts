@@ -176,6 +176,15 @@ export function recordInjectedAsides(store: AsideStore, threadId: string, items:
     }));
   }
   settleChatFollowups(items.map((item) => item.messageId), null);
+  // The words are delivered and their rows retired; the in-memory lane must
+  // agree, or a later boundary would batch them into another injection.
+  const entry = asides.get(threadId);
+  if (entry) {
+    const delivered = new Set(items.map((item) => item.messageId));
+    const remaining = entry.items.filter((item) => !delivered.has(item.messageId));
+    if (remaining.length) asides.set(threadId, { botId: entry.botId, items: remaining });
+    else asides.delete(threadId);
+  }
   return appended;
 }
 
