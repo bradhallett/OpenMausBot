@@ -508,41 +508,55 @@ describe("tightening history", () => {
     ]);
   });
 
-  it("records history when a retry settles a change whose first receipt write failed", async () => {
-    const { bot } = harness({ mode: "full" });
-    mkdirSync(botFolder(bot.id), { recursive: true, mode: 0o700 });
-    let failPatchMessage = true;
-    class BrittleMessages extends MemoryStore {
-      patchMessage(...args: Parameters<MemoryStore["patchMessage"]>): ReturnType<MemoryStore["patchMessage"]> {
-        if (failPatchMessage) throw new Error("disk full");
-        return super.patchMessage(...args);
+  it("records the card's committed change when a retry settles the receipt, even if the owner edited the mode meanwhile", async () => {
+    // A live snapshot at retry time would misattribute owner edits made
+    // between the failed attempt and the retry: re-flipping the mode to
+    // full would erase the row entirely, and any other value would be
+    // recorded as the card's doing. The row must derive from the card's
+    // frozen inputs, never the live bot.
+    const runLeg = async (ownerEdit?: BotRecord["approvalMode"]) => {
+      const { bot } = harness({ mode: "full" });
+      mkdirSync(botFolder(bot.id), { recursive: true, mode: 0o700 });
+      let failPatchMessage = true;
+      class BrittleMessages extends MemoryStore {
+        patchMessage(...args: Parameters<MemoryStore["patchMessage"]>): ReturnType<MemoryStore["patchMessage"]> {
+          if (failPatchMessage) throw new Error("disk full");
+          return super.patchMessage(...args);
+        }
       }
-    }
-    const brittleStore = new BrittleMessages();
-    brittleStore.bots.set(bot.id, bot);
-    const brittle = new TighteningRequestService({
-      store: brittleStore,
-      mountedMcpServers: (record) => [...(record.mcpServers ?? [])],
-    });
-    const card = brittle.propose({ botId: bot.id, threadId: bot.threadId, intents: { approvalMode: "ask" }, reason: "r" });
+      const brittleStore = new BrittleMessages();
+      brittleStore.bots.set(bot.id, bot);
+      const brittle = new TighteningRequestService({
+        store: brittleStore,
+        mountedMcpServers: (record) => [...(record.mcpServers ?? [])],
+      });
+      const card = brittle.propose({ botId: bot.id, threadId: bot.threadId, intents: { approvalMode: "ask" }, reason: "r" });
 
-    // patchBot commits the downgrade; recording the decision on the card
-    // fails, so the applied change leaves no history row yet.
-    const first = brittle.resolve({ botId: bot.id, threadId: bot.threadId, requestId: card.requestId, behavior: "allow" });
-    expect(first).toMatchObject({ state: "applied" });
-    expect(bot.approvalMode).toBe("ask");
-    await flushProfileHistory(bot.id);
-    expect(readHistory(bot.id)).toEqual([]);
+      // patchBot commits the downgrade; recording the decision on the card
+      // fails, so the applied change leaves no history row yet.
+      const first = brittle.resolve({ botId: bot.id, threadId: bot.threadId, requestId: card.requestId, behavior: "allow" });
+      expect(first).toMatchObject({ state: "applied" });
+      expect(bot.approvalMode).toBe("ask");
+      await flushProfileHistory(bot.id);
+      expect(readHistory(bot.id)).toEqual([]);
 
-    // The write heals; the retry settles the card and records the
-    // committed change from the card's own before snapshot.
-    failPatchMessage = false;
-    const second = brittle.resolve({ botId: bot.id, threadId: bot.threadId, requestId: card.requestId, behavior: "allow" });
-    expect(second).toMatchObject({ state: "already_settled" });
-    await flushProfileHistory(bot.id);
-    const messageId = brittleStore.messagesFor(bot.threadId).find((message) => message.card?.requestId === card.requestId)!.id;
-    expect(readHistory(bot.id).map((row) => [row.field, row.actor, row.via, row.before, row.after])).toEqual([
-      ["approvalMode", "bot", `card:${messageId}`, "full", "ask"],
-    ]);
+      // The owner edits the mode directly while the card is still unsettled.
+      // The durable receipt keeps the retry on the settle-only path.
+      if (ownerEdit !== undefined) bot.approvalMode = ownerEdit;
+
+      // The write heals; the retry settles the card and records the
+      // committed change from the card's own frozen inputs.
+      failPatchMessage = false;
+      const second = brittle.resolve({ botId: bot.id, threadId: bot.threadId, requestId: card.requestId, behavior: "allow" });
+      expect(second).toMatchObject({ state: "already_settled" });
+      await flushProfileHistory(bot.id);
+      const messageId = brittleStore.messagesFor(bot.threadId).find((message) => message.card?.requestId === card.requestId)!.id;
+      expect(readHistory(bot.id).map((row) => [row.field, row.actor, row.via, row.before, row.after])).toEqual([
+        ["approvalMode", "bot", `card:${messageId}`, "full", "ask"],
+      ]);
+    };
+    await runLeg();
+    await runLeg("full");
+    await runLeg("auto");
   });
 });
