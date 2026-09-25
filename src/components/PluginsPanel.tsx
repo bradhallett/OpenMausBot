@@ -255,6 +255,8 @@ export interface CatalogPagination {
   items: number;
   totalItems?: number;
   stalled: boolean;
+  /** Server-side stop reason, present only when the walk stalled (#1838). */
+  reason?: string;
 }
 
 export function PluginsPanel() {
@@ -722,7 +724,12 @@ export function PluginsPanel() {
                     : t("connectors.section.available")}
                 {tab === "marketplace" && !search && pagination
                   && (pagination.stalled || (pagination.totalItems !== undefined && pagination.items < pagination.totalItems)) && (
-                  <span className="ml-2 font-normal">
+                  <span
+                    className="ml-2 font-normal"
+                    title={pagination.reason
+                      ? t("connectors.marketplace.partialReason", { reason: pagination.reason })
+                      : undefined}
+                  >
                     {pagination.totalItems !== undefined && pagination.items < pagination.totalItems
                       ? t("connectors.marketplace.partialCount", {
                         shown: pagination.items.toLocaleString(),
