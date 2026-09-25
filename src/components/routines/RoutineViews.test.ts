@@ -92,6 +92,13 @@ describe("central routine logs", () => {
     for (const name of ["Fine brief", "Broken report", "Stale digest"]) expect(everything).toContain(name);
   });
 
+  it("marks unseen problem runs with a dot that clears once they are read", () => {
+    const unseen = { ...run, id: "unseen", routineName: "Unseen crash", status: "failed" as const, error: "Provider crashed" };
+    const seen = { ...unseen, id: "seen", routineName: "Seen crash", seenAt: 500 };
+    expect(logs({ runs: [unseen, seen] }).match(/title="Unseen failure"/g)).toHaveLength(1);
+    expect(logs({ runs: [unseen, seen], status: "problems" }).match(/title="Unseen failure"/g)).toHaveLength(1);
+  });
+
   it("reports status changes to its parent instead of keeping private filter state", () => {
     const onStatusChange = vi.fn();
     let select: { onChange?: (event: { target: { value: string } }) => void } | undefined;
