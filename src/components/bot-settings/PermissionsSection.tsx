@@ -107,6 +107,7 @@ export function PermissionsSection({
           allowed={bot.managedSections ?? []}
           onSave={managedSections => patch({ managedSections, acknowledgePeerScope: true })}
         />}
+        {bot.chiefOfStaff && <ProposalStatus bot={bot} kind="owner" />}
       </div>
 
       <div className="flex items-center justify-between gap-4 rounded-xl bg-card p-4">

@@ -24,6 +24,7 @@ vi.mock("@/lib/mcp-servers", async (importOriginal) => ({
 
 const { ProposalStatus } = await import("./ProposalStatus");
 const { AccessSection } = await import("./AccessSection");
+const { PermissionsSection } = await import("./PermissionsSection");
 const { VisibilitySection } = await import("./VisibilitySection");
 
 const CHIEF_COPY = "Chief-proposable";
@@ -175,6 +176,24 @@ describe("Edit Profile boundary markers in sections", () => {
     fixture.bots = [makeBot(), makeBot({ id: "chief-1", chiefOfStaff: true })];
     const markup = renderToStaticMarkup(
       createElement(StoreProvider, null, createElement(VisibilitySection, { bot: makeBot() })),
+    );
+    expect(markup).not.toContain(CHIEF_COPY);
+    expect(markup).not.toContain(OWNER_COPY);
+  });
+
+  it("marks the managed-teams group owner-only inside the Chief card", () => {
+    fixture.bots = [makeBot({ chiefOfStaff: true }), makeBot({ id: "chief-1", chiefOfStaff: true })];
+    const markup = renderToStaticMarkup(
+      createElement(StoreProvider, null, createElement(PermissionsSection, { bot: makeBot({ chiefOfStaff: true }), derived: makeDerived() })),
+    );
+    expect(markup).toContain(CHIEF_COPY);
+    expect(markup).toContain(OWNER_COPY);
+  });
+
+  it("shows no Permissions markers without a covering Chief", () => {
+    fixture.bots = [makeBot({ chiefOfStaff: true })];
+    const markup = renderToStaticMarkup(
+      createElement(StoreProvider, null, createElement(PermissionsSection, { bot: makeBot({ chiefOfStaff: true }), derived: makeDerived() })),
     );
     expect(markup).not.toContain(CHIEF_COPY);
     expect(markup).not.toContain(OWNER_COPY);
