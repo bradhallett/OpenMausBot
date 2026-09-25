@@ -23,9 +23,9 @@
       "summary": "soul: 0 → 29 bytes"
     }
   ],
-  "connectorGrants": {
-    "gmail": "all",
-    "slack": 2,
-    "notion": "none"
-  }
+  "grants": [
+    { "slug": "gmail", "level": "partial", "toolCount": 2 },
+    { "slug": "notion", "level": "none", "toolCount": 0 },
+    { "slug": "slack", "level": "all", "toolCount": 0 }
+  ]
 }

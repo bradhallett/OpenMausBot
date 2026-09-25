@@ -284,12 +284,12 @@ class ProfileClientTest {
 
         assertEquals("GET", server.takeRequest().method)
         assertEquals(
-            mapOf(
-                "gmail" to BotOverviewGrant.AllTools,
-                "slack" to BotOverviewGrant.ToolCount(2),
-                "notion" to BotOverviewGrant.NoTools,
+            listOf(
+                BotOverviewGrant("gmail", BotOverviewGrantLevel.Partial, toolCount = 2),
+                BotOverviewGrant("notion", BotOverviewGrantLevel.None, toolCount = 0),
+                BotOverviewGrant("slack", BotOverviewGrantLevel.All, toolCount = 0),
             ),
-            overview.connectorGrants,
+            overview.grants,
         )
     }
 
