@@ -143,17 +143,21 @@ internal fun AgentProfileSheet(bot: Bot, onDismiss: () -> Unit, onOpenOverview: 
     }
 
     LaunchedEffect(Unit) {
-        val (loaded, loadedGrants) = coroutineScope {
+        // Grants are a supplementary read a connected workspace's overview
+        // route can make slow; it must not stall the config, voice, and
+        // model loads above it. It runs as an independent child — quiet,
+        // because a failed fetch leaves this section absent, not the
+        // profile erroring.
+        launch { grants = session.loadOverview(opened.id, quiet = true)?.grants }
+        val loaded = coroutineScope {
             val status = async { session.configStatus() }
             val options = async { session.voiceOptions() }
             val catalog = async { session.modelInstances() }
-            val overview = async { session.loadOverview(opened.id) }
-            Triple(status.await(), options.await(), catalog.await()) to overview.await()?.grants
+            Triple(status.await(), options.await(), catalog.await())
         }
         config = loaded.first
         voices = loaded.second
         instances = loaded.third
-        grants = loadedGrants
         modelsLoaded = true
         // A stored "speak replies" that nothing can speak is turned off before
         // the toggle is ever drawn.
