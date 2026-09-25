@@ -8731,6 +8731,38 @@ describe("harness HTTP API", () => {
     }
   });
 
+  it("counts tightening cards against the shared proposal budget", async () => {
+    const bot = (await api("POST", "/api/bots", { name: "Scout" })).body.bot;
+    try {
+      // A standing grant keeps every tightening proposal a real reduction,
+      // so eight cards can pile up without touching live authority.
+      await api("PATCH", `/api/bots/${bot.id}`, { approvalMode: "auto", alwaysAllow: ["Bash"] });
+      const token = await mintTestCapability(BASE, bot.id, bot.threadId);
+      const internalHeaders = {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      };
+      const proposeTightening = () =>
+        fetch(`${BASE}/api/internal/tightening-requests`, {
+          method: "POST",
+          headers: internalHeaders,
+          body: JSON.stringify({ fromBotId: bot.id, fromThreadId: bot.threadId, intents: { alwaysAllow: ["Bash"] }, reason: "incident lockdown" }),
+        });
+
+      // Tightening cards consume the same per-thread budget as the other
+      // proposal kinds; eight open cards fill it.
+      for (let index = 0; index < 8; index += 1) {
+        expect((await proposeTightening()).status).toBe(201);
+      }
+      const ninth = await proposeTightening();
+      expect(ninth.status).toBe(429);
+      expect(await ninth.json()).toMatchObject({ error: "confirm or cancel an existing proposal first" });
+    } finally {
+      await api("POST", `/api/bots/${bot.id}/interrupt`);
+      await api("DELETE", `/api/bots/${bot.id}`);
+    }
+  });
+
   it("only lets a section's Chief of Staff propose (and hold) a change to another bot's profile", async () => {
     const a = (await api("POST", "/api/bots", { name: "Ari" })).body.bot;
     const b = (await api("POST", "/api/bots", { name: "Bo" })).body.bot;

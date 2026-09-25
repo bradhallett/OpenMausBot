@@ -9579,7 +9579,13 @@ function resolveAndSendTightening(
       // Mirror the owner's own route: the fail-closed Ask is already
       // persisted, then the exact turn still holding the elevated
       // per-turn snapshot is stopped. The response never waits on it.
-      void stopBotForEmergencyApprovalDowngrade(result.targetBotId).catch(() => {});
+      void stopBotForEmergencyApprovalDowngrade(result.targetBotId).catch((error) => {
+        console.warn(
+          `[tightening] emergency stop failed for bot ${result.targetBotId}: ${
+            error instanceof Error ? error.message : String(error)
+          }. The fail-closed Ask is persisted, but the in-flight turn keeps its elevated access until it ends.`,
+        );
+      });
     }
     json(res, 200, { ok: true, outcome: "allowed-once", tighteningFields: result.fields });
     return true;
@@ -11420,11 +11426,11 @@ function proposalPersistence(botId: string, threadId: string) {
   if (fullAccessForSource(botId, threadId)) return { ok: true as const };
   // Only cards on the visible branch can be acted on from the composer.
   // Abandoned branches must not permanently consume the proposal quota.
-  // Routine and profile proposals share one budget per bot per thread, so
-  // one thread cannot pile up 8 of each.
+  // Routine, profile, tightening, and team-setup proposals share one budget
+  // per bot per thread, so one thread cannot pile up 8 of each.
   const openRequests = store.activePath(threadId).filter(
     (message) =>
-      (message.card?.routineRequest?.botId === botId || message.card?.profileRequest?.botId === botId || message.card?.teamSetupRequest?.botId === botId) &&
+      (message.card?.routineRequest?.botId === botId || message.card?.profileRequest?.botId === botId || message.card?.tighteningRequest?.botId === botId || message.card?.teamSetupRequest?.botId === botId) &&
       !message.card.answered &&
       !message.card.dismissed,
   ).length;
