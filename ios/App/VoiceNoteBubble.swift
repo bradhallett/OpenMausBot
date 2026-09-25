@@ -7,9 +7,21 @@ import SwiftUI
 /// session itself arbitrates against call mode — its reconfiguration
 /// arrives here as an interruption, which pauses the holder. The current
 /// holder is weak: a bubble scrolled out of the transcript releases itself.
+///
+/// The session this coordinates is process-wide, so the arbiter is too:
+/// dictation and Walkie file through the same instance before they
+/// reconfigure the shared session for recording.
 @MainActor
 final class VoiceNoteCenter {
+    static let shared = VoiceNoteCenter()
+
+    enum InputOwner: String { case dictation, walkie }
+
     private weak var current: VoiceNotePlayer?
+    private var inputOwners: Set<InputOwner> = []
+    /// True while a voice-note player configured the shared session for
+    /// playback and no input owner has taken it since.
+    private var ownsPlaybackSession = false
 
     func claim(_ player: VoiceNotePlayer) {
         if current !== player { current?.pause() }
@@ -18,6 +30,38 @@ final class VoiceNoteCenter {
 
     func release(_ player: VoiceNotePlayer) {
         if current === player { current = nil }
+    }
+
+    /// An input owner is about to reconfigure the shared session for
+    /// recording: pause the audible note here, and keep playback off until
+    /// the owner returns the session. Starting another in-app owner does
+    /// not reliably fire interruptionNotification, so this is explicit.
+    func beginInputOwnership(_ owner: InputOwner) {
+        inputOwners.insert(owner)
+        current?.pause()
+        ownsPlaybackSession = false
+    }
+
+    func endInputOwnership(_ owner: InputOwner) {
+        inputOwners.remove(owner)
+    }
+
+    /// Claim the shared session for playback. Rejected while an input
+    /// owner holds it, so starting dictation or Walkie silences the
+    /// transcript instead of the two fighting over the route.
+    func beginPlaybackSession() -> Bool {
+        guard inputOwners.isEmpty else { return false }
+        ownsPlaybackSession = true
+        return true
+    }
+
+    /// Give the session back — but only if a voice-note player still owns
+    /// it. Deactivating while dictation or Walkie holds the session would
+    /// end their capture.
+    func endPlaybackSession() {
+        guard ownsPlaybackSession else { return }
+        ownsPlaybackSession = false
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 }
 
@@ -65,11 +109,15 @@ final class VoiceNotePlayer: NSObject, ObservableObject {
     }
 
     func play() {
-        guard let player, player.duration > 0 else { return }
+        guard let player, player.duration > 0,
+              VoiceNoteCenter.shared.beginPlaybackSession() else { return }
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playback, mode: .default)
         try? session.setActive(true)
-        guard player.play() else { return }
+        guard player.play() else {
+            VoiceNoteCenter.shared.endPlaybackSession()
+            return
+        }
         isPlaying = true
         startTicker()
     }
@@ -111,7 +159,7 @@ final class VoiceNotePlayer: NSObject, ObservableObject {
         let value = (raw as? NSNumber)?.uintValue ?? (raw as? UInt)
         if value == AVAudioSession.InterruptionType.began.rawValue {
             pause()
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            VoiceNoteCenter.shared.endPlaybackSession()
         }
     }
 
@@ -121,7 +169,7 @@ final class VoiceNotePlayer: NSObject, ObservableObject {
         // Rewind so pressing play again replays instead of sitting at the
         // end of the clip.
         seek(to: 0)
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        VoiceNoteCenter.shared.endPlaybackSession()
     }
 }
 
@@ -174,7 +222,7 @@ struct VoiceNoteBubble: View {
                 if player.isPlaying {
                     player.pause()
                 } else {
-                    session.voiceNoteCenter.claim(player)
+                    VoiceNoteCenter.shared.claim(player)
                     player.play()
                 }
             } label: {
@@ -232,11 +280,11 @@ struct VoiceNoteBubble: View {
             loading = false
         }
         .onChange(of: player.isPlaying) { _, playing in
-            if !playing { session.voiceNoteCenter.release(player) }
+            if !playing { VoiceNoteCenter.shared.release(player) }
         }
         .onDisappear {
             player.pause()
-            session.voiceNoteCenter.release(player)
+            VoiceNoteCenter.shared.release(player)
         }
     }
 

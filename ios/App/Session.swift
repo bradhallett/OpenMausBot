@@ -132,9 +132,6 @@ final class Session: ObservableObject {
     }()
     private var voiceNoteFetches: [String: (id: UUID, task: Task<Data?, Never>)] = [:]
     private var voiceNoteCacheGeneration = 0
-    /// One audible note at a time across the transcript, matching the web
-    /// bubble's claimExternalVoice rule.
-    let voiceNoteCenter = VoiceNoteCenter()
     /// Full image bytes are already fetched to draw a thumbnail. Keep a small,
     /// cost-bounded window so tapping that thumbnail opens immediately instead
     /// of downloading the same image twice.

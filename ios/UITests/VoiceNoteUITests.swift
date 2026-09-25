@@ -19,21 +19,22 @@ final class VoiceNoteUITests: XCTestCase {
         let time = app.staticTexts["voice-note-time"]
         XCTAssertTrue(scrollTo(time, app: app), "voice note clock never appeared")
         record("Voice note in transcript", app)
-        XCTAssertEqual(time.label, "0:00 / 0:02")
+        XCTAssertEqual(time.label, "0:00 / 0:06")
 
         // Play: the clock leaves zero once the clip is audible.
         let play = app.buttons["voice-note-play"]
         XCTAssertTrue(play.waitForExistence(timeout: 5))
         play.tap()
-        let moved = NSPredicate(format: "label != %@", "0:00 / 0:02")
+        let moved = NSPredicate(format: "label != %@", "0:00 / 0:06")
         expectation(for: moved, evaluatedWith: time)
         waitForExpectations(timeout: 10)
         record("Voice note playing", app)
 
-        // Pause: with the clip at 1–2 s of a 2 s file, a hold means the
-        // label cannot change — continued playback would finish and rewind.
+        // Pause: the clip is long enough that a hold means the label cannot
+        // change — with seconds still to run, continued playback would keep
+        // advancing the clock instead of freezing it.
         let held = time.label
-        XCTAssertTrue(held != "0:00 / 0:02")
+        XCTAssertTrue(held != "0:00 / 0:06")
         play.tap()
         Thread.sleep(forTimeInterval: 1.2)
         XCTAssertEqual(time.label, held)
@@ -41,7 +42,7 @@ final class VoiceNoteUITests: XCTestCase {
 
         // Resume: the clip runs to the end, then rewinds so play works again.
         play.tap()
-        let rewound = NSPredicate(format: "label == %@", "0:00 / 0:02")
+        let rewound = NSPredicate(format: "label == %@", "0:00 / 0:06")
         expectation(for: rewound, evaluatedWith: time)
         waitForExpectations(timeout: 15)
         record("Voice note finished and rewound", app)

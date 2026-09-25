@@ -113,7 +113,7 @@
               "kind": "audio",
               "path": "preview-voice-note.mp3",
               "mime": "audio/mpeg",
-              "durationMs": 2000
+              "durationMs": 6000
             }
           ]
         }
