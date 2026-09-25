@@ -7082,7 +7082,6 @@ bus.subscribe((event: RuntimeEvent) => {
   if (shouldIgnoreProviderEvent(event)) return;
   if (event.type !== "turn.completed") return;
   drainQueuedSends();
-  drainAsideLane();
   drainDelegationWakes();
 });
 
@@ -7117,9 +7116,15 @@ function drainQueuedSends() {
     (botId, threadId) => threadBusy(botId, threadId) || botAtThreadCapacity(botId) || Boolean(activeGroupTurnForBot(botId))
       || parksBehindCoordination(botId, threadId),
   );
+  // Asides always drain after person follow-ups (see drainAsideLane): the
+  // steer drain above can make a thread busy again, deferring its asides
+  // to the next boundary. Every path that clears a thread's send queue
+  // reaches this point, so the aside lane drains on all of them — not
+  // just turn.completed.
+  drainAsideLane();
 }
 
-/** The aside lane's boundary pass. Runs AFTER the steer drain on purpose:
+/** The aside lane's boundary pass. Invoked at the end of drainQueuedSends, i.e. AFTER the steer drain on purpose:
  * a thread with both waiting starts its person follow-up first, and that
  * turn makes the thread busy again, so its asides defer to the next
  * boundary — the person's correction always lands ahead of peer context.
@@ -21002,7 +21007,6 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`openmausbot server on http://127.0.0.1:${PORT}`);
   followupsReady = true;
   drainQueuedSends();
-  drainAsideLane();
   drainQueuedChannelSends();
   // Startup work uses the same turn dispatcher and local tool endpoint as
   // ordinary chat. Start only once every registry is initialized and the
