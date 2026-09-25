@@ -54,7 +54,7 @@ function fakeStore(bots: BotRecord[]): AsideStore & { byThread: Map<string, Mess
   };
 }
 
-const queue = (store: ReturnType<typeof fakeStore>, bot: BotRecord, text: string, fromName = "Planner") =>
+const queue = (bot: BotRecord, text: string, fromName = "Planner") =>
   queueAsideMessage(bot.id, bot.threadId, text, {
     fromBotId: `peer-${fromName.toLowerCase()}`,
     fromBotName: fromName,
@@ -75,7 +75,7 @@ describe("aside-queue module", () => {
     async (outcome) => {
       const bot = fakeBot("bot-inject-" + outcome, "thread-inject-" + outcome, true);
       const store = fakeStore([bot]);
-      queue(store, bot, "fyi the cache was flushed");
+      queue(bot, "fyi the cache was flushed");
       const inject = vi.fn().mockResolvedValue(outcome);
       const attempt = await attemptAsideInjection(store, bot.id, bot.threadId, inject);
       expect(attempt).toEqual({ delivered: true, count: 1 });
@@ -100,8 +100,8 @@ describe("aside-queue module", () => {
   it("keeps a refused aside queued, then degrades it to one enveloped follow-up turn", async () => {
     const bot = fakeBot("bot-refused-degrade", "thread-refused-degrade", true);
     const store = fakeStore([bot]);
-    queue(store, bot, "first note");
-    queue(store, bot, "second note");
+    queue(bot, "first note");
+    queue(bot, "second note");
     const refused = vi.fn().mockResolvedValue("refused" as const);
     await attemptAsideInjection(store, bot.id, bot.threadId, refused);
     expect(_asideCount(bot.threadId)).toBe(2);
@@ -127,9 +127,9 @@ describe("aside-queue module", () => {
   it("batches everything waiting on a busy thread into ONE seam call", async () => {
     const bot = fakeBot("bot-batch", "thread-batch", true);
     const store = fakeStore([bot]);
-    queue(store, bot, "note one");
-    queue(store, bot, "note two");
-    queue(store, bot, "note three", "Reviewer");
+    queue(bot, "note one");
+    queue(bot, "note two");
+    queue(bot, "note three", "Reviewer");
     const inject = vi.fn().mockResolvedValue("steered" as const);
     await drainAsideMessages({ store, inject, run: vi.fn() });
     expect(inject).toHaveBeenCalledTimes(1);
@@ -144,8 +144,8 @@ describe("aside-queue module", () => {
   it("requeues only what never ran: restore skips rows the transcript already shows injected", () => {
     const bot = fakeBot("bot-restore", "thread-restore", false);
     const store = fakeStore([bot]);
-    const ran = queue(store, bot, "already folded in");
-    const waiting = queue(store, bot, "never delivered");
+    const ran = queue(bot, "already folded in");
+    const waiting = queue(bot, "never delivered");
     // Crash between the marker append and the row delete: the transcript
     // line exists, the durable row still says pending.
     store.appendMessage(bot.threadId, {
@@ -174,7 +174,7 @@ describe("aside-queue module", () => {
   it("tombstones waiting asides when the bot or task is gone", async () => {
     const bot = fakeBot("bot-gone", "thread-gone", false);
     const store = fakeStore([]); // the bot disappeared while its aside waited
-    queue(store, bot, "note for nobody");
+    queue(bot, "note for nobody");
     const run = vi.fn();
     await drainAsideMessages({ store, inject: vi.fn(), run });
     expect(run).not.toHaveBeenCalled();
@@ -184,8 +184,7 @@ describe("aside-queue module", () => {
 
   it("cancels directly and leaves nothing for a later drain", () => {
     const bot = fakeBot("bot-cancel", "thread-cancel", false);
-    const store = fakeStore([bot]);
-    queue(store, bot, "withdrawn note");
+    queue(bot, "withdrawn note");
     cancelAsides(bot.threadId);
     expect(_asideCount(bot.threadId)).toBe(0);
     // a tombstone remains so a retried send cannot resurrect the words
@@ -195,8 +194,8 @@ describe("aside-queue module", () => {
   it("records injected asides with one transcript line per item", () => {
     const bot = fakeBot("bot-record", "thread-record", true);
     const store = fakeStore([bot]);
-    const first = queue(store, bot, "one");
-    const second = queue(store, bot, "two");
+    const first = queue(bot, "one");
+    const second = queue(bot, "two");
     const items = pendingAsides(bot.id, bot.threadId);
     const appended = recordInjectedAsides(store, bot.threadId, items);
     expect(appended.map((line) => line.queueId)).toEqual([first.id, second.id]);
