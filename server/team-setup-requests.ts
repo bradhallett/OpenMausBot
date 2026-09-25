@@ -4,6 +4,7 @@ import { newId, type ModelSelection } from "./contracts.ts";
 import { fitsOnOneLine, parseBotProfilePatch } from "./bot-profile.ts";
 import { profileSnapshot } from "./profile-revision.ts";
 import { validateBotCwd } from "./bot-cwd.ts";
+import { harnessCapabilityLines, type DriverCapabilities } from "./harness-capabilities.ts";
 import { redactSecretsInText } from "./redact.ts";
 import type { BotRecord, OptionCardData } from "./store.ts";
 import type { TeamSetupFields, TeamSetupOperation, TeamSetupRequest, TeamSetupResult } from "../shared/team-setup.ts";
@@ -60,6 +61,8 @@ interface Options {
   targetBusy(botId: string, sourceThreadId?: string): boolean;
   /** The caller resolves the effective mode of this exact conversation. */
   autoApply?(botId: string, threadId: string): boolean;
+  /** Per-driver capability resolver for engine-switch warnings on the card. */
+  driverCapabilities?(instanceId: string): DriverCapabilities | undefined;
   validateChange?(before: BotRecord, fields: TeamSetupFields): void;
   maxBots: number;
   ownsThread(botId: string, threadId: string): boolean;
@@ -231,6 +234,16 @@ export class TeamSetupRequestService {
         const before = current ? (key === "section" ? current.section || "General" : current[key as keyof BotRecord]) : undefined;
         const label = key === "modelSelection" ? "Default engine/model" : key === "cwd" ? "Working folder" : key;
         lines.push(`${label}: ${current ? `${JSON.stringify(before ?? "")} → ` : ""}${key === "section" ? JSON.stringify(value || "General") : JSON.stringify(value)}`);
+        // An engine switch changes what the bot can do, not just its label:
+        // show what the destination driver gains and loses. Same-instance
+        // model or effort changes render nothing extra.
+        if (key === "modelSelection" && current && typeof value === "object" && value !== null &&
+            (value as ModelSelection).instanceId !== current.modelSelection.instanceId && this.options.driverCapabilities) {
+          lines.push(...harnessCapabilityLines(
+            this.options.driverCapabilities(current.modelSelection.instanceId),
+            this.options.driverCapabilities((value as ModelSelection).instanceId),
+          ));
+        }
       }
     }
     if (!request.deletion) {
