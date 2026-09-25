@@ -11,7 +11,13 @@
 // stdout is the MCP transport. Never log there.
 import readline from "node:readline";
 import { randomUUID } from "node:crypto";
-import { CONNECTOR_ALLOWED_TOOLS_ENV, filterToolsListFrame, parseConnectorAllowedToolsEnv } from "./connector-advertisement.ts";
+import {
+  CONNECTOR_ALLOWED_TOOLS_ENV,
+  CONNECTOR_SERVICE_SLUGS_ENV,
+  filterToolsListFrame,
+  parseConnectorAllowedToolsEnv,
+  parseConnectorServiceSlugsEnv,
+} from "./connector-advertisement.ts";
 
 type Json = Record<string, unknown>;
 
@@ -24,6 +30,7 @@ const TOKEN = process.env.OMB_CONNECTOR_TOKEN ?? process.env.OMB_COMMS_TOKEN ?? 
 // legacy bots, oversized allowlists, anything unreadable. null means the
 // upstream list is relayed verbatim; the harness still judges every call.
 const ALLOWED_TOOLS = parseConnectorAllowedToolsEnv(process.env[CONNECTOR_ALLOWED_TOOLS_ENV]);
+const SERVICE_SLUGS = parseConnectorServiceSlugsEnv(process.env[CONNECTOR_SERVICE_SLUGS_ENV]);
 const MAX_RESPONSE_BYTES = 20 * 1024 * 1024;
 const INITIALIZE_RELAY_TIMEOUT_MS = 1_000;
 const RELAY_TIMEOUT_MS = 10 * 60_000;
@@ -224,7 +231,9 @@ async function handle(message: Json): Promise<void> {
   try {
     const response = await relay(message);
     if (response && id !== undefined) {
-      send(method === "tools/list" && ALLOWED_TOOLS ? filterToolsListFrame(response, ALLOWED_TOOLS) : response);
+      send(method === "tools/list" && ALLOWED_TOOLS
+        ? filterToolsListFrame(response, ALLOWED_TOOLS, SERVICE_SLUGS)
+        : response);
     }
   } catch (error) {
     if (id === undefined) return;

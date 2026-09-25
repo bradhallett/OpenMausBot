@@ -69,6 +69,18 @@ describe("connector tool advertisement", () => {
     expect(connectorToolAdvertised("NOTION_CREATE_PAGE", star)).toBe(false);
   });
 
+  it("resolves underscored service slugs from the connected-service catalog before splitting", () => {
+    const record = grants({ bland: { tools: "*" }, bland_ai: { tools: ["BLAND_AI_MAKE_CALL"] } });
+    expect(connectorToolAdvertised("BLAND_AI_MAKE_CALL", record, ["bland", "bland_ai"])).toBe(true);
+    // bland_ai claims BLAND_AI_* before bland's star grant can widen it.
+    expect(connectorToolAdvertised("BLAND_AI_SEND_SMS", record, ["bland", "bland_ai"])).toBe(false);
+    expect(connectorToolAdvertised("BLAND_SEND_SMS", record, ["bland", "bland_ai"])).toBe(true);
+  });
+
+  it("does not let a plain-prefix grant advertise an underscored connected service's tools", () => {
+    expect(connectorToolAdvertised("BLAND_AI_MAKE_CALL", grants({ bland: { tools: "*" } }), ["bland_ai"])).toBe(false);
+  });
+
   it("advertises nothing at all — not even the meta-tools — when no tools are granted", () => {
     const none = grants({});
     expect(connectorToolAdvertised("COMPOSIO_SEARCH_TOOLS", none)).toBe(false);

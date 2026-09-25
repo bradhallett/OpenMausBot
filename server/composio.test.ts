@@ -5,9 +5,11 @@ import type { AppConfig } from "./config.ts";
 import {
   applyManagedBrokerMessage,
   authorizeService,
+  connectedServiceSlugs,
   connectedServices,
   connectionMode,
   connectionStatus,
+  listConnectorTools,
   listToolkits,
   mcpIntegration,
   normalizeAccountAlias,
@@ -18,7 +20,11 @@ import {
   setManagedBrokerAccess,
   validateConnectorGrants,
 } from "./composio.ts";
-import { CONNECTOR_ALLOWED_TOOLS_ENV } from "./connector-advertisement.ts";
+import {
+  CONNECTOR_ALLOWED_TOOLS_ENV,
+  CONNECTOR_SERVICE_SLUGS_ENV,
+  parseConnectorServiceSlugsEnv,
+} from "./connector-advertisement.ts";
 import type { ConnectorToolGrant } from "../shared/wire.ts";
 
 let api: Server;
@@ -35,6 +41,15 @@ const calls: Array<{
 let malformedConnectedAccounts = false;
 let connectedAccountsUnavailable = false;
 let emptyConnectedAccounts = false;
+// The grant editor's tools/list fixture: null keeps the legacy one-frame
+// {source:"broker"} answer the relayMcp tests assert on.
+let brokerMcpTools: Array<{ name: string; description?: string }> | null = null;
+let brokerToolsListFail = false;
+// What /broker/v1/connectors/connected serves; null falls back to github
+// only, the state the existing validation tests were written against.
+let brokerConnectedServicesBody: { services: Record<string, { connected: boolean; status: string }> } | null = null;
+// What /broker/v1/catalog serves; null falls back to github only.
+let brokerCatalogBody: { items: Array<{ slug: string; name: string }> } | null = null;
 // The project's own auth configs, and the ones the stub Session was created
 // with — a Session only knows the configs named at its creation, which is
 // the whole reason #509 happened.
@@ -57,7 +72,9 @@ beforeAll(async () => {
     });
 
     if (url.pathname.startsWith("/broker/")) {
-      if (req.headers.authorization !== `Bearer ${"a".repeat(64)}`) {
+      // c/d/e/f back the cache-identity tests; b stays invalid so a token
+      // switch can be made to fail on purpose.
+      if (!/^[acdef]{64}$/.test(String(req.headers.authorization ?? "").replace(/^Bearer /, ""))) {
         res.writeHead(401, { "content-type": "application/json" });
         return res.end(JSON.stringify({ error: "invalid broker token" }));
       }
@@ -73,7 +90,9 @@ beforeAll(async () => {
       }
       if (req.method === "GET" && url.pathname === "/broker/v1/connectors/connected") {
         res.writeHead(200, { "content-type": "application/json" });
-        return res.end(JSON.stringify({ services: { github: { connected: true, status: "ACTIVE" } } }));
+        return res.end(JSON.stringify(
+          brokerConnectedServicesBody ?? { services: { github: { connected: true, status: "ACTIVE" } } },
+        ));
       }
       if (req.method === "POST" && url.pathname.endsWith("/authorize")) {
         res.writeHead(200, { "content-type": "application/json" });
@@ -85,9 +104,29 @@ beforeAll(async () => {
       }
       if (req.method === "GET" && url.pathname === "/broker/v1/catalog") {
         res.writeHead(200, { "content-type": "application/json" });
-        return res.end(JSON.stringify({ items: [{ slug: "github", name: "GitHub" }] }));
+        return res.end(JSON.stringify(brokerCatalogBody ?? { items: [{ slug: "github", name: "GitHub" }] }));
       }
       if (req.method === "POST" && url.pathname === "/broker/v1/mcp") {
+        if (brokerMcpTools !== null && body?.method === "initialize") {
+          res.writeHead(200, { "content-type": "application/json", "mcp-session-id": "mcp_grants" });
+          return res.end(JSON.stringify({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: {
+              protocolVersion: "2025-03-26",
+              capabilities: {},
+              serverInfo: { name: "composio-stub", version: "1" },
+            },
+          }));
+        }
+        if (brokerMcpTools !== null && body?.method === "tools/list") {
+          if (brokerToolsListFail) {
+            res.writeHead(500, { "content-type": "application/json" });
+            return res.end(JSON.stringify({ error: { message: "tools list unavailable" } }));
+          }
+          res.writeHead(200, { "content-type": "application/json" });
+          return res.end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { tools: brokerMcpTools } }));
+        }
         res.writeHead(200, { "content-type": "application/json", "mcp-session-id": "mcp_broker" });
         return res.end(JSON.stringify({ source: "broker" }));
       }
@@ -887,6 +926,38 @@ describe.sequential("Composio Sessions", () => {
     }
   });
 
+  it("passes the connected-service slugs to the bridge alongside the allowlist", async () => {
+    setManagedBrokerAccess({ url: origin + "/broker", token: "f".repeat(64) });
+    brokerConnectedServicesBody = {
+      services: {
+        bland_ai: { connected: true, status: "ACTIVE" },
+        bland: { connected: true, status: "ACTIVE" },
+        github: { connected: true, status: "ACTIVE" },
+      },
+    };
+    try {
+      const integration = await mcpIntegration({}, {
+        harnessUrl: "http://127.0.0.1:8799",
+        commsToken: "secret",
+        botId: "bot-1",
+        threadId: "thread-1",
+        connectorTools: { bland: { tools: "*" } },
+      });
+      const slugs = parseConnectorServiceSlugsEnv(integration?.env[CONNECTOR_SERVICE_SLUGS_ENV]);
+      expect(slugs).toContain("bland_ai");
+      expect(slugs).toContain("bland");
+    } finally {
+      brokerConnectedServicesBody = null;
+      setManagedBrokerAccess(null);
+    }
+  });
+
+  it("reads an unreachable connection inventory as no service slugs", async () => {
+    // No project key and no broker: the inventory cannot run, so the
+    // resolver degrades to the plain split instead of caching a failure.
+    await expect(connectedServiceSlugs({})).resolves.toEqual([]);
+  });
+
   it("validates grant patches against connected services and the catalog", async () => {
     const cfg: AppConfig = {
       composio: { apiKey: "ak_test", userId: "openmausbot_existing", sessionId: "trs_test" },
@@ -914,6 +985,31 @@ describe.sequential("Composio Sessions", () => {
       await expect(validateConnectorGrants({}, { github: { tools: ["GITHUB_CREATE_ISSUE"] } })).resolves.toBeNull();
       await expect(validateConnectorGrants({}, { gmail: { tools: ["GMAIL_SEND_EMAIL"] } })).resolves.toMatch(/not connected: gmail/);
     } finally {
+      setManagedBrokerAccess(null);
+    }
+  });
+
+  it("accepts an underscored service's own tool names in its grant", async () => {
+    // The prefix check resolves against the connected-service slugs, so
+    // bland_ai keeps its BLAND_AI_* names instead of the first-segment
+    // split filing them under "bland" — and a bland grant cannot capture
+    // them while bland_ai is the connected service.
+    setManagedBrokerAccess({ url: origin + "/broker", token: "f".repeat(64) });
+    brokerConnectedServicesBody = {
+      services: {
+        bland_ai: { connected: true, status: "ACTIVE" },
+        bland: { connected: true, status: "ACTIVE" },
+        github: { connected: true, status: "ACTIVE" },
+      },
+    };
+    brokerCatalogBody = { items: [{ slug: "github", name: "GitHub" }, { slug: "bland_ai", name: "Bland AI" }, { slug: "bland", name: "Bland" }] };
+    try {
+      await expect(validateConnectorGrants({}, { bland_ai: { tools: ["BLAND_AI_MAKE_CALL"] } })).resolves.toBeNull();
+      await expect(validateConnectorGrants({}, { bland: { tools: ["BLAND_AI_MAKE_CALL"] } }))
+        .resolves.toMatch(/another service: BLAND_AI_MAKE_CALL/);
+    } finally {
+      brokerConnectedServicesBody = null;
+      brokerCatalogBody = null;
       setManagedBrokerAccess(null);
     }
   });
@@ -1084,6 +1180,67 @@ describe.sequential("Composio Sessions", () => {
       expect(linkCalls[0].body).toEqual({ toolkit: "slack", alias: "team" });
     } finally {
       emptyConnectedAccounts = false;
+    }
+  });
+});
+
+describe("connector tool inventory", () => {
+  const initializeCalls = () =>
+    calls.filter((call) => call.path.endsWith("/v1/mcp") && call.body?.method === "initialize");
+
+  it("groups an underscored service under its own slug using the connected services", async () => {
+    setManagedBrokerAccess({ url: origin + "/broker", token: "c".repeat(64) });
+    brokerConnectedServicesBody = {
+      services: { bland_ai: { connected: true, status: "ACTIVE" }, github: { connected: true, status: "ACTIVE" } },
+    };
+    brokerMcpTools = [
+      { name: "BLAND_AI_MAKE_CALL", description: "place a call" },
+      { name: "GITHUB_CREATE_ISSUE", description: "open an issue" },
+    ];
+    try {
+      // Without the connected-services candidates the first-segment split
+      // would file BLAND_AI_MAKE_CALL under "bland".
+      await expect(listConnectorTools({})).resolves.toEqual({
+        bland_ai: [{ name: "BLAND_AI_MAKE_CALL", description: "place a call" }],
+        github: [{ name: "GITHUB_CREATE_ISSUE", description: "open an issue" }],
+      });
+    } finally {
+      brokerMcpTools = null;
+      brokerConnectedServicesBody = null;
+      setManagedBrokerAccess(null);
+    }
+  });
+
+  it("re-walks after a backend switch instead of serving the cached inventory", async () => {
+    setManagedBrokerAccess({ url: origin + "/broker", token: "d".repeat(64) });
+    brokerMcpTools = [{ name: "GITHUB_CREATE_ISSUE" }];
+    try {
+      await expect(listConnectorTools({})).resolves.toEqual({ github: [{ name: "GITHUB_CREATE_ISSUE" }] });
+
+      // A different broker token is a different backend: within the 60s
+      // cache window the switch must still serve the new backend's walk.
+      setManagedBrokerAccess({ url: origin + "/broker", token: "e".repeat(64) });
+      brokerMcpTools = [{ name: "SLACK_POST_MESSAGE" }];
+      const before = initializeCalls().length;
+      await expect(listConnectorTools({})).resolves.toEqual({ slack: [{ name: "SLACK_POST_MESSAGE" }] });
+      expect(initializeCalls().length).toBe(before + 1);
+    } finally {
+      brokerMcpTools = null;
+      setManagedBrokerAccess(null);
+    }
+  });
+
+  it("shares one in-flight walk between concurrent callers", async () => {
+    setManagedBrokerAccess({ url: origin + "/broker", token: "a".repeat(64) });
+    brokerMcpTools = [{ name: "GITHUB_CREATE_ISSUE" }, { name: "GITHUB_LIST_REPOS" }];
+    try {
+      const before = initializeCalls().length;
+      const [first, second] = await Promise.all([listConnectorTools({}), listConnectorTools({})]);
+      expect(second).toEqual(first);
+      expect(initializeCalls().length).toBe(before + 1);
+    } finally {
+      brokerMcpTools = null;
+      setManagedBrokerAccess(null);
     }
   });
 });
