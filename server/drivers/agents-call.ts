@@ -944,6 +944,13 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
     return confirmationResult(r, `${action.replace("_", " ")} on routine ${routineId}`);
   }
   if (name === "propose_profile") {
+    // A non-boolean toggle would be dropped silently while any valid half of
+    // the request went through, applying a partial proposal the model never
+    // described. Reject the whole call instead.
+    if ((args.notifications !== undefined && typeof args.notifications !== "boolean")
+      || (args.speakReplies !== undefined && typeof args.speakReplies !== "boolean")) {
+      return { text: "propose_profile notifications and speakReplies must be true or false.", isError: true };
+    }
     const changes: Json = {};
     if (typeof args.name === "string") changes.name = args.name.trim();
     if (typeof args.title === "string") changes.title = args.title.trim();
