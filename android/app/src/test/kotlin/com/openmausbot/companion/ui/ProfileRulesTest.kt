@@ -2,6 +2,7 @@ package com.openmausbot.companion.ui
 
 import com.openmausbot.companion.core.AvatarCrop
 import com.openmausbot.companion.core.Bot
+import com.openmausbot.companion.core.BotOverviewGrant
 import com.openmausbot.companion.core.ConfigFlag
 import com.openmausbot.companion.core.ConfigStatus
 import com.openmausbot.companion.core.ModelSelection
@@ -464,6 +465,46 @@ class ProfileRulesTest {
         assertEquals(AvatarCrop.MASCOT, form.crop)
         assertEquals("", form.voice)
         assertFalse(form.speakReplies)
+    }
+
+    @Test
+    fun `connector grants render one read-only row per service in the server's order`() {
+        val rows = ProfileRules.connectorGrantRows(
+            mapOf(
+                "gmail" to BotOverviewGrant.AllTools,
+                "google_calendar" to BotOverviewGrant.ToolCount(2),
+                "notion" to BotOverviewGrant.NoTools,
+                "linear" to BotOverviewGrant.ToolCount(1),
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                ConnectorGrantRow("Gmail", "Every tool"),
+                ConnectorGrantRow("Google calendar", "2 tools"),
+                ConnectorGrantRow("Notion", "No tools"),
+                ConnectorGrantRow("Linear", "1 tool"),
+            ),
+            rows,
+        )
+    }
+
+    @Test
+    fun `unknown grant shapes and absent grants draw nothing`() {
+        assertEquals(emptyList<ConnectorGrantRow>(), ProfileRules.connectorGrantRows(null))
+        assertEquals(emptyList<ConnectorGrantRow>(), ProfileRules.connectorGrantRows(emptyMap()))
+        assertEquals(
+            emptyList<ConnectorGrantRow>(),
+            ProfileRules.connectorGrantRows(mapOf("gmail" to BotOverviewGrant.Unrecognized)),
+        )
+    }
+
+    @Test
+    fun `a zero-tool count reads as none rather than as zero`() {
+        assertEquals(
+            listOf(ConnectorGrantRow("Github", "No tools")),
+            ProfileRules.connectorGrantRows(mapOf("github" to BotOverviewGrant.ToolCount(0))),
+        )
     }
 
     private fun voices() = listOf(
