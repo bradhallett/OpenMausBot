@@ -702,6 +702,10 @@ export function parseAudioRange(header: string | undefined, size: number): Audio
   if (!m) return { kind: "none" };
   const [, rawStart, rawEnd] = m;
   if (rawStart === "") {
+    // `bytes=-` carries no bounds at all: malformed input, not a suffix
+    // range, so the caller answers with the whole file. A real zero-length
+    // suffix (`bytes=-0`) stays unsatisfiable below, per RFC 9110.
+    if (rawEnd === "") return { kind: "none" };
     // suffix range: the final n bytes; zero is unsatisfiable by definition
     const suffix = Number(rawEnd);
     if (!suffix) return { kind: "unsatisfiable" };

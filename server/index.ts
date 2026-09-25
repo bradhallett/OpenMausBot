@@ -14416,6 +14416,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         // to delete. The post text stands as the caption.
         let attachedVoiceNote = false;
         let stagedAttachments: NonNullable<Message["attachments"]> = [];
+        let detachParkedAudio: (() => void) | undefined;
         if (attachVoiceNote) {
           const parkedKey = turnAttachmentKey(fromThreadId, liveTurnByThread.get(fromThreadId));
           const parked = turnAttachmentsByTurn.get(parkedKey) ?? [];
@@ -14423,16 +14424,23 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (!audio.length) {
             return json(res, 400, { error: "no voice note to attach — call send_voice_note in this turn first" });
           }
-          turnAttachmentsByTurn.set(
-            parkedKey,
-            parked.filter((attachment) => attachment.kind !== "audio"),
-          );
           stagedAttachments = audio.map((attachment) => ({
             kind: "audio" as const,
             path: attachment.path,
             mime: attachment.mime,
           }));
           attachedVoiceNote = true;
+          // The parked set is mutated only after the append below lands.
+          // Everything between is synchronous, so nothing can interleave,
+          // and a persistence failure must leave the clip parked: the post
+          // can then be retried, whereas a premature removal strands the
+          // clip on disk attached to nothing — and the catalog already told
+          // the model never to retry a refused post.
+          detachParkedAudio = () =>
+            turnAttachmentsByTurn.set(
+              parkedKey,
+              parked.filter((attachment) => attachment.kind !== "audio"),
+            );
         }
         const posted = store.appendMessage(room.threadId, {
           role: "bot",
@@ -14442,6 +14450,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           peerPost: unattended ? { unattended: true } : {},
           ...(attachedVoiceNote ? { attachments: stagedAttachments } : {}),
         });
+        detachParkedAudio?.();
         store.patchGroup(room.id, { unread: true });
         // The same visibility contract the peer tools keep: whatever a bot
         // does elsewhere shows up in the conversation it is actually in.
