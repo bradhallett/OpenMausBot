@@ -121,7 +121,7 @@ internal fun AgentProfileSheet(bot: Bot, onDismiss: () -> Unit, onOpenOverview: 
     var switchingEngine by remember { mutableStateOf(false) }
     // Read-only facts from the overview route; reloads on reopen, so plain
     // remember — there is nothing here a rotation needs to defend.
-    var connectorGrants by remember { mutableStateOf<Map<String, BotOverviewGrant>?>(null) }
+    var grants by remember { mutableStateOf<List<BotOverviewGrant>?>(null) }
 
     // The Model section. The draft survives rotation; the catalog is reloaded.
     var instances by remember { mutableStateOf<List<Instance>>(emptyList()) }
@@ -143,17 +143,17 @@ internal fun AgentProfileSheet(bot: Bot, onDismiss: () -> Unit, onOpenOverview: 
     }
 
     LaunchedEffect(Unit) {
-        val (loaded, grants) = coroutineScope {
+        val (loaded, loadedGrants) = coroutineScope {
             val status = async { session.configStatus() }
             val options = async { session.voiceOptions() }
             val catalog = async { session.modelInstances() }
             val overview = async { session.loadOverview(opened.id) }
-            Triple(status.await(), options.await(), catalog.await()) to overview.await()?.connectorGrants
+            Triple(status.await(), options.await(), catalog.await()) to overview.await()?.grants
         }
         config = loaded.first
         voices = loaded.second
         instances = loaded.third
-        connectorGrants = grants
+        grants = loadedGrants
         modelsLoaded = true
         // A stored "speak replies" that nothing can speak is turned off before
         // the toggle is ever drawn.
@@ -234,23 +234,32 @@ internal fun AgentProfileSheet(bot: Bot, onDismiss: () -> Unit, onOpenOverview: 
                 // Per-bot tool grants ride the overview route, so the sheet
                 // reads the same summary the overview screen does — read-only,
                 // because the editor lives in the desktop app. Nothing draws
-                // on computers that predate grants.
-                val grantRows = ProfileRules.connectorGrantRows(connectorGrants)
-                if (grantRows.isNotEmpty()) {
+                // on computers that predate grants; an empty record is the
+                // explicit no-tools state and says so.
+                grants?.let { grantList ->
+                    val grantRows = ProfileRules.connectorGrantRows(grantList)
                     FormSection(
                         header = ProfileRules.CONNECTED_APPS,
                         footer = ProfileRules.CONNECTED_APPS_FOOTER,
                     ) {
-                        grantRows.forEach { row ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(min = MIN_TOUCH_TARGET),
-                                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text(row.service, fontSize = 15.sp, modifier = Modifier.weight(1f))
-                                Text(row.summary, fontSize = 15.sp, color = secondaryTint)
+                        if (grantRows.isEmpty()) {
+                            Text(
+                                ProfileRules.GRANTS_NONE_ANY,
+                                fontSize = 15.sp,
+                                color = secondaryTint,
+                            )
+                        } else {
+                            grantRows.forEach { row ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = MIN_TOUCH_TARGET),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(row.service, fontSize = 15.sp, modifier = Modifier.weight(1f))
+                                    Text(row.summary, fontSize = 15.sp, color = secondaryTint)
+                                }
                             }
                         }
                     }

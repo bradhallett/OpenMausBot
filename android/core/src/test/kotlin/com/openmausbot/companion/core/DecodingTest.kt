@@ -631,50 +631,46 @@ class DecodingTest {
     }
 
     @Test
-    fun connectorGrantsSummarizeAllCountAndNonePerService() {
+    fun grantsSummarizeAllPartialAndNonePerService() {
         val overview = decodeFixture<BotOverview>("bot-overview-grants")
 
         assertEquals(
-            mapOf(
-                "gmail" to BotOverviewGrant.AllTools,
-                "slack" to BotOverviewGrant.ToolCount(2),
-                "notion" to BotOverviewGrant.NoTools,
+            listOf(
+                BotOverviewGrant("gmail", BotOverviewGrantLevel.Partial, toolCount = 2),
+                BotOverviewGrant("notion", BotOverviewGrantLevel.None, toolCount = 0),
+                BotOverviewGrant("slack", BotOverviewGrantLevel.All, toolCount = 0),
             ),
-            overview.connectorGrants,
+            overview.grants,
         )
         // The plain fixture predates grants; absence must read as absence.
-        assertNull(decodeFixture<BotOverview>("bot-overview").connectorGrants)
+        assertNull(decodeFixture<BotOverview>("bot-overview").grants)
     }
 
     @Test
-    fun unrecognizedConnectorGrantShapesDoNotBreakTheOverview() {
-        val overview = CompanionJson.decodeFromString<BotOverview>(
+    fun unknownGrantShapesDoNotBreakTheOverview() {
+        fun overviewOf(grants: String): BotOverview = CompanionJson.decodeFromString(
             """
-            {
-              "who": {"name": "Kiwi", "title": "", "blurb": "", "soulLead": ""},
-              "connectorGrants": {
-                "gmail": {"tools": ["GMAIL_SEND_EMAIL"]},
-                "future": "partial",
-                "slack": 3,
-                "odd": null,
-                "calendar": -1,
-                "fractional": 1.5
-              }
-            }
+            {"who": {"name": "Kiwi", "title": "", "blurb": "", "soulLead": ""},
+             "does": [], "reaches": [], "wont": [], "recent": [], "grants": $grants}
             """.trimIndent(),
         )
 
-        // Recognized siblings still decode…
-        assertEquals(BotOverviewGrant.ToolCount(3), overview.connectorGrants?.get("slack"))
-        // …and every unrecognized shape reads as unknown rather than failing.
-        mapOf(
-            "gmail" to "an object",
-            "future" to "an unknown word",
-            "odd" to "null",
-            "calendar" to "a negative count",
-            "fractional" to "a non-integer count",
-        ).forEach { (slug, shape) ->
-            assertEquals(BotOverviewGrant.Unrecognized, overview.connectorGrants?.get(slug), "$slug sent $shape")
-        }
+        // A level a newer computer adds falls back to partial, keeping its row.
+        assertEquals(
+            listOf(BotOverviewGrant("gmail", BotOverviewGrantLevel.Partial, toolCount = 7)),
+            overviewOf("""[{"slug": "gmail", "level": "scoped", "toolCount": 7}]""").grants,
+        )
+        // Entries the decoder cannot read are dropped; siblings survive.
+        assertEquals(
+            listOf(BotOverviewGrant("slack", BotOverviewGrantLevel.All, toolCount = 0)),
+            overviewOf(
+                """[{"slug": "gmail", "level": 3}, {"slug": "slack", "level": "all", "toolCount": 0}]""",
+            ).grants,
+        )
+        // A malformed container reads as absent — an explicit no-tools
+        // record is an empty array, never this.
+        assertNull(overviewOf("5").grants)
+        // The explicit no-tools record is the empty array, and it decodes.
+        assertEquals(emptyList<BotOverviewGrant>(), overviewOf("[]").grants)
     }
 }

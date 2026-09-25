@@ -4,6 +4,7 @@ import com.openmausbot.companion.core.AvatarCrop
 import com.openmausbot.companion.core.Bot
 import com.openmausbot.companion.core.BotProfilePatch
 import com.openmausbot.companion.core.BotOverviewGrant
+import com.openmausbot.companion.core.BotOverviewGrantLevel
 import com.openmausbot.companion.core.ConfigStatus
 import com.openmausbot.companion.core.Voice
 import com.openmausbot.companion.core.VoiceProvider
@@ -77,9 +78,12 @@ object ProfileRules {
     const val CONNECTED_APPS_FOOTER: String =
         "Tool grants are assigned in OpenMausBot on your computer. This phone shows them read-only."
 
-    private const val GRANTS_ALL: String = "Every tool"
+    private const val GRANTS_ALL: String = "All tools"
 
     private const val GRANTS_NONE: String = "No tools"
+
+    /** The record exists but grants nothing — stronger than "no apps connected". */
+    const val GRANTS_NONE_ANY: String = "No tools granted on any connected app."
 
     private const val GENERATE_READY_FOOTER: String =
         "Generation uses the shared image provider configured on your computer. No provider " +
@@ -379,24 +383,21 @@ object ProfileRules {
 
     /**
      * The Connected apps section's rows, in the server's order. An unknown
-     * summary shape has no row to draw — [BotOverviewGrant.Unrecognized] is
-     * skipped, not guessed at — and absent grants draw the section not at all.
+     * level decodes as partial, so every entry that survives decode has a
+     * row; an empty list is the explicit no-tools record, and the sheet
+     * gives it [GRANTS_NONE_ANY] rather than drawing nothing.
      */
-    fun connectorGrantRows(grants: Map<String, BotOverviewGrant>?): List<ConnectorGrantRow> =
-        grants?.mapNotNull { (slug, grant) ->
-            when (grant) {
-                BotOverviewGrant.AllTools -> ConnectorGrantRow(serviceLabel(slug), GRANTS_ALL)
-                BotOverviewGrant.NoTools -> ConnectorGrantRow(serviceLabel(slug), GRANTS_NONE)
-                is BotOverviewGrant.ToolCount -> ConnectorGrantRow(
-                    service = serviceLabel(slug),
-                    summary = if (grant.count == 0) {
-                        GRANTS_NONE
-                    } else {
-                        "${grant.count} tool" + if (grant.count == 1) "" else "s"
-                    },
-                )
-                BotOverviewGrant.Unrecognized -> null
-            }
+    fun connectorGrantRows(grants: List<BotOverviewGrant>?): List<ConnectorGrantRow> =
+        grants?.map { grant ->
+            ConnectorGrantRow(
+                service = serviceLabel(grant.slug),
+                summary = when (grant.level) {
+                    BotOverviewGrantLevel.All -> GRANTS_ALL
+                    BotOverviewGrantLevel.None -> GRANTS_NONE
+                    BotOverviewGrantLevel.Partial ->
+                        grant.toolCount.toString() + " tool" + if (grant.toolCount == 1) "" else "s"
+                },
+            )
         } ?: emptyList()
 
     /**

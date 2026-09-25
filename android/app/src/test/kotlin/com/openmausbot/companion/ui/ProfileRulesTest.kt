@@ -3,6 +3,7 @@ package com.openmausbot.companion.ui
 import com.openmausbot.companion.core.AvatarCrop
 import com.openmausbot.companion.core.Bot
 import com.openmausbot.companion.core.BotOverviewGrant
+import com.openmausbot.companion.core.BotOverviewGrantLevel
 import com.openmausbot.companion.core.ConfigFlag
 import com.openmausbot.companion.core.ConfigStatus
 import com.openmausbot.companion.core.ModelSelection
@@ -470,17 +471,17 @@ class ProfileRulesTest {
     @Test
     fun `connector grants render one read-only row per service in the server's order`() {
         val rows = ProfileRules.connectorGrantRows(
-            mapOf(
-                "gmail" to BotOverviewGrant.AllTools,
-                "google_calendar" to BotOverviewGrant.ToolCount(2),
-                "notion" to BotOverviewGrant.NoTools,
-                "linear" to BotOverviewGrant.ToolCount(1),
+            listOf(
+                BotOverviewGrant("gmail", BotOverviewGrantLevel.All, toolCount = 0),
+                BotOverviewGrant("google_calendar", BotOverviewGrantLevel.Partial, toolCount = 2),
+                BotOverviewGrant("notion", BotOverviewGrantLevel.None, toolCount = 0),
+                BotOverviewGrant("linear", BotOverviewGrantLevel.Partial, toolCount = 1),
             ),
         )
 
         assertEquals(
             listOf(
-                ConnectorGrantRow("Gmail", "Every tool"),
+                ConnectorGrantRow("Gmail", "All tools"),
                 ConnectorGrantRow("Google calendar", "2 tools"),
                 ConnectorGrantRow("Notion", "No tools"),
                 ConnectorGrantRow("Linear", "1 tool"),
@@ -490,20 +491,20 @@ class ProfileRulesTest {
     }
 
     @Test
-    fun `unknown grant shapes and absent grants draw nothing`() {
+    fun `absent grants have no rows for the sheet to draw`() {
         assertEquals(emptyList<ConnectorGrantRow>(), ProfileRules.connectorGrantRows(null))
-        assertEquals(emptyList<ConnectorGrantRow>(), ProfileRules.connectorGrantRows(emptyMap()))
-        assertEquals(
-            emptyList<ConnectorGrantRow>(),
-            ProfileRules.connectorGrantRows(mapOf("gmail" to BotOverviewGrant.Unrecognized)),
-        )
+        // An empty list is the explicit no-tools record; its no-tools line
+        // belongs to the sheet, and the rules hand it no rows to draw.
+        assertEquals(emptyList<ConnectorGrantRow>(), ProfileRules.connectorGrantRows(emptyList()))
     }
 
     @Test
-    fun `a zero-tool count reads as none rather than as zero`() {
+    fun `a partial grant reads its tool count verbatim`() {
         assertEquals(
-            listOf(ConnectorGrantRow("Github", "No tools")),
-            ProfileRules.connectorGrantRows(mapOf("github" to BotOverviewGrant.ToolCount(0))),
+            listOf(ConnectorGrantRow("Github", "0 tools")),
+            ProfileRules.connectorGrantRows(
+                listOf(BotOverviewGrant("github", BotOverviewGrantLevel.Partial, toolCount = 0)),
+            ),
         )
     }
 
