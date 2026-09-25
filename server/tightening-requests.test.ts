@@ -507,4 +507,42 @@ describe("tightening history", () => {
       ["name", "user", "ui", "Scout", "Ranger"],
     ]);
   });
+
+  it("records history when a retry settles a change whose first receipt write failed", async () => {
+    const { bot } = harness({ mode: "full" });
+    mkdirSync(botFolder(bot.id), { recursive: true, mode: 0o700 });
+    let failPatchMessage = true;
+    class BrittleMessages extends MemoryStore {
+      patchMessage(...args: Parameters<MemoryStore["patchMessage"]>): ReturnType<MemoryStore["patchMessage"]> {
+        if (failPatchMessage) throw new Error("disk full");
+        return super.patchMessage(...args);
+      }
+    }
+    const brittleStore = new BrittleMessages();
+    brittleStore.bots.set(bot.id, bot);
+    const brittle = new TighteningRequestService({
+      store: brittleStore,
+      mountedMcpServers: (record) => [...(record.mcpServers ?? [])],
+    });
+    const card = brittle.propose({ botId: bot.id, threadId: bot.threadId, intents: { approvalMode: "ask" }, reason: "r" });
+
+    // patchBot commits the downgrade; recording the decision on the card
+    // fails, so the applied change leaves no history row yet.
+    const first = brittle.resolve({ botId: bot.id, threadId: bot.threadId, requestId: card.requestId, behavior: "allow" });
+    expect(first).toMatchObject({ state: "applied" });
+    expect(bot.approvalMode).toBe("ask");
+    await flushProfileHistory(bot.id);
+    expect(readHistory(bot.id)).toEqual([]);
+
+    // The write heals; the retry settles the card and records the
+    // committed change from the card's own before snapshot.
+    failPatchMessage = false;
+    const second = brittle.resolve({ botId: bot.id, threadId: bot.threadId, requestId: card.requestId, behavior: "allow" });
+    expect(second).toMatchObject({ state: "already_settled" });
+    await flushProfileHistory(bot.id);
+    const messageId = brittleStore.messagesFor(bot.threadId).find((message) => message.card?.requestId === card.requestId)!.id;
+    expect(readHistory(bot.id).map((row) => [row.field, row.actor, row.via, row.before, row.after])).toEqual([
+      ["approvalMode", "bot", `card:${messageId}`, "full", "ask"],
+    ]);
+  });
 });

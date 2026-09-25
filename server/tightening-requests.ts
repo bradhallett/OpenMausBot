@@ -406,6 +406,15 @@ export class TighteningRequestService {
           card: { ...card, answered: "allow", held: undefined, tighteningRequest: { ...payload, appliedAt: payload.appliedAt ?? this.now() } },
         });
         if (!settled) throw new TighteningRequestError("This tightening confirmation card is no longer available", 409);
+        // The first attempt committed the authority change and the durable
+        // receipt, then died before it could settle the card or record
+        // history. This retry settles the card, so it also writes the row
+        // that attempt never reached: the card still carries the
+        // pre-change snapshot, and the live bot is the after state.
+        const fresh = this.store.bot(payload.targetBotId);
+        if (fresh) {
+          recordAuthorityChange(payload.targetBotId, "bot", `card:${message.id}`, payload.before, this.snapshotOf(fresh));
+        }
         return { claimed: true, state: "already_settled", behavior: "allow" };
       }
       if (args.behavior === "deny") {
