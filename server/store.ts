@@ -1653,7 +1653,7 @@ export class Store {
     profile: Partial<
       Pick<
         BotRecord,
-        "name" | "title" | "description" | "soul" | "color" | "mascotExpression" | "mascotBody" | "modelSelection" | "section" | "visibility"
+        "name" | "title" | "description" | "soul" | "color" | "mascotExpression" | "mascotBody" | "modelSelection" | "section" | "cwd" | "visibility"
       >
     > = {},
     opts: {
@@ -1685,6 +1685,7 @@ export class Store {
       createdAt: Date.now(),
     };
     if (section) bot.section = section;
+    if (profile.cwd) bot.cwd = profile.cwd;
     bot.tasks = [{
       threadId: bot.threadId,
       title: UNTITLED_THREAD,
@@ -1749,6 +1750,9 @@ export class Store {
             modelSelection: structuredClone(modelSelection), approvalMode: "ask", autoApprove: false,
             unread: false, activity: "idle", busy: false }],
         };
+        // "" is the private-workspace spelling on proposal; the record
+        // stays clean with the field absent, exactly like the PATCH path.
+        if (!next.cwd) delete next.cwd;
         nextBots.unshift(next);
       } else {
         if (at < 0) throw new Error("A setup target no longer exists");
