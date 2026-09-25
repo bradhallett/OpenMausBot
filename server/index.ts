@@ -14750,11 +14750,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         // A later request supersedes every still-pending card for this
         // credential instead of silently reusing it: the reason or task has
         // moved on, so the old card stops offering entry and the person gets
-        // one fresh card they can act on.
-        for (const prior of store.activePath(fromThreadId)) {
-          if (!prior.secret || !isPendingCredentialRequest(prior, credentialId, from.id, Boolean(owner.group))) continue;
-          store.patchMessage(fromThreadId, prior.id, { secret: { ...prior.secret, superseded: true } });
-        }
+        // one fresh card they can act on. The fresh card is appended FIRST:
+        // if persistence then fails, the prior cards stay actionable rather
+        // than every pending request ending terminal with no card to act on.
         const reason = typeof body.reason === "string" ? body.reason.trim().slice(0, 240) : "";
         const message = store.appendMessage(fromThreadId, {
           role: "bot",
@@ -14770,6 +14768,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             requestKey: randomUUID(),
           },
         });
+        for (const prior of store.activePath(fromThreadId)) {
+          if (prior.id === message.id) continue;
+          if (!prior.secret || !isPendingCredentialRequest(prior, credentialId, from.id, Boolean(owner.group))) continue;
+          store.patchMessage(fromThreadId, prior.id, { secret: { ...prior.secret, superseded: true } });
+        }
         return json(res, 201, { messageId: message.id, label: target.label });
       }
       if (method === "POST" && path === "/api/internal/voice-note") {
