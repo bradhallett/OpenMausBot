@@ -121,6 +121,17 @@ final class Session: ObservableObject {
     /// for the same attachment path.
     private var avatarFetches: [String: (id: UUID, task: Task<Data?, Never>)] = [:]
     private var avatarCacheGeneration = 0
+    /// Voice-note bytes for the transcript bubbles. Clips are short but a
+    /// busy thread can carry several; a small cost-bounded window keeps
+    /// replay from refetching without pinning the whole transcript.
+    private let voiceNoteCache: NSCache<NSString, NSData> = {
+        let cache = NSCache<NSString, NSData>()
+        cache.countLimit = 32
+        cache.totalCostLimit = 32 * 1_024 * 1_024
+        return cache
+    }()
+    private var voiceNoteFetches: [String: (id: UUID, task: Task<Data?, Never>)] = [:]
+    private var voiceNoteCacheGeneration = 0
     /// Full image bytes are already fetched to draw a thumbnail. Keep a small,
     /// cost-bounded window so tapping that thumbnail opens immediately instead
     /// of downloading the same image twice.
@@ -167,7 +178,7 @@ final class Session: ObservableObject {
         let arguments = ProcessInfo.processInfo.arguments
         if (arguments.contains("-store-preview") || arguments.contains("-computer-switcher-preview")),
            let url = Bundle.main.url(
-               forResource: arguments.contains("-images-preview") ? "ImagePreview" : arguments.contains("-chat-presentation-preview") ? "ChatPresentationPreview" : arguments.contains("-threads-preview") ? "ThreadPreview" : "StorePreview",
+               forResource: arguments.contains("-images-preview") ? "ImagePreview" : arguments.contains("-chat-update-preview") ? "ChatUpdatePreview" : arguments.contains("-chat-presentation-preview") ? "ChatPresentationPreview" : arguments.contains("-threads-preview") ? "ThreadPreview" : "StorePreview",
                withExtension: "json"
            ),
            let data = try? Data(contentsOf: url),
@@ -198,6 +209,11 @@ final class Session: ObservableObject {
                 let config = URLSessionConfiguration.ephemeral
                 config.protocolClasses = [ImagePreviewProtocol.self]
                 client = CompanionClient(connection: preview, token: "image-fixture-token", session: URLSession(configuration: config))
+            }
+            if arguments.contains("-voice-preview") {
+                let config = URLSessionConfiguration.ephemeral
+                config.protocolClasses = [VoicePreviewProtocol.self]
+                client = CompanionClient(connection: preview, token: "voice-fixture-token", session: URLSession(configuration: config))
             }
             state.hydrate(fleet)
             if arguments.contains("-chat-focus-preview") {
@@ -1116,7 +1132,10 @@ final class Session: ObservableObject {
 
     /// Take back a held message. The row only goes when the computer agrees;
     /// an entry that already drained counts as agreement.
-    func cancelQueued(_ send: QueuedSend, threadId: String, in chat: Chat) async {
+    /// True only when the computer confirmed cancellation, so an
+    /// edit never hands back words that already joined a turn.
+    @discardableResult
+    func cancelQueued(_ send: QueuedSend, threadId: String, in chat: Chat) async -> Bool {
         let connectionID = client?.connection.id
         let destination: MessageDestination
         switch chat {
@@ -1124,15 +1143,30 @@ final class Session: ObservableObject {
         case let .room(room): destination = .room(id: room.id, threadId: threadId)
         }
         var agreed = false
+        var cancelled = false
         await perform {
-            try await $0.cancelQueued(queueId: send.queueId, to: destination)
+            cancelled = try await $0.cancelQueued(queueId: send.queueId, to: destination)
             agreed = true
         }
         // The cancel landed on the computer that owned the row. One selected
         // mid-request has already reset state; its rows are not this cancel's
         // to retire.
-        if agreed, client?.connection.id == connectionID {
-            state.cancelQueued(queueId: send.queueId, threadId: threadId)
+        guard agreed, client?.connection.id == connectionID else { return false }
+        state.cancelQueued(queueId: send.queueId, threadId: threadId)
+        return cancelled
+    }
+
+    /// Run Claude Code's updater for one engine instance on the computer.
+    /// Returns the version it now reports. Throws with the harness's own
+    /// message (already written for people) so the card can show it; an
+    /// unpaired device is flagged the same way `perform` does.
+    func updateClaude(instanceId: String) async throws -> String {
+        guard let client else { throw APIError.transport("Not connected to a computer.") }
+        do {
+            return try await client.updateClaude(instanceId: instanceId)
+        } catch let error as APIError where error.isUnauthorized {
+            status = .unauthorized
+            throw error
         }
     }
 
@@ -1372,6 +1406,11 @@ final class Session: ObservableObject {
         )
         if let prepared = preparedPhoneCredentials[requestIdentity] {
             return prepared
+        }
+        guard #available(iOS 17.0, *) else {
+            // HPKE, which seals the credential end to end, is iOS 17 and up.
+            // There is no weaker path worth offering for a secret.
+            throw PhoneSecretError.requiresNewerOS
         }
         let envelope = try PhoneSecretCrypto.encrypt(
             value,
@@ -1913,12 +1952,41 @@ final class Session: ObservableObject {
         for fetch in avatarFetches.values { fetch.task.cancel() }
         avatarFetches.removeAll()
         avatarCache.removeAllObjects()
+        voiceNoteCacheGeneration += 1
+        for fetch in voiceNoteFetches.values { fetch.task.cancel() }
+        voiceNoteFetches.removeAll()
+        voiceNoteCache.removeAllObjects()
     }
 
     func voiceOptions() async -> [Voice] {
         guard let client else { return [] }
         do { return try await client.voices() }
         catch { actionError = error.localizedDescription; return [] }
+    }
+
+    /// Cached voice-note bytes for the transcript bubble, shaped like
+    /// avatarData so replay and scroll-back never refetch the same clip.
+    func voiceNoteData(for note: MessageVoiceNote) async -> Data? {
+        guard let client else { return nil }
+        let key = note.path as NSString
+        if let cached = voiceNoteCache.object(forKey: key) { return cached as Data }
+        let generation = voiceNoteCacheGeneration
+        let fetch: (id: UUID, task: Task<Data?, Never>)
+        if let pending = voiceNoteFetches[note.path] {
+            fetch = pending
+        } else {
+            let pending = (
+                id: UUID(),
+                task: Task<Data?, Never> { try? await client.voiceNote(path: note.path) }
+            )
+            voiceNoteFetches[note.path] = pending
+            fetch = pending
+        }
+        let data = await fetch.task.value
+        if voiceNoteFetches[note.path]?.id == fetch.id { voiceNoteFetches.removeValue(forKey: note.path) }
+        guard !Task.isCancelled, generation == voiceNoteCacheGeneration, let data else { return nil }
+        voiceNoteCache.setObject(data as NSData, forKey: key, cost: data.count)
+        return data
     }
 
     /// Switch the workspace's voice engine. The fresh status comes back so

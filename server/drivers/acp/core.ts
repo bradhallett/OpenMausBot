@@ -71,6 +71,7 @@ import { commandSummary, toolDetailPreview } from "../../tool-summary.ts";
 import { extractMcpImages } from "../../mcp-tool-images.ts";
 import { redactSecretsInText } from "../../redact.ts";
 import { recoveryPromptFor } from "../../resume-recovery.ts";
+import { sessionIdlePolicy } from "../session-idle.ts";
 
 /** ACP vendors put the actionable cause in error.data while keeping the
  * JSON-RPC message generic. Only surface known text fields, never a response
@@ -253,6 +254,8 @@ export interface AcpSupport {
   ): Promise<ProviderSnapshot>;
   /** Google Antigravity resumes through session/resume, not session/load. */
   resumeMethod?: "load" | "resume";
+  /** Some agents acknowledge a live load without applying new MCP credentials. */
+  restartOnMcpChange?: boolean;
   /** Route workspace file access through ACP so edits retain approval cards. */
   clientFileSystem?: boolean;
   /** Do not retain stderr from providers that may place OAuth material there. */
@@ -315,6 +318,9 @@ const INIT_TIMEOUT = envOr("OPENMAUS_ACP_INIT_TIMEOUT_MS", 300_000);
 const SESSION_CONFIG_TIMEOUT = envOr("OPENMAUS_ACP_SESSION_CONFIG_TIMEOUT_MS", 300_000); // configureSession's per-request default
 const NEW_SESSION_TIMEOUT = envOr("OPENMAUS_ACP_NEW_SESSION_TIMEOUT_MS", 300_000);
 const LOAD_SESSION_TIMEOUT = envOr("OPENMAUS_ACP_LOAD_SESSION_TIMEOUT_MS", 120_000); // history replay on a long thread is slow
+/** ACP agents may compact their own history without telling the client;
+ * re-send the full prompt after this many bare turns as a backstop. */
+const ACP_PROMPT_RE_ANCHOR_TURNS = 8;
 // Read lazily (not at import) so a test can shorten the window. Unlike the
 // setup calls above, session/prompt legitimately streams for minutes, so a
 // wall-clock deadline would false-positive: this guard only trips when the
@@ -446,6 +452,28 @@ export function versionFromProbe(stdout: string | undefined, stderr: string | un
   return err || null;
 }
 
+/** A parsed dotted version triple — the shape every harness's version gate
+ * compares, whatever its banner looks like. */
+export type VersionTriple = readonly [number, number, number];
+
+/** The first dotted numeric triple in a version banner, or null when there is
+ * none. A wrapper that prints its own banner first still parses: the triple
+ * is the version wherever it appears. */
+export function parseVersionTriple(value: string): VersionTriple | null {
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(value);
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+/** Whether `installed` compares at or above `floor`, componentwise. Every
+ * version floor in the tree is a dotted triple. */
+export function versionAtLeast(installed: VersionTriple, floor: VersionTriple): boolean {
+  for (let i = 0; i < 3; i += 1) {
+    if (installed[i] !== floor[i]) return installed[i] > floor[i];
+  }
+  return true;
+}
+
 export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> {
   const DRIVER_KIND = support.driverKind;
   const SOURCE = support.nativeSource;
@@ -512,11 +540,10 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
       // contract prompts the live session instead of paying the handshake
       // again. An idle session closes after SESSION_IDLE_MS of quiet.
       const sessions = new Map<string, AcpSession>();
-      const configuredIdleMinimum = Number(process.env.OMB_ACP_SESSION_IDLE_MIN_MS);
-      const sessionIdleMinimum = Number.isFinite(configuredIdleMinimum) && configuredIdleMinimum > 0
-        ? configuredIdleMinimum
-        : 10_000;
-      const SESSION_IDLE_MS = Math.max(sessionIdleMinimum, Number(process.env.OMB_ACP_SESSION_IDLE_MS) || 10 * 60_000);
+      // A provider that could not be stopped is never safe to resume beside.
+      // Keep its child until a later explicit turn proves it gone.
+      const retiring = new Map<string, ReturnType<typeof spawnCli>>();
+      const { idleMs: SESSION_IDLE_MS } = sessionIdlePolicy("ACP");
 
       const closeSession = (threadId: string, why: string) => {
         const session = sessions.get(threadId);
@@ -1249,8 +1276,8 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         // transformEnv-policy supports (opencode). mcpServers are session
         // establishment inputs — they ride session/new and session/load over
         // the wire — and the harness mints fresh integration bearer tokens
-        // every turn, so they must not respawn the process; a change instead
-        // re-establishes the session below (see sessionKey).
+        // every turn. Most agents apply changes on live load; those that cache
+        // the old MCP clients must resume on a fresh process (see sessionKey).
         // The env the spawned child actually receives is part of the
         // contract too, and arrives hashed as envFingerprint for the same
         // reason.
@@ -1270,7 +1297,11 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         }
         const pooled = sessions.get(threadId);
         let session: AcpSession;
-        if (pooled && !pooled.dead && !pooled.closing && pooled.contractKey === contractKey) {
+        let replacedChild: ReturnType<typeof spawnCli> | undefined = support.restartOnMcpChange
+          ? retiring.get(threadId)
+          : undefined;
+        if (pooled && !pooled.dead && !pooled.closing && pooled.contractKey === contractKey
+            && (!support.restartOnMcpChange || pooled.sessionKey === sessionKey)) {
           // adoption cancels the idle countdown — a running turn is not quiet
           if (pooled.idleTimer) clearTimeout(pooled.idleTimer);
           pooled.idleTimer = null;
@@ -1280,7 +1311,11 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             // a dead child already exited — just drop the record; a live one
             // gets the full close (contract changed)
             if (pooled.dead) sessions.delete(threadId);
-            else closeSession(threadId, "contract");
+            else {
+              closeSession(threadId, "contract");
+              if (!replacedChild) replacedChild = pooled.child;
+              else void killCliTree(pooled.child);
+            }
           }
           session = openSession(threadId, launch, [...(launch.args ?? []), ...spawnArgs], spawnEnv, cwd, contractKey);
           sessions.set(threadId, session);
@@ -1372,6 +1407,23 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
 
         (async () => {
           try {
+            if (support.restartOnMcpChange && replacedChild) {
+              // Qwen may hold a native-session writer lease until exit. Keep
+              // Stop wired to the new child, but do not load until its old
+              // owner (and its credential-bearing helpers) has gone away.
+              const stopped = await killCliTree(replacedChild);
+              if (stopped) retiring.delete(threadId);
+              if (state.settled || session.closing) {
+                if (!stopped) retiring.set(threadId, replacedChild);
+                return;
+              }
+              if (!stopped) {
+                closeSession(threadId, "replace-failed");
+                // A retry must still retire the old writer before loading.
+                retiring.set(threadId, replacedChild);
+                throw new Error(`${support.displayName} could not close its previous tool session. Try again.`);
+              }
+            }
             // The handshake is paid once per process, not once per turn. It
             // is a function so the establishment retry below can pay it
             // again on a replacement child.
@@ -1607,6 +1659,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
                 promptTurn.system,
                 promptTurn.text,
                 Boolean(turn.mentionTurn),
+                ACP_PROMPT_RE_ANCHOR_TURNS,
               );
               promptInput = { ...promptTurn, system: "", text: composed.text };
               pendingSplitReceipt = { key: receiptKey, receipt: composed.receipt };
@@ -1754,6 +1807,8 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             for (const { stop } of active.values()) stop();
             // idle pooled sessions have no running turn — close them too
             for (const threadId of Array.from(sessions.keys())) closeSession(threadId, "stopAll");
+            for (const child of retiring.values()) void killCliTree(child);
+            retiring.clear();
           },
           onEvent: (listener) => {
             listeners.add(listener);
@@ -1763,6 +1818,8 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         dispose: async () => {
           for (const { stop } of active.values()) stop();
           for (const threadId of Array.from(sessions.keys())) closeSession(threadId, "dispose");
+          for (const child of retiring.values()) void killCliTree(child);
+          retiring.clear();
           listeners.clear();
         },
       };

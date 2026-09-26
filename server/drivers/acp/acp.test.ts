@@ -11,7 +11,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, unlinkSy
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ensureDirs, NATIVE_DIR } from "../../config.ts";
 import type { ProviderInstance } from "../../contracts.ts";
@@ -22,7 +22,9 @@ import { GeminiAgentDriver } from "./gemini.ts";
 import { KimiAgentDriver } from "./kimi.ts";
 import { DroidAgentDriver } from "./droid.ts";
 import { CursorAgentDriver } from "./cursor.ts";
+import { QwenAgentDriver } from "./qwen.ts";
 import { removeTempDir } from "../../testing/cleanup.ts";
+import * as procs from "../../procs.ts";
 
 const FAKE_CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "testing", "fake-acp-cli.ts");
 
@@ -257,6 +259,7 @@ describe("ACP turns (fake CLI)", () => {
     delete process.env.FAKE_ACP_LAUNCH_COUNT_FILE;
     recorder?.stop();
     await instance?.dispose();
+    vi.restoreAllMocks();
     await removeTempDir(scratch);
   });
 
@@ -375,6 +378,34 @@ describe("ACP turns (fake CLI)", () => {
     // A cleared volatile half is announced once, not silently dropped.
     expect(await send("fourth", "")).toContain("have been cleared");
     expect(await send("fifth", "")).toBe("fifth");
+  });
+
+  it("re-anchors the full prompt after eight bare turns on one native session", async () => {
+    const dump = join(scratch, "acp-prompt-reanchor.json");
+    process.env.FAKE_ACP_DUMP = dump;
+    process.env.FAKE_ACP_DUMP_PROMPT = "1";
+    await create();
+    const threadId = "t-acp-prompt-reanchor-" + randomUUID();
+    const promptOf = () =>
+      (JSON.parse(readFileSync(dump + ".prompt.json", "utf8")) as Array<{ type: string; text: string }>)[0]?.text;
+    const messages: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      const { turnId } = await instance.adapter.sendTurn({
+        threadId,
+        text: "turn " + i,
+        system: "Standing rules.\n\nMemory: likes quiet hours.",
+        systemStable: "Standing rules.",
+        systemVolatile: "Memory: likes quiet hours.",
+      });
+      await recorder.until((event) => event.type === "turn.completed" && event.turnId === turnId);
+      messages.push(promptOf()!);
+    }
+    // Agents can compact their own history away between turns; the re-anchor
+    // backstop returns the standing instructions within a bounded window.
+    const full = "Standing rules.\n\nMemory: likes quiet hours.";
+    expect(messages[0]).toBe(full + "\n\nturn 0");
+    for (let i = 1; i <= 8; i++) expect(messages[i]).toBe("turn " + i);
+    expect(messages[9]).toBe(full + "\n\nturn 9");
   });
 
   it("fails clearly when an image-capable adapter meets an older ACP runtime", async () => {
@@ -1567,8 +1598,10 @@ describe("ACP turns (fake CLI)", () => {
     });
 
     it("closes the idle process and resumes on the next turn", async () => {
-      process.env.OMB_ACP_SESSION_IDLE_MIN_MS = "50";
-      process.env.OMB_ACP_SESSION_IDLE_MS = "100";
+      // Ten seconds is the lowest window the floor allows now; exercise the
+      // close at the floor itself and give the poll room past it.
+      process.env.OMB_ACP_SESSION_IDLE_MIN_MS = "10000";
+      process.env.OMB_ACP_SESSION_IDLE_MS = "10000";
       countFile = join(scratch, "launches");
       rpcFile = join(scratch, "rpc.json");
       process.env.FAKE_ACP_LAUNCH_COUNT_FILE = countFile;
@@ -1579,7 +1612,7 @@ describe("ACP turns (fake CLI)", () => {
       // the close reason is only logged, never emitted — poll the native log
       // for it rather than sleeping a fixed window past the idle deadline
       await new Promise<void>((resolve, reject) => {
-        const deadline = Date.now() + 5_000;
+        const deadline = Date.now() + 20_000;
         const log = join(NATIVE_DIR, "t-pool-idle.ndjson");
         const check = () => {
           if (Date.now() > deadline) return reject(new Error("idle close was never logged"));
@@ -1606,7 +1639,7 @@ describe("ACP turns (fake CLI)", () => {
       // the dump is per-process and overwritten on spawn, so this is the resumed child
       expect(rpc()).toContain("session/load");
       expect(rpc()).toContain("initialize");
-    });
+    }, 30_000);
 
     it("respawns when the spawn contract changes", async () => {
       countFile = join(scratch, "launches");
@@ -1629,15 +1662,22 @@ describe("ACP turns (fake CLI)", () => {
       expect(launches()).toBe(2);
     });
 
-    it("rotating integration credentials re-establishes the session on the same process", async () => {
+    it.each([
+      { driver: GrokAgentDriver, expectedLaunches: 1 },
+      { driver: QwenAgentDriver, expectedLaunches: 2 },
+    ])("rotating credentials refreshes $driver.driverKind with $expectedLaunches process(es)", async ({ driver, expectedLaunches }) => {
       countFile = join(scratch, "launches");
-      rpcFile = join(scratch, "rpc.json");
+      const appendFile = join(scratch, "rpc-all.jsonl");
       process.env.FAKE_ACP_LAUNCH_COUNT_FILE = countFile;
-      process.env.FAKE_ACP_RPC_DUMP = rpcFile;
-      await create();
-      // The harness mints a fresh bearer token in the agents proxy env every
-      // turn. That is session establishment input (it rides session/new and
-      // session/load), never a reason to pay the process handshake again.
+      process.env.FAKE_ACP_RPC_APPEND_FILE = appendFile;
+      instance = await driver.create({
+        instanceId: "acp-test", displayName: "ACP Test", enabled: true,
+        environment: { HOME: scratch, USERPROFILE: scratch },
+        config: { cli: FAKE_CLI, fullAuto: false },
+      });
+      recorder = recordEvents(instance.adapter);
+      // Qwen caches MCP clients on live load; other agents apply the new
+      // credentials without a process restart. Both preserve the cursor.
       const integration = (token: string) => ({
         command: process.execPath,
         args: [FAKE_CLI],
@@ -1660,11 +1700,61 @@ describe("ACP turns (fake CLI)", () => {
       const secondDone = await recorder.until((e) => e.type === "turn.completed" && e.turnId === second.turnId);
       expect(secondDone).toMatchObject({ ok: true });
 
-      expect(launches()).toBe(1);
-      expect(rpc().filter((m) => m === "initialize")).toHaveLength(1);
-      expect(rpc().filter((m) => m === "session/new")).toHaveLength(1);
-      expect(rpc().filter((m) => m === "session/load")).toHaveLength(1);
-      expect(rpc().filter((m) => m === "session/prompt")).toHaveLength(2);
+      const third = await instance.adapter.sendTurn({
+        threadId: "t-pool-token", text: "unchanged MCP inputs",
+        resumeCursor: "fake-acp-session",
+        integrations: { agents: integration("token-two") },
+      });
+      expect(await recorder.until((e) => e.type === "turn.completed" && e.turnId === third.turnId)).toMatchObject({ ok: true });
+      expect(launches()).toBe(expectedLaunches);
+      const calls = readFileSync(appendFile, "utf8").trim().split("\n").map((line) => JSON.parse(line).method);
+      expect(calls.filter((m) => m === "initialize")).toHaveLength(expectedLaunches);
+      expect(calls.filter((m) => m === "session/new")).toHaveLength(1);
+      expect(calls.filter((m) => m === "session/load")).toHaveLength(1);
+      expect(calls.filter((m) => m === "session/prompt")).toHaveLength(3);
+      expect(recorder.events.filter((e) => e.type === "session.started").map((e) => e.sessionId)).toEqual([
+        "fake-acp-session", "fake-acp-session", "fake-acp-session",
+      ]);
+    });
+
+    it("does not load or prompt Qwen after Stop during old-process cleanup", async () => {
+      const appendFile = join(scratch, "rpc-all.jsonl");
+      process.env.FAKE_ACP_RPC_APPEND_FILE = appendFile;
+      instance = await QwenAgentDriver.create({
+        instanceId: "qwen-stop", displayName: "Qwen Stop", enabled: true,
+        environment: { HOME: scratch, USERPROFILE: scratch },
+        config: { cli: FAKE_CLI, fullAuto: false },
+      });
+      recorder = recordEvents(instance.adapter);
+      const integration = (token: string) => ({ command: process.execPath, args: [FAKE_CLI], env: { OMB_COMMS_TOKEN: token } });
+      const first = await instance.adapter.sendTurn({ threadId: "qwen-stop", text: "one", integrations: { agents: integration("one") } });
+      await recorder.until((e) => e.type === "turn.completed" && e.turnId === first.turnId);
+
+      let stopped!: () => void;
+      let release!: () => void;
+      const stopping = new Promise<void>((resolve) => { stopped = resolve; });
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const kill = procs.killCliTree;
+      vi.spyOn(procs, "killCliTree").mockImplementationOnce(async (child) => {
+        stopped();
+        await gate;
+        return kill(child);
+      });
+      try {
+        const second = await instance.adapter.sendTurn({
+          threadId: "qwen-stop", text: "two", resumeCursor: "fake-acp-session",
+          integrations: { agents: integration("two") },
+        });
+        await stopping;
+        await instance.adapter.interruptTurn("qwen-stop");
+        release();
+        expect(await recorder.until((e) => e.type === "turn.completed" && e.turnId === second.turnId)).toMatchObject({ ok: false });
+        const calls = readFileSync(appendFile, "utf8").trim().split("\n").map((line) => JSON.parse(line).method);
+        expect(calls.filter((method) => method === "initialize")).toHaveLength(1);
+        expect(calls.filter((method) => method === "session/load")).toHaveLength(0);
+        expect(calls.filter((method) => method === "session/prompt")).toHaveLength(1);
+        expect(instance.adapter.hasSession("qwen-stop")).toBe(false);
+      } finally { release(); }
     });
 
     it("an agent that refuses to re-load its live session gets one fresh process, then resumes", async () => {
@@ -1803,11 +1893,13 @@ describe("ACP snapshot", () => {
     // The child env inherits process.env (core.ts childEnv), so a developer
     // machine with a real FACTORY_API_KEY exported would otherwise satisfy
     // every case here and prove nothing about the on-disk lookup.
+    // Windows resolves the driver home from USERPROFILE first, so every
+    // case pins both to its scratch home like the qwen turn test does.
     const make = (environment: Record<string, string>) =>
       DroidAgentDriver.create({
         instanceId: "droid-auth",
         displayName: undefined,
-        environment: { FACTORY_API_KEY: "", ...environment },
+        environment: { FACTORY_API_KEY: "", ...(environment.HOME ? { USERPROFILE: environment.HOME } : {}), ...environment },
         enabled: true,
         config: { cli: FAKE_CLI, fullAuto: false },
       });
@@ -1872,7 +1964,7 @@ describe("ACP snapshot", () => {
     const instance = await DroidAgentDriver.create({
       instanceId: "droid-models",
       displayName: undefined,
-      environment: { HOME: scratch },
+      environment: { HOME: scratch, USERPROFILE: scratch },
       enabled: true,
       config: { cli: FAKE_CLI, fullAuto: false },
     });

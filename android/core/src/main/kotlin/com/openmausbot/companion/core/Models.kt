@@ -140,6 +140,12 @@ data class ToolActivity(
     val ok: Boolean? = null,
     val spoken: String? = null,
     val setup: Boolean? = null,
+    /**
+     * The failed turn's Claude Code CLI is too old for the chosen model.
+     * The phone offers to run Claude's updater on the computer, or shows
+     * the command to run by hand. Older computers omit it.
+     */
+    val claudeUpdate: Boolean? = null,
 )
 
 /**
@@ -1222,6 +1228,9 @@ internal data class FileUploadResponse(val path: String, val name: String, val m
 internal data class GeneratedAvatarResponse(val avatarUrl: String, val bot: Bot)
 
 @Serializable
+internal data class ClaudeUpdateResponse(val version: String)
+
+@Serializable
 data class RoutinesResponse(val routines: List<Routine>, val runs: List<RoutineRun>)
 
 @Serializable
@@ -1268,4 +1277,6 @@ data class MessageImageAttachment(
     val kind: String,
     val path: String? = null,
     val mime: String? = null,
+    /** `kind == "audio"`: the server's duration estimate, used until the player loads metadata. */
+    val durationMs: Double? = null,
 )

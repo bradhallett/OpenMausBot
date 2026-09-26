@@ -6,6 +6,7 @@
 // The sentences that both the direct-turn and room-turn paths use live
 // here too, so neither path can drift from the other or from the preview.
 import { soulSystemPrompt } from "./bot-folder.ts";
+import type { ConnectorToolGrant } from "../shared/wire.ts";
 
 export type PromptPart = { id: string; label: string; text: string };
 export type PromptSection = PromptPart & { bytes: number };
@@ -58,9 +59,9 @@ export const SIGN_IN_PROMPT =
 
 const COMPUTER_PARAGRAPH: Record<ComputerPromptKind, string> = {
   "vm-private":
-    " You have your own isolated Cua sandbox: a Linux desktop in a container reserved for this bot. Only /home/cua/workspace is durable; save downloads, repositories, working files, and browser profiles there because everything else inside the VM is disposable. No other host folder is mounted. Use the computer tools for desktop, accessibility, window, and shell work. Inspect the desktop state before acting, prefer accessibility targets over raw coordinates, and work carefully.",
+    " You have your own isolated Cua sandbox: a Linux desktop in a container reserved for this bot. Only /home/cua/workspace is durable; save downloads, repositories, working files, and browser profiles there because everything else inside the VM is disposable. No other host folder is mounted. Run every command with vm_exec, which returns the exit code and the output as text; do not type commands into a terminal window and read screenshots. Create files there with vm_exec too (a shell heredoc or a script it runs); your host file tools cannot reach the VM. To give the user a file you made there (a report, image, audio, video, spreadsheet or slides), call attach_file with its path once it is saved; it reports an error if the file is missing. A path inside the VM cannot be opened from chat, so do not paste one as a link. Use the computer tools for the desktop, accessibility and windows. Inspect the desktop state before acting, prefer accessibility targets over raw coordinates, and work carefully.",
   "vm-shared":
-    " You have a shared, isolated Cua sandbox: a Linux desktop in a container on this machine. Only /home/cua/workspace is durable; save downloads, repositories, working files, and browser profiles there because everything else inside the VM is disposable. No other host folder is mounted. Use the computer tools for desktop, accessibility, window, and shell work. Inspect the desktop state before acting, prefer accessibility targets over raw coordinates, and work carefully.",
+    " You have a shared, isolated Cua sandbox: a Linux desktop in a container on this machine. Only /home/cua/workspace is durable; save downloads, repositories, working files, and browser profiles there because everything else inside the VM is disposable. No other host folder is mounted. Run every command with vm_exec, which returns the exit code and the output as text; do not type commands into a terminal window and read screenshots. Create files there with vm_exec too (a shell heredoc or a script it runs); your host file tools cannot reach the VM. To give the user a file you made there (a report, image, audio, video, spreadsheet or slides), call attach_file with its path once it is saved; it reports an error if the file is missing. A path inside the VM cannot be opened from chat, so do not paste one as a link. Use the computer tools for the desktop, accessibility and windows. Inspect the desktop state before acting, prefer accessibility targets over raw coordinates, and work carefully.",
   box:
     " You have your own cloud computer. In Chrome, prefer browser_snapshot with browser_click/browser_fill for semantic, trusted actions; use screenshot/click/type_text for visual or non-browser UI, open_url for navigation, and computer_exec for Linux tasks. Every action already returns the resulting screen, so don't follow it with screenshot; batch predictable pixel actions with computer_batch.",
   "box-agent": "",
@@ -81,6 +82,31 @@ export function computerPrompt(kind: ComputerPromptKind | null): string {
 
 export const COMPOSIO_PROMPT =
   " The user's connected apps (Gmail, Calendar, Slack, Notion, and the rest) are reachable through the composio tools — find the right one with COMPOSIO_SEARCH_TOOLS, read its arguments with COMPOSIO_GET_TOOL_SCHEMAS, then run it with COMPOSIO_MULTI_EXECUTE_TOOL. Reach for them before telling the user you have no access to a service.";
+
+/** The connected-apps paragraph, personalized to the bot's grants (issue
+ * #1737). A bot with no grants record keeps the legacy all-tools sentence;
+ * a record names exactly the granted services and tells the model a
+ * refusal is a grant question for the person, never a reason to hunt for
+ * what else exists; a record granting nothing gets no paragraph at all.
+ * Like the persona, the text only changes when settings change, so the
+ * stable-prompt split from #1758 is preserved. */
+export function composioSystemPrompt(grants: Record<string, ConnectorToolGrant> | undefined): string {
+  if (grants === undefined) return COMPOSIO_PROMPT;
+  const services = Object.keys(grants);
+  if (services.length === 0) return "";
+  const named = services.map(connectorServiceLabel).join(", ");
+  return ` The user's connected apps assigned to this bot (${named}) are reachable through the composio tools — find the right one with COMPOSIO_SEARCH_TOOLS, read its arguments with COMPOSIO_GET_TOOL_SCHEMAS, then run it with COMPOSIO_MULTI_EXECUTE_TOOL. Only the tools this bot was granted will run; when a needed tool is refused, tell the user and ask them to grant it in OpenMausBot. Reach for the granted services before telling the user you have no access.`;
+}
+
+/** "gmail" → "Gmail", "google_calendar" → "Google Calendar". The prompt
+ * must not call the network, so the label is derived from the slug. */
+function connectorServiceLabel(slug: string): string {
+  return slug
+    .split(/[-_]+/)
+    .map((part) => (part ? part[0]!.toUpperCase() + part.slice(1) : part))
+    .join(" ");
+}
+
 /** Names the user-added MCP servers a turn actually mounted, so the bot
  * reaches for them instead of saying it has no such tool. Empty when none. */
 export function customMcpPrompt(names: string[]): string {
