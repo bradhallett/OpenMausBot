@@ -3367,6 +3367,10 @@ type GroupTurnOperation = {
   cancelled: boolean;
   cancellation: AbortController;
   providerHandshakePending: boolean;
+  /** The coalesced burst that started this turn (M2): member turns recover
+   * every burst line from the transcript by these stable queueIds, so each
+   * line's context text and attachments survive the fold into one turn. */
+  queuedQueueIds?: string[];
   goalRun?: {
     runId: string;
     cardMessageId: string;
@@ -9916,11 +9920,12 @@ function teammateReportContext(requestId: string, readerBotId?: string): string 
 function serializeRoomContext(
   threadId: string,
   userName: string,
-  textOverride?: { messageId: string; text: string },
+  textOverrides?: ReadonlyArray<{ messageId: string; text: string }>,
   readerBotId?: string,
 ): string {
   const messages = store.messagesFor(threadId);
   const messagesById = new Map(messages.map((message) => [message.id, message]));
+  const overrides = new Map(textOverrides?.map((override) => [override.messageId, override.text]));
   return messages
     .filter((m) => (m.kind === "text" && m.text) || (m.kind === "digest" && m.digest) || m.roomRequest?.phase === "result")
     .slice(-GROUP_CONTEXT_MESSAGES)
@@ -9933,7 +9938,8 @@ function serializeRoomContext(
         // turns. Resolve from the existing bounded store and recheck access.
         return teammateReportContext(m.roomRequest.id, readerBotId);
       }
-      const rendered = textOverride?.messageId === m.id ? { ...m, text: textOverride.text } : m;
+      const overridden = overrides.get(m.id);
+      const rendered = overridden !== undefined ? { ...m, text: overridden } : m;
       // a bot's name is quoted on the speaker line, so it gets one line; a
       // user line that came through the API says so, since the reader would
       // otherwise take it for the person typing
@@ -10115,19 +10121,42 @@ async function runGroupMemberTurn(
   const latestUser = [...store.activePath(threadId)].reverse().find(
     (message) => message.role === "user" && message.kind === "text" && message.text,
   );
-  const resolvedLatestImages = latestUser?.text && !cardContinuation
+  const usesNativeImageInput = instance.adapter.capabilities.nativeImageInput === true;
+  // M2: a drained room turn runs one sender's whole burst as ONE turn, so
+  // every burst line must reach the responder the way its own turn would
+  // have carried it — attachments extracted natively, their tags stripped
+  // from the rendered context. Recover the burst by the queueIds recorded
+  // on the operation, not by position: the last line alone is not the burst.
+  const burstIds = new Set(operation?.queuedQueueIds ?? []);
+  const burstOverrides: Array<{ messageId: string; text: string }> = [];
+  const burstImages: ReturnType<typeof extractTurnImages>["images"] = [];
+  if (usesNativeImageInput && !cardContinuation) {
+    for (const message of store.activePath(threadId)) {
+      if (message.role !== "user" || message.kind !== "text" || !message.text) continue;
+      if (!message.queueId || !burstIds.has(message.queueId)) continue;
+      const resolved = extractTurnImages(message.text);
+      burstOverrides.push({ messageId: message.id, text: resolved.text });
+      burstImages.push(...resolved.images);
+    }
+  }
+  // the latest line is usually the burst's last item: extracting it again
+  // would double-count its attachments and re-strip already-stripped words
+  const latestInBurst = latestUser?.queueId !== undefined && burstIds.has(latestUser.queueId);
+  const resolvedLatestImages = latestUser?.text && !cardContinuation && !latestInBurst
     ? extractTurnImages(latestUser.text)
     : { text: latestUser?.text ?? "", images: [] };
-  const usesNativeImageInput = instance.adapter.capabilities.nativeImageInput === true;
   const roomContext = serializeRoomContext(
     threadId,
     userName,
     usesNativeImageInput && latestUser
-      ? { messageId: latestUser.id, text: resolvedLatestImages.text }
+      ? [
+          ...burstOverrides,
+          ...(latestInBurst ? [] : [{ messageId: latestUser.id, text: resolvedLatestImages.text }]),
+        ]
       : undefined,
     bot.id,
   );
-  const turnImages = usesNativeImageInput ? resolvedLatestImages.images : [];
+  const turnImages = usesNativeImageInput ? [...burstImages, ...resolvedLatestImages.images] : [];
   const skills = availableSkills();
   const selectedSkills = mergeSkills(
     selectBundledSkills(
@@ -11402,6 +11431,11 @@ function startGroupTurn(
     threadId,
     goalCoordinator ? [] : responders.map((responder) => responder.id),
   );
+  if (queuedGroup && queuedGroup.length > 0) {
+    // member turns use these stable ids to carry every burst line's words
+    // and attachments through the turn that swallowed the burst
+    operation.queuedQueueIds = queuedGroup.map((item) => item.id);
+  }
   if (goalCoordinator) {
     const runId = options.goalRunId?.trim() || `goal-${Date.now().toString(36)}-${randomUUID()}`;
     const startedAt = Date.now();
