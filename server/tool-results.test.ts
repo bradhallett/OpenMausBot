@@ -114,7 +114,11 @@ describe("durable spill for triaged results", () => {
     const results = new ToolResults(() => now, { durableDir });
     const saved = results.save(spillOwner, "x".repeat(30_000), false, true);
     const file = join(durableDir, "thread-durable", `${saved.id}.json`);
-    expect(statSync(file).mode & 0o777).toBe(0o600);
+    // Windows collapses permission bits to a read-only flag (a writable file
+    // reports 0o666), so the exact 0600 contract is asserted where the
+    // filesystem honors POSIX modes; there, the spill simply has to exist.
+    if (process.platform === "win32") expect(() => statSync(file)).not.toThrow();
+    else expect(statSync(file).mode & 0o777).toBe(0o600);
     expect(new ToolResults().save(spillOwner, "x".repeat(30_000), false, true).id).toMatch(/^r-/);
     expect(new ToolResults(() => now + TOOL_RESULT_TTL_MS + 1).read(spillOwner, saved.id, 0)).toBeNull();
   });
