@@ -19,7 +19,12 @@ async function main(): Promise<number> {
   const args = process.argv.slice(2);
   if (args.includes("--help") || args.includes("-h")) {
     console.log("usage: pnpm eval [--scenario <id>]... [--out <dir>]");
+    console.log("       pnpm eval --golden [--scenario <id>]... [--update-baseline]  # tier 2: replay + trace baselines");
     return 0;
+  }
+  if (args.includes("--golden")) {
+    const { runGoldenCli } = await import("../golden/run-golden-cli.ts");
+    return runGoldenCli(args.filter((arg) => arg !== "--golden"));
   }
   const wanted = new Set<string>();
   for (let index = 0; index < args.length; index += 1) {
