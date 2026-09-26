@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +15,7 @@ import {
   type RoutineRun,
   type RoutineSchedule,
 } from "./routines.ts";
+import type { ScriptedRoutineScript, ScriptedRunOutcome } from "./routine-sandbox.ts";
 
 const dirs: string[] = [];
 
@@ -2976,5 +2978,205 @@ describe("routine runs × turn-held BoxAgent asks", () => {
       await instance.dispose();
       restoreFetch();
     }
+  });
+});
+
+describe("scripted routines (D2 sandbox)", () => {
+  const start = Date.parse("2026-09-13T08:00:00Z");
+  const input = () => ({
+    name: "Scripted probe",
+    prompt: "Prompt unused by scripted runs",
+    botId: "maus-1",
+    schedule: { type: "interval" as const, everyMinutes: 5, anchorAt: start },
+  });
+
+  function makeValidScript(): ScriptedRoutineScript {
+    const source = "return 1;";
+    return { source, version: createHash("sha256").update(source, "utf8").digest("hex"), reviewState: "approved" };
+  }
+
+  function okOutcome(scriptVersion: string): ScriptedRunOutcome {
+    return {
+      ok: true,
+      value: { n: 1 },
+      logs: [],
+      warnings: [],
+      logTruncated: false,
+      exitCode: 0,
+      durationMs: 5,
+      scriptVersion,
+      deterministic: true,
+    };
+  }
+
+  function scriptOnDisk(h: ReturnType<typeof harness>, script: unknown): void {
+    const disk = JSON.parse(readFileSync(h.options.file!, "utf8")) as { routines: Array<{ script?: unknown }> };
+    disk.routines[0]!.script = script;
+    writeFileSync(h.options.file!, JSON.stringify(disk));
+  }
+
+  it("dispatches to the bot turn path when the flag is off, even with a script on disk", async () => {
+    const h = harness(start);
+    const routine = h.manager.create(input());
+    scriptOnDisk(h, makeValidScript());
+    const manager = new RoutineManager(h.options);
+    h.setNow(routine.nextRunAt!);
+    await manager.tick();
+    expect(h.started).toHaveLength(1);
+    const run = manager.listRuns()[0]!;
+    expect(run.threadId).toBe("thread-1");
+    expect(run.exitCode).toBeUndefined();
+    expect(run.durationMs).toBeUndefined();
+    expect(run.scriptVersion).toBeUndefined();
+    expect(run.deterministic).toBeUndefined();
+    expect(run.result).toBeUndefined();
+    expect(run.warnings).toBeUndefined();
+    expect(run.failure).toBeUndefined();
+  });
+
+  it("executes a reviewed script with no task, no thread, and a full receipt", async () => {
+    const h = harness(start);
+    const routine = h.manager.create(input());
+    const script = makeValidScript();
+    scriptOnDisk(h, script);
+    h.options.runScripted = async () => okOutcome(script.version);
+    const manager = new RoutineManager(h.options);
+    h.setNow(routine.nextRunAt!);
+    await manager.tick();
+    expect(h.started).toHaveLength(0);
+    expect(h.taskActivations).toHaveLength(0);
+    const run = manager.listRuns()[0]!;
+    expect(run.status).toBe("completed");
+    expect(run.threadId).toBeUndefined();
+    expect(run.exitCode).toBe(0);
+    expect(run.durationMs).toBe(5);
+    expect(run.scriptVersion).toBe(script.version);
+    expect(run.deterministic).toBe(true);
+    expect(run.result).toEqual({ n: 1 });
+    expect(run.output).toBe(JSON.stringify({ n: 1 }, null, 2));
+    const disk = JSON.parse(readFileSync(h.options.file!, "utf8")) as { runs: Array<{ status?: string; scriptVersion?: string }> };
+    expect(disk.runs[0]).toMatchObject({ status: "completed", scriptVersion: script.version });
+  });
+
+  it("fails the run with a receipt-shaped error and warnings", async () => {
+    const h = harness(start);
+    const routine = h.manager.create(input());
+    const script = makeValidScript();
+    scriptOnDisk(h, script);
+    h.options.runScripted = async () => ({
+      ok: false,
+      logs: [],
+      warnings: ["optional fetch denied: fixture"],
+      logTruncated: false,
+      exitCode: null,
+      durationMs: 3,
+      scriptVersion: script.version,
+      deterministic: true,
+      failure: { kind: "policy_violation", detail: "host is not in the reviewed network allowlist: evil.test", deniedHost: "evil.test" },
+    });
+    const manager = new RoutineManager(h.options);
+    h.setNow(routine.nextRunAt!);
+    await manager.tick();
+    expect(h.started).toHaveLength(0);
+    expect(h.failed).toHaveLength(1);
+    const run = manager.listRuns()[0]!;
+    expect(run.status).toBe("failed");
+    expect(run.error).toContain("[policy_violation]");
+    expect(run.error).toContain("denied host: evil.test");
+    expect(run.warnings).toEqual(["optional fetch denied: fixture"]);
+    expect(run.failure).toEqual({ kind: "policy_violation", detail: "host is not in the reviewed network allowlist: evil.test", deniedHost: "evil.test" });
+  });
+
+  it("contains a throwing runScripted as a host_error failure", async () => {
+    const h = harness(start);
+    const routine = h.manager.create(input());
+    scriptOnDisk(h, makeValidScript());
+    h.options.runScripted = async () => { throw new Error("sandbox exploded"); };
+    const manager = new RoutineManager(h.options);
+    h.setNow(routine.nextRunAt!);
+    await manager.tick();
+    expect(h.started).toHaveLength(0);
+    expect(h.failed).toHaveLength(1);
+    const run = manager.listRuns()[0]!;
+    expect(run.status).toBe("failed");
+    expect(run.error).toContain("host_error");
+    expect(run.error).toContain("sandbox exploded");
+    expect(run.failure?.kind).toBe("crash");
+  });
+
+  it("defensively drops an invalid stored script and falls back to the turn path", async () => {
+    const h = harness(start);
+    const routine = h.manager.create(input());
+    scriptOnDisk(h, { source: "return 1;", version: "bad" });
+    const calls: number[] = [];
+    h.options.runScripted = async () => {
+      calls.push(1);
+      throw new Error("must not run");
+    };
+    const manager = new RoutineManager(h.options);
+    h.setNow(routine.nextRunAt!);
+    await manager.tick();
+    expect(h.started).toHaveLength(1);
+    expect(calls).toHaveLength(0);
+    expect(manager.listRoutines()[0]).not.toHaveProperty("script");
+  });
+
+  it("still defers a queued scheduled run while the target is busy", async () => {
+    const h = harness(start);
+    h.setBot("busy");
+    const routine = h.manager.create(input());
+    scriptOnDisk(h, makeValidScript());
+    let calls = 0;
+    h.options.runScripted = async () => {
+      calls += 1;
+      return okOutcome("v");
+    };
+    const manager = new RoutineManager(h.options);
+    h.setNow(routine.nextRunAt!);
+    await manager.tick();
+    expect(calls).toBe(0);
+    expect(h.started).toHaveLength(0);
+    const deferred = manager.listRuns()[0]!;
+    expect(deferred.status).toBe("queued");
+    expect(deferred.deferredAt).toBe(routine.nextRunAt!);
+    h.setBot("ready");
+    await manager.tick();
+    expect(calls).toBe(1);
+    expect(manager.listRuns()[0]!.status).toBe("completed");
+  });
+
+  it("dispatches a manual run only after the in-flight scripted run settles", { timeout: 10_000 }, async () => {
+    const h = harness(start);
+    const routine = h.manager.create(input());
+    const script = makeValidScript();
+    scriptOnDisk(h, script);
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const order: string[] = [];
+    h.options.runScripted = async (run) => {
+      if (run.manual) {
+        order.push("manual");
+        return okOutcome(script.version);
+      }
+      await gate;
+      order.push("scheduled");
+      return okOutcome(script.version);
+    };
+    const manager = new RoutineManager(h.options);
+    h.setNow(routine.nextRunAt!);
+    const ticking = manager.tick();
+    await new Promise((resolve) => setImmediate(resolve));
+    const manual = manager.runNow(routine.id);
+    expect(manual?.status).toBe("queued");
+    const scheduled = manager.listRuns().find((candidate) => !candidate.manual)!;
+    expect(scheduled.status).toBe("running");
+    release();
+    await ticking;
+    await manager.tick();
+    expect(manager.listRuns().map((candidate) => candidate.status).sort()).toEqual(["completed", "completed"]);
+    expect(order).toEqual(["scheduled", "manual"]);
+    expect(h.started).toHaveLength(0);
   });
 });
