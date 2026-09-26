@@ -327,4 +327,68 @@ describe("aside-queue module", () => {
       chatFollowups("aside").filter((row) => row.threadId === bot.threadId && row.status === "pending"),
     ).toHaveLength(2);
   });
+
+  it("withdraws an in-flight batch when a Stop lands mid-seam and the seam refuses", async () => {
+    const bot = fakeBot("bot-midawait-source-stop", "thread-midawait-source-stop", true);
+    const store = fakeStore([bot]);
+    const queued = queue(bot, "words already inside the seam");
+    let refuse!: () => void;
+    const inject = vi.fn().mockImplementation(() => new Promise((resolve) => {
+      refuse = () => resolve("refused");
+    }));
+    const attempt = attemptAsideInjection(store, bot.id, bot.threadId, inject);
+    expect(inject).toHaveBeenCalled();
+    // Stop pressed on the sending conversation while the seam is awaited:
+    // the words left the shared queue, but the withdrawal must still reach
+    // them instead of letting the refusal bring them back as pending.
+    cancelAsidesFromSource("source-thread");
+    refuse();
+    await expect(attempt).resolves.toEqual({ delivered: false, count: 1 });
+    expect(pendingAsides(bot.id, bot.threadId)).toEqual([]);
+    const rows = chatFollowups("aside").filter((row) => row.id === queued.id);
+    expect(rows.some((row) => row.status === "cancelled")).toBe(true);
+    expect(rows.some((row) => row.status === "pending")).toBe(false);
+  });
+
+  it("a mid-seam Stop withdraws only its own words from an in-flight batch", async () => {
+    const bot = fakeBot("bot-midawait-partial", "thread-midawait-partial", true);
+    const store = fakeStore([bot]);
+    const planner = queue(bot, "planner words", "Planner", "planner-thread");
+    const reviewer = queue(bot, "reviewer words", "Reviewer", "reviewer-thread");
+    let refuse!: () => void;
+    const inject = vi.fn().mockImplementation(() => new Promise((resolve) => {
+      refuse = () => resolve("refused");
+    }));
+    const attempt = attemptAsideInjection(store, bot.id, bot.threadId, inject);
+    cancelAsidesFromSource("planner-thread");
+    refuse();
+    await expect(attempt).resolves.toEqual({ delivered: false, count: 2 });
+    // The untouched sender keeps its place; only the withdrawn source's
+    // words retire.
+    expect(pendingAsides(bot.id, bot.threadId).map((item) => item.messageId)).toEqual([reviewer.id]);
+    const rows = chatFollowups("aside");
+    expect(rows.some((row) => row.id === planner.id && row.status === "cancelled")).toBe(true);
+    expect(rows.some((row) => row.id === reviewer.id && row.status === "pending")).toBe(true);
+  });
+
+  it("keeps a refused batch out of a lane a later send recreated after a Stop", async () => {
+    const bot = fakeBot("bot-midawait-relane", "thread-midawait-relane", true);
+    const store = fakeStore([bot]);
+    const old = queue(bot, "old words");
+    let refuse!: () => void;
+    const inject = vi.fn().mockImplementation(() => new Promise((resolve) => {
+      refuse = () => resolve("refused");
+    }));
+    const attempt = attemptAsideInjection(store, bot.id, bot.threadId, inject);
+    cancelAsides(bot.threadId); // Stop on the target conversation itself
+    const fresh = queue(bot, "fresh words", "Reviewer", "reviewer-thread"); // a new send rebuilds the lane mid-await
+    refuse();
+    await expect(attempt).resolves.toEqual({ delivered: false, count: 1 });
+    // The stopped conversation's batch retires with it; only the send that
+    // arrived after the Stop keeps waiting.
+    expect(pendingAsides(bot.id, bot.threadId).map((item) => item.messageId)).toEqual([fresh.id]);
+    const rows = chatFollowups("aside");
+    expect(rows.some((row) => row.id === old.id && row.status === "cancelled")).toBe(true);
+    expect(rows.some((row) => row.id === fresh.id && row.status === "pending")).toBe(true);
+  });
 });

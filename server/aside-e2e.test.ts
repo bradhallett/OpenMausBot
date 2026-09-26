@@ -414,6 +414,42 @@ posixOnly("peer aside lane e2e", () => {
   );
 
   it(
+    "retires a queued aside at the drain boundary when its sender was archived before delivery",
+    async () => {
+      await hideOtherBots();
+      const helper = await makeBot("Helper", "claudePark");
+      const parker = await makeBot("Parker", "grokPark");
+      const queuer = await makeBot("Archiving", "grokAside");
+      await parkQueuedAside(helper, parker, queuer);
+
+      // The sender is archived while its words still wait in the lane: an
+      // archived bot no longer reaches anyone, so its queued peer context
+      // must retire at the next boundary instead of delivering.
+      expect((await api("PATCH", `/api/bots/${queuer.id}`, { hidden: true })).status).toBe(200);
+      writeFileSync(parkSteerGate, "open");
+      await waitUntil(
+        async () => (await threadLines(helper.threadId)).some((m) => m.aside === true),
+        20_000,
+        "parked aside never folded in",
+      );
+      writeFileSync(parkFinishGate, "finish");
+      await waitUntil(async () => (await getBot(helper.id))?.busy === false, 20_000, "helper turn never settled");
+
+      const lines = await threadLines(helper.threadId);
+      expect(lines.filter((m) => m.aside === true)).toHaveLength(1); // Parker's only
+      expect(lines.some((m) => m.text?.includes(ASIDE_TEXT))).toBe(false);
+      const rows = journal().filter((row) => row.thread_id === helper.threadId);
+      expect(rows.some((row) => row.status === "cancelled")).toBe(true);
+      expect(rows.some((row) => row.status === "pending")).toBe(false);
+      // and no follow-up turn started afterwards either
+      await new Promise((r) => setTimeout(r, 1_500));
+      expect((await getBot(helper.id))?.busy).toBe(false);
+      expect((await threadLines(helper.threadId)).filter((m) => m.aside === true)).toHaveLength(1);
+    },
+    60_000,
+  );
+
+  it(
     "revalidates restored asides after a crash: a deleted sender's row retires instead of replaying",
     async () => {
       await hideOtherBots();

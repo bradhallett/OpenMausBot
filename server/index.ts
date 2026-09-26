@@ -7237,14 +7237,15 @@ function drainQueuedSends() {
  * gives queued person messages. */
 function asideStillDeliverable(item: AsideItem, targetBotId: string): boolean {
   // The admission that let the aside in, re-checked at delivery time: the
-  // sender still exists, still reaches the target (section, audience,
-  // allowlist, not hidden), the source conversation is still the sender's,
-  // and the comms do not now require a fresh approval card. A row that
-  // fails retires cancelled — queued peer words must not outlive the
-  // grants that admitted them. Rows written before fromThreadId existed
-  // fall back to the sender's current main thread for the source legs.
+  // sender still exists and is not archived, still reaches the target
+  // (section, audience, allowlist, not hidden), the source conversation is
+  // still the sender's, and the comms do not now require a fresh approval
+  // card. A row that fails retires cancelled — queued peer words must not
+  // outlive the grants that admitted them. Rows written before
+  // fromThreadId existed fall back to the sender's current main thread for
+  // the source legs.
   const from = store.bot(item.aside.fromBotId);
-  if (!from) return false;
+  if (!from || from.hidden) return false;
   const target = store.bot(targetBotId);
   if (!target || target.hidden || !canAccessTeam(from, target.section) || !peerAllowed(from, target)) return false;
   const sourceThreadId = item.aside.fromThreadId ?? from.threadId;
