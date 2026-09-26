@@ -262,10 +262,23 @@ export class ModelRequestService {
       return { claimed: true, state: "invalid", error: "This model request belongs to another conversation", status: 403 };
     }
     if (card.answered) return { claimed: true, state: "already_settled", behavior: card.answered };
+    // Cross-bot cards re-check authority on every allow, before any settle
+    // path can run: a proposer who lost Chief rights must not confirm, even
+    // when the requested selection is already live. Card level, not inside
+    // the try, so the crash-recovery catch cannot recast a refusal as an
+    // applied change.
+    if (args.behavior === "allow" && payload.targetBotId !== payload.botId && this.validateTarget) {
+      const refusal = this.validateTarget(payload.botId, payload.targetBotId);
+      if (refusal) return { claimed: true, state: "invalid", error: refusal, status: 404 };
+    }
 
     try {
       const target = this.store.bot(payload.targetBotId);
       if (!target) throw new ModelRequestError(NO_SUCH_BOT, 404);
+      if (args.behavior === "deny") {
+        this.store.patchMessage(args.threadId, message.id, { card: { ...card, answered: "deny", held: undefined } });
+        return { claimed: true, state: "denied" };
+      }
       // Idempotent close: if the exact requested selection is already the
       // default (a crash after apply, or the same change arriving twice),
       // settle the card without mutating anything again.
@@ -275,15 +288,6 @@ export class ModelRequestService {
         });
         if (!settled) throw new ModelRequestError("This model confirmation card is no longer available", 409);
         return { claimed: true, state: "already_settled", behavior: "allow" };
-      }
-      if (args.behavior === "deny") {
-        this.store.patchMessage(args.threadId, message.id, { card: { ...card, answered: "deny", held: undefined } });
-        return { claimed: true, state: "denied" };
-      }
-      const crossBot = payload.targetBotId !== payload.botId;
-      if (crossBot && this.validateTarget) {
-        const refusal = this.validateTarget(payload.botId, payload.targetBotId);
-        if (refusal) throw new ModelRequestError(refusal, 404);
       }
       if (!sameSelection(payload.before, target.modelSelection)) {
         throw new ModelRequestError(STALE, 409);

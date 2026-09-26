@@ -1836,6 +1836,17 @@ describe("agents-proxy MCP surface", () => {
     expect(lastModelRequestBody).toBeNull();
   });
 
+  it("propose_model refuses wrong-typed effort or variant without calling the harness", async () => {
+    lastModelRequestBody = null;
+    const res = await callTool("propose_model", {
+      model_selection: { instanceId: "codex", model: "gpt-5", effort: 123, variant: "   " },
+      reason: "asked",
+    });
+    expect(res.result.isError).toBe(true);
+    expect(res.result.content[0].text).toContain("effort and variant must be non-empty strings");
+    expect(lastModelRequestBody).toBeNull();
+  });
+
   it("rejects unknown tools with -32602", async () => {
     const res = await rpc("tools/call", { name: "made_up", arguments: {} });
     expect(res.error.code).toBe(-32602);

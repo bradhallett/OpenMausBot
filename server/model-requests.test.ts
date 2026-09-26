@@ -176,6 +176,41 @@ describe("ModelRequestService", () => {
     expect(store.applied).toHaveLength(0);
   });
 
+  it("re-checks cross-bot authority before the idempotent close", () => {
+    const store = new MemoryStore();
+    const chief = addBot(store, "Clive");
+    const peer = addBot(store, "Ada");
+    let refuse: string | null = null;
+    const validateTarget = vi.fn(() => refuse);
+    const service = new ModelRequestService({ store, validateTarget });
+    const proposal = service.propose({
+      botId: chief.id, threadId: chief.threadId, targetBotId: peer.id,
+      selection: { instanceId: "codex", model: "gpt-fixture" }, reason: "asked",
+    });
+    peer.modelSelection = { instanceId: "codex", model: "gpt-fixture" };
+    refuse = "that bot is not in a team this Chief is allowed to manage";
+    const result = service.resolve({ botId: chief.id, threadId: chief.threadId, requestId: proposal.requestId, behavior: "allow" });
+    expect(validateTarget).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ claimed: true, state: "invalid", status: 404 });
+    expect(store.messagesFor(chief.threadId)[0].card?.answered).toBeFalsy();
+    expect(store.applied).toHaveLength(0);
+  });
+
+  it("records a cancel even when the requested selection is already live", () => {
+    const store = new MemoryStore();
+    const bot = addBot(store, "Scout");
+    const service = new ModelRequestService({ store });
+    const proposal = service.propose({
+      botId: bot.id, threadId: bot.threadId,
+      selection: { instanceId: "codex", model: "gpt-fixture" }, reason: "asked",
+    });
+    bot.modelSelection = { instanceId: "codex", model: "gpt-fixture" };
+    const result = service.resolve({ botId: bot.id, threadId: bot.threadId, requestId: proposal.requestId, behavior: "deny" });
+    expect(result).toMatchObject({ claimed: true, state: "denied" });
+    expect(store.messagesFor(bot.threadId)[0].card?.answered).toBe("deny");
+    expect(store.applied).toHaveLength(0);
+  });
+
   it("rejects no-op, malformed and unattributable proposals", () => {
     const store = new MemoryStore();
     const bot = addBot(store, "Scout");
