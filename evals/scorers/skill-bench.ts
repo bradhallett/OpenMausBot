@@ -57,41 +57,46 @@ function armSummary(runs: SkillBenchArmRun[]): SkillBenchArmSummary {
 /** An assertion is non-discriminating when its pass rate is identical in
  * both arms: it pins something true regardless of the skill, so it cannot
  * attribute any change to the skill under test. Such assertions are still
- * useful as controls; the flag keeps them out of the effect story. */
+ * useful as controls; the flag keeps them out of the effect story.
+ * Deltas are computed per prompt from each run's own assertion list, so
+ * prompts may assert different things without bleeding into each other. */
 function assertionDeltas(bench: SkillBenchFixture, runs: SkillBenchArmRun[]): SkillBenchAssertionDelta[] {
-  const template = bench.prompts[0]?.assertions ?? [];
-  return template.map((assertion, index) => {
-    const withRuns = runs.filter((run) => run.arm === "with");
-    const withoutRuns = runs.filter((run) => run.arm === "without");
-    const withPasses = withRuns.filter((run) => run.result.assertions[index]?.pass === true).length;
-    const withoutPasses = withoutRuns.filter((run) => run.result.assertions[index]?.pass === true).length;
-    const withRate = withRuns.length === 0 ? 0 : withPasses / withRuns.length;
-    const withoutRate = withoutRuns.length === 0 ? 0 : withoutPasses / withoutRuns.length;
-    // High variance: within one prompt and arm, replicates of the same
+  const deltas: SkillBenchAssertionDelta[] = [];
+  for (const prompt of bench.prompts) {
+    const promptRuns = runs.filter((run) => run.promptId === prompt.id);
+    prompt.assertions.forEach((assertion, index) => {
+      const withRuns = promptRuns.filter((run) => run.arm === "with");
+      const withoutRuns = promptRuns.filter((run) => run.arm === "without");
+      const withPasses = withRuns.filter((run) => run.result.assertions[index]?.pass === true).length;
+      const withoutPasses = withoutRuns.filter((run) => run.result.assertions[index]?.pass === true).length;
+      const withRate = withRuns.length === 0 ? 0 : withPasses / withRuns.length;
+      const withoutRate = withoutRuns.length === 0 ? 0 : withoutPasses / withoutRuns.length;
+      // High variance: within this prompt and arm, replicates of the same
       // run disagree about this assertion. Only assessable with n >= 2.
-    let highVariance = false;
-    for (const prompt of bench.prompts) {
+      let highVariance = false;
       for (const arm of ["with", "without"] as const) {
-        const group = runs.filter((run) => run.promptId === prompt.id && run.arm === arm);
+        const group = promptRuns.filter((run) => run.arm === arm);
         const verdicts = new Set(group.map((run) => run.result.assertions[index]?.pass === true));
         if (group.length >= 2 && verdicts.size > 1) highVariance = true;
       }
-    }
-    const label = "#" + index + " " + assertion.kind + ("bot" in assertion ? " (" + assertion.bot + ")" : "");
-    return {
-      index,
-      label,
-      withPasses,
-      withoutPasses,
-      withRuns: withRuns.length,
-      withoutRuns: withoutRuns.length,
-      withRate,
-      withoutRate,
-      delta: withRate - withoutRate,
-      nonDiscriminating: withRate === withoutRate,
-      highVariance,
-    };
-  });
+      const label = "#" + index + " " + assertion.kind + ("bot" in assertion ? " (" + assertion.bot + ")" : "");
+      deltas.push({
+        promptId: prompt.id,
+        index,
+        label,
+        withPasses,
+        withoutPasses,
+        withRuns: withRuns.length,
+        withoutRuns: withoutRuns.length,
+        withRate,
+        withoutRate,
+        delta: withRate - withoutRate,
+        nonDiscriminating: withRate === withoutRate,
+        highVariance,
+      });
+    });
+  }
+  return deltas;
 }
 
 export function scoreSkillBench(bench: SkillBenchFixture, runs: SkillBenchArmRun[]): SkillBenchReport {

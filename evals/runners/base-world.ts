@@ -140,7 +140,7 @@ export abstract class BaseWorld {
         return "gate " + step.gate + " open";
       }
       case "installSkill": {
-        // Both worlds pass gatesDir = <dataRoot>/eval-gates, so its parent
+        // Every world passes gatesDir = <dataRoot>/eval-gates, so its parent
         // is the server's OMB_DATA_DIR; skills/ under it is exactly where
         // the server hot-loads user skills on every turn.
         const root = join(dirname(this.gatesDir), "skills", step.skill.id);

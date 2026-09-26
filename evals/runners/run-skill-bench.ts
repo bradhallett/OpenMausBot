@@ -20,7 +20,7 @@ import { runScenario } from "./run-scenario.ts";
  * scripted follower behavior; real models are out of scope. */
 
 const BENCHES_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "skill-bench", "fixtures");
-const DEFAULT_OUT = join(dirname(fileURLToPath(import.meta.url)), "..", "reports", "runs");
+export const DEFAULT_OUT = join(dirname(fileURLToPath(import.meta.url)), "..", "reports", "runs");
 
 export const skillBenchSchema = z.object({
   id: z.string(),
@@ -68,6 +68,7 @@ export interface SkillBenchArmSummary {
 }
 
 export interface SkillBenchAssertionDelta {
+  promptId: string;
   index: number;
   label: string;
   withPasses: number;
@@ -196,7 +197,7 @@ export function renderSkillBenchMarkdown(report: SkillBenchReport): string {
   for (const assertion of report.assertions) {
     const tag = assertion.highVariance ? "high-variance" : assertion.nonDiscriminating ? "non-discriminating" : "discriminating";
     lines.push(
-      "- [" + tag + "] " + (assertion.delta >= 0 ? "+" : "") + round(assertion.delta, 2) + " " + assertion.label +
+      "- [" + tag + "] " + (assertion.delta >= 0 ? "+" : "") + round(assertion.delta, 2) + " " + assertion.promptId + " " + assertion.label +
         " (with " + assertion.withPasses + "/" + assertion.withRuns + ", without " + assertion.withoutPasses + "/" + assertion.withoutRuns + ")",
     );
   }
@@ -228,23 +229,49 @@ export function writeSkillBenchReport(outDir: string, report: SkillBenchReport, 
   return { json, markdown };
 }
 
+/** Parsed CLI state for the bench runner. Kept pure so the validation
+ * contract — every flag consumes its value, and --replicates must be a
+ * positive integer — is testable without spawning the runner. */
+export interface SkillBenchCliOptions {
+  wanted: Set<string>;
+  replicates: number | undefined;
+  outDir: string;
+}
+
+export type ParsedSkillBenchArgs = { ok: true; options: SkillBenchCliOptions } | { ok: false; error: string };
+
+export function parseSkillBenchArgs(args: string[]): ParsedSkillBenchArgs {
+  const wanted = new Set<string>();
+  let replicates: number | undefined;
+  let outDir = DEFAULT_OUT;
+  for (let index = 0; index < args.length; index += 1) {
+    const flag = args[index]!;
+    if (flag !== "--fixture" && flag !== "--replicates" && flag !== "--out") continue;
+    const value = args[index + 1];
+    if (value === undefined) return { ok: false, error: flag + " requires a value" };
+    if (flag === "--fixture") wanted.add(value);
+    else if (flag === "--replicates") replicates = Number(value);
+    else outDir = value;
+    index += 1;
+  }
+  if (replicates !== undefined && (!Number.isInteger(replicates) || replicates < 1)) {
+    return { ok: false, error: "--replicates must be a positive integer" };
+  }
+  return { ok: true, options: { wanted, replicates, outDir } };
+}
+
 async function main(): Promise<number> {
   const args = process.argv.slice(2);
   if (args.includes("--help") || args.includes("-h")) {
     console.log("usage: node --experimental-strip-types evals/runners/run-skill-bench.ts [--fixture <id>]... [--replicates <n>] [--out <dir>]");
     return 0;
   }
-  const wanted = new Set<string>();
-  let replicates: number | undefined;
-  let outDir = DEFAULT_OUT;
-  for (let index = 0; index < args.length; index += 1) {
-    if (args[index] === "--fixture") wanted.add(args[index + 1] ?? "");
-    if (args[index] === "--replicates") replicates = Number(args[index + 1]);
-    if (args[index] === "--out") {
-      outDir = args[index + 1] ?? DEFAULT_OUT;
-      index += 1;
-    }
+  const parsed = parseSkillBenchArgs(args);
+  if (!parsed.ok) {
+    console.error(parsed.error);
+    return 2;
   }
+  const { wanted, replicates, outDir } = parsed.options;
   const all = loadSkillBenches();
   const available = new Set(all.map((bench) => bench.id));
   const missing = [...wanted].filter((id) => !available.has(id));

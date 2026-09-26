@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildArmScenario, loadSkillBenches, runSkillBench } from "./run-skill-bench.ts";
+import { buildArmScenario, DEFAULT_OUT, loadSkillBenches, parseSkillBenchArgs, runSkillBench } from "./run-skill-bench.ts";
 
 // The bench is tested by a fixture skill with known outcomes: three
 // prompts where the with-skill arm must pass every assertion and the
@@ -41,14 +41,50 @@ describe("skill bench runner", () => {
     // block, no dispatch, no target turn.
     expect(report.summary.withoutSkill.passRate).toBe(0.25);
 
-    // Deltas: three discriminating assertions at +1, one control at 0.
-    expect(report.assertions.filter((assertion) => assertion.delta === 1)).toHaveLength(3);
-    expect(report.summary.flags.nonDiscriminating).toBe(1);
+    // Deltas: per prompt, three discriminating assertions at +1 and one
+    // control at 0 — nine and three across the three prompts, each labeled
+    // with the prompt it belongs to.
+    expect(report.assertions).toHaveLength(12);
+    expect(report.assertions.filter((assertion) => assertion.delta === 1)).toHaveLength(9);
+    expect(report.summary.flags.nonDiscriminating).toBe(3);
     expect(report.summary.flags.highVariance).toBe(0);
+    expect(new Set(report.assertions.map((assertion) => assertion.promptId))).toEqual(
+      new Set(bench.prompts.map((prompt) => prompt.id)),
+    );
 
     // Measurement surfaces exist; the skill block also costs prompt tokens.
     expect(report.summary.withSkill.durationMeanMs).toBeGreaterThan(0);
     expect(report.summary.withoutSkill.estimatedTokensMean).toBeGreaterThan(0);
     expect(report.summary.withSkill.estimatedTokensMean).toBeGreaterThan(report.summary.withoutSkill.estimatedTokensMean);
   }, 300_000);
+});
+
+describe("parseSkillBenchArgs", () => {
+  it("parses repeated fixtures, replicates, and out together", () => {
+    const parsed = parseSkillBenchArgs(["--fixture", "a", "--fixture", "b", "--replicates", "3", "--out", "/tmp/skill-bench"]);
+    expect(parsed).toEqual({
+      ok: true,
+      options: { wanted: new Set(["a", "b"]), replicates: 3, outDir: "/tmp/skill-bench" },
+    });
+  });
+
+  it("defaults to every fixture, fixture replicates, and the reports dir", () => {
+    const parsed = parseSkillBenchArgs([]);
+    expect(parsed).toEqual({ ok: true, options: { wanted: new Set(), replicates: undefined, outDir: DEFAULT_OUT } });
+  });
+
+  it("rejects replicates that are not positive integers instead of silently running zero", () => {
+    for (const value of ["abc", "", "2.5", "0", "-1", "Infinity"]) {
+      expect(parseSkillBenchArgs(["--replicates", value])).toEqual({
+        ok: false,
+        error: "--replicates must be a positive integer",
+      });
+    }
+  });
+
+  it("rejects flags without a value", () => {
+    expect(parseSkillBenchArgs(["--fixture"])).toEqual({ ok: false, error: "--fixture requires a value" });
+    expect(parseSkillBenchArgs(["--replicates"])).toEqual({ ok: false, error: "--replicates requires a value" });
+    expect(parseSkillBenchArgs(["--out"])).toEqual({ ok: false, error: "--out requires a value" });
+  });
 });

@@ -120,9 +120,15 @@ describe("skill bench scorers", () => {
     const report = scoreSkillBench(fixture, runs);
     expect(report.summary.withSkill.passRate).toBe(1);
     expect(report.summary.withoutSkill.passRate).toBe(0.5);
+    expect(report.assertions.map((assertion) => assertion.promptId + " " + assertion.label)).toEqual([
+      "p1 #0 systemPromptIncludes (worker)",
+      "p1 #1 promptIncludes (worker)",
+      "p2 #0 systemPromptIncludes (worker)",
+      "p2 #1 promptIncludes (worker)",
+    ]);
     expect(report.assertions[0]).toMatchObject({ delta: 1, nonDiscriminating: false, highVariance: false });
     expect(report.assertions[1]).toMatchObject({ delta: 0, nonDiscriminating: true });
-    expect(report.summary.flags.nonDiscriminating).toBe(1);
+    expect(report.summary.flags.nonDiscriminating).toBe(2);
     expect(report.errors).toEqual([]);
 
     const errored = fakeResult("boom", [{ kind: "systemPromptIncludes", pass: false }]);
@@ -142,5 +148,46 @@ describe("skill bench scorers", () => {
     expect(report.assertions[0].highVariance).toBe(true);
     expect(report.assertions[1].highVariance).toBe(false);
     expect(report.summary.flags.highVariance).toBe(1);
+  });
+
+  it("scores each prompt against its own assertions without cross-prompt bleed", () => {
+    const mixed = skillBenchSchema.parse({
+      id: "mixed-bench",
+      title: "Mixed bench",
+      behavior: "Prompts assert different things",
+      skill: fixture.skill,
+      subject: { key: "worker", name: "Worker" },
+      prompts: [
+        {
+          id: "only-system",
+          text: "fake prompt one",
+          assertions: [{ kind: "systemPromptIncludes", bot: "worker", turn: 0, includes: "<openmaus-skill" }],
+          withSkill: { turns: [{ reply: "with" }] },
+          withoutSkill: { turns: [{ reply: "without" }] },
+        },
+        {
+          id: "only-prompt",
+          text: "fake prompt two",
+          assertions: [{ kind: "promptIncludes", bot: "worker", turn: 0, includes: "fake" }],
+          withSkill: { turns: [{ reply: "with" }] },
+          withoutSkill: { turns: [{ reply: "without" }] },
+        },
+      ],
+      replicates: 1,
+    });
+    const runs: SkillBenchArmRun[] = [
+      { promptId: "only-system", arm: "with", replicate: 1, result: fakeResult("a", [{ kind: "systemPromptIncludes", pass: true }]) },
+      { promptId: "only-system", arm: "without", replicate: 1, result: fakeResult("b", [{ kind: "systemPromptIncludes", pass: false }]) },
+      { promptId: "only-prompt", arm: "with", replicate: 1, result: fakeResult("c", [{ kind: "promptIncludes", pass: true }]) },
+      { promptId: "only-prompt", arm: "without", replicate: 1, result: fakeResult("d", [{ kind: "promptIncludes", pass: false }]) },
+    ];
+    const report = scoreSkillBench(mixed, runs);
+    // The old scorer mapped every run onto the first prompt's assertion
+    // list: the second prompt's assertion disappeared and its verdicts were
+    // counted under the first prompt's label.
+    expect(report.assertions).toHaveLength(2);
+    expect(report.assertions[0]).toMatchObject({ promptId: "only-system", delta: 1, nonDiscriminating: false });
+    expect(report.assertions[1]).toMatchObject({ promptId: "only-prompt", delta: 1, nonDiscriminating: false });
+    expect(report.assertions.every((assertion) => assertion.withRuns === 1 && assertion.withoutRuns === 1)).toBe(true);
   });
 });
