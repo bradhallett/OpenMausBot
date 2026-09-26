@@ -11,6 +11,7 @@ import {
   asideEnvelope,
   attemptAsideInjection,
   cancelAsides,
+  cancelAsidesFromSource,
   drainAsideMessages,
   pendingAsides,
   queueAsideMessage,
@@ -54,11 +55,12 @@ function fakeStore(bots: BotRecord[]): AsideStore & { byThread: Map<string, Mess
   };
 }
 
-const queue = (bot: BotRecord, text: string, fromName = "Planner") =>
+const queue = (bot: BotRecord, text: string, fromName = "Planner", fromThreadId = "source-thread") =>
   queueAsideMessage(bot.id, bot.threadId, text, {
     fromBotId: `peer-${fromName.toLowerCase()}`,
     fromBotName: fromName,
     commsDepth: 0,
+    fromThreadId,
   });
 
 describe("aside-queue module", () => {
@@ -169,6 +171,70 @@ describe("aside-queue module", () => {
     });
     expect(() => restoreAsideMessages(store)).not.toThrow();
     expect(pendingAsides(bot.id, bot.threadId).map((item) => item.text)).toEqual(["older words"]);
+  });
+
+  it("retires restored rows whose revalidation fails instead of requeueing them", () => {
+    const bot = fakeBot("bot-restore-revalidate", "thread-restore-revalidate", false);
+    const store = fakeStore([bot]);
+    const kept = queue(bot, "still welcome", "Planner");
+    const revoked = queue(bot, "sender lost access", "Reviewer");
+    restoreAsideMessages(store, (item) => item.aside.fromBotName !== "Reviewer");
+    expect(pendingAsides(bot.id, bot.threadId).map((item) => item.messageId)).toEqual([kept.id]);
+    const rows = chatFollowups("aside").filter((row) => row.threadId === bot.threadId);
+    expect(rows.some((row) => row.id === revoked.id && row.status === "cancelled")).toBe(true);
+    expect(rows.some((row) => row.id === revoked.id && row.status === "pending")).toBe(false);
+  });
+
+  it("retires revoked asides at the drain boundary before they can inject or degrade", async () => {
+    const busy = fakeBot("bot-drain-revalidate-busy", "thread-drain-revalidate-busy", true);
+    const idle = fakeBot("bot-drain-revalidate-idle", "thread-drain-revalidate-idle", false);
+    const store = fakeStore([busy, idle]);
+    queue(busy, "revoked while busy", "Reviewer");
+    queue(idle, "revoked while idle", "Reviewer");
+    queue(idle, "still deliverable", "Planner");
+    const inject = vi.fn().mockResolvedValue("steered" as const);
+    const run = vi.fn().mockResolvedValue(undefined);
+    await drainAsideMessages({
+      store, inject, run,
+      revalidate: (item) => item.aside.fromBotName !== "Reviewer",
+    });
+    // the revoked busy-thread aside never reached the seam
+    expect(inject).not.toHaveBeenCalled();
+    expect(_asideCount(busy.threadId)).toBe(0);
+    expect(chatFollowups("aside").some((row) => row.threadId === busy.threadId && row.status === "cancelled")).toBe(true);
+    // the idle lane degraded only its still-valid words into one turn
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]![2]).toBe(asideEnvelope("Planner", "still deliverable"));
+    expect(store.messagesFor(idle.threadId).map((line) => line.text)).toEqual([
+      asideEnvelope("Planner", "still deliverable"),
+    ]);
+  });
+
+  it("keeps a legacy row without a source thread deliverable under revalidation", () => {
+    const bot = fakeBot("bot-legacy-source", "thread-legacy-source", false);
+    const store = fakeStore([bot]);
+    saveChatFollowup({
+      id: "legacy-source-row", kind: "aside", ownerId: bot.id, threadId: bot.threadId,
+      payload: { text: "older words", prompt: asideEnvelope("Planner", "older words") },
+    });
+    restoreAsideMessages(store, (item) => item.aside.fromThreadId === undefined);
+    expect(pendingAsides(bot.id, bot.threadId).map((item) => item.text)).toEqual(["older words"]);
+  });
+
+  it("withdraws queued asides by the conversation that sent them, exactly", async () => {
+    const bot = fakeBot("bot-source-cancel", "thread-source-cancel", true);
+    const other = fakeBot("bot-source-cancel-2", "thread-source-cancel-2", true);
+    const withdrawn = queue(bot, "from the stopped conversation", "Planner", "source-stopped");
+    queue(bot, "from another conversation", "Reviewer", "source-alive");
+    queue(other, "same source, other lane", "Planner", "source-stopped");
+    cancelAsidesFromSource("source-stopped");
+    expect(pendingAsides(bot.id, bot.threadId).map((item) => item.text)).toEqual(["from another conversation"]);
+    expect(_asideCount(other.threadId)).toBe(0);
+    expect(chatFollowups("aside").some((row) => row.id === withdrawn.id && row.status === "cancelled")).toBe(true);
+    // the survivor is still deliverable at the next boundary
+    const inject = vi.fn().mockResolvedValue("steered" as const);
+    await drainAsideMessages({ store: fakeStore([bot]), inject, run: vi.fn() });
+    expect(inject).toHaveBeenCalledWith(bot.id, bot.threadId, asideEnvelope("Reviewer", "from another conversation"));
   });
 
   it("tombstones waiting asides when the bot or task is gone", async () => {
