@@ -1,5 +1,6 @@
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   abortAllScriptedRoutineRuns,
+  BOOTSTRAP_SOURCE,
   CANARY_ENV_ALLOWED,
   deniedRangeFor,
   FramedLineReader,
@@ -119,6 +121,79 @@ describe("scripted routine sandbox runtime", () => {
       } finally {
         if (previous === undefined) delete process.env.NODE_OPTIONS;
         else process.env.NODE_OPTIONS = previous;
+      }
+    });
+
+    it("denies raw sockets in-process without the permission model's network fence", { timeout: 30_000 }, async () => {
+      // CI pins node 24, where --permission does not fence network access;
+      // the bootstrap's own socket fence must hold under plain node too.
+      const dir = mkdtempSync(join(tmpdir(), "omb-sandbox-fence-"));
+      const scriptPath = join(dir, "bootstrap.cjs");
+      writeFileSync(scriptPath, BOOTSTRAP_SOURCE);
+      const child = spawn(process.execPath, [scriptPath], {
+        env: {},
+        stdio: ["pipe", "pipe", "pipe", "pipe"],
+        windowsHide: true,
+      });
+      const stdout = child.stdout;
+      const stderrStream = child.stderr;
+      const stdin = child.stdin;
+      if (stdout === null || stderrStream === null || stdin === null) {
+        child.kill();
+        rmSync(dir, { recursive: true, force: true });
+        throw new Error("spawn did not create the pipes the bootstrap needs");
+      }
+      (child.stdio?.[3] as NodeJS.ReadableStream | null | undefined)?.on?.("data", () => {
+        /* drain the shim channel so a stray frame can never block the child */
+      });
+      let stderrText = "";
+      let settled = false;
+      const firstLine = new Promise<string | null>((resolve) => {
+        let buffered = "";
+        stdout.setEncoding("utf8");
+        stdout.on("data", (chunk: string) => {
+          if (settled) return;
+          buffered += chunk;
+          const newline = buffered.indexOf("\n");
+          if (newline >= 0) {
+            settled = true;
+            resolve(buffered.slice(0, newline));
+          }
+        });
+        stdout.on("end", () => {
+          if (!settled) {
+            settled = true;
+            resolve(null);
+          }
+        });
+      });
+      stderrStream.setEncoding("utf8");
+      stderrStream.on("data", (chunk: string) => {
+        stderrText += chunk;
+      });
+      child.on("error", (error) => {
+        stderrText += String(error);
+      });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        stdin.write(JSON.stringify({ canary: true }) + "\n");
+        const line = await Promise.race([
+          firstLine,
+          new Promise<null>((resolve) => {
+            timer = setTimeout(() => resolve(null), 25_000);
+          }),
+        ]);
+        if (line === null) throw new Error("no result envelope on stdout before the timeout; stderr: " + stderrText);
+        const envelope = JSON.parse(line) as { ok: boolean; value?: { checks?: Record<string, boolean> } };
+        expect(envelope.ok).toBe(true);
+        // Without --permission the fs/spawn denials are legitimately absent;
+        // the socket fence must deny raw network on its own.
+        expect(envelope.value?.checks?.net_denied).toBe(true);
+        expect(envelope.value?.checks?.fetch_denied).toBe(true);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        child.kill();
+        rmSync(dir, { recursive: true, force: true });
       }
     });
   });

@@ -2,9 +2,10 @@
 //
 // Executes a reviewed routine script in a fresh child of the server's own
 // Node binary with the permission model on and zero --allow-* flags. The
-// child's whole world is a fixed bootstrap: neutered process internals, no
-// eval/Function/WebAssembly/dynamic-import, an injected fetch shim that
-// speaks a size-capped framed channel to this host, and a state shim. All
+// child's whole world is a fixed bootstrap: neutered process internals, a
+// socket layer that throws on any raw connect, no eval/Function/
+// WebAssembly/dynamic-import, an injected fetch shim that speaks a
+// size-capped framed channel to this host, and a state shim. All
 // network policy (allowlist, DNS resolution, address-range denial,
 // credentials, budgets, caps) is re-derived here, never trusted from the
 // child. v1 is server-only behind features.scriptedRoutines; the
@@ -467,11 +468,22 @@ const BOOTSTRAP_LINES: readonly string[] = [
   "  var setTimeout_ = globalThis.setTimeout;",
   "  var clearTimeout_ = globalThis.clearTimeout;",
   "  var rawFetch = globalThis.fetch;",
+  "  // Node's permission model fences network only from v25 up; on the",
+  "  // supported floor (24) raw sockets sail straight through --permission",
+  "  // (verified on v24.21.0: the connect goes out). The child never needs a",
+  "  // socket — the host performs every fetch — so every raw connect is an",
+  "  // escape attempt: neuter the socket layer in-process, on every Node.",
+  "  function rawSocketDenied() {",
+  "    var error = new Error_(\"access denied: raw network sockets are neutered in the scripted routine sandbox\");",
+  "    error.code = \"ERR_ACCESS_DENIED\";",
+  "    throw error;",
+  "  }",
+  "  netModule.Socket.prototype.connect = rawSocketDenied;",
   "  // Node loads undici's module graph lazily on the first fetch call, and",
   "  // that graph references the Function global while loading. Warm it now,",
   "  // before neutering, so later rawFetch probes (the canary) cannot die on",
-  "  // the removed intrinsic. The warm-up connects nowhere: the permission",
-  "  // model denies it and the rejection is swallowed.",
+  "  // the removed intrinsic. The warm-up connects nowhere: the socket fence",
+  "  // denies it and the rejection is swallowed.",
   "  try { rawFetch(\"http://127.0.0.1:1\").catch(function () {}); } catch (error) { /* best-effort */ }",
   "  var writeSyncFd = fsModule.writeSync;",
   "  var readFileSyncProbe = fsModule.readFileSync;",
@@ -786,7 +798,13 @@ const BOOTSTRAP_LINES: readonly string[] = [
   "  function probeNet() {",
   "    return new Promise_(function (resolve) {",
   "      var reported = false;",
-  "      var socket = connectProbe(54321, \"127.0.0.1\");",
+  "      var socket;",
+  "      try {",
+  "        socket = connectProbe(54321, \"127.0.0.1\");",
+  "      } catch (error) {",
+  "        resolve({ denied: error && error.code === \"ERR_ACCESS_DENIED\", code: error && error.code ? error.code : \"error\" });",
+  "        return;",
+  "      }",
   "      var report = function (denied, code) {",
   "        if (reported) return;",
   "        reported = true;",
@@ -888,7 +906,10 @@ const BOOTSTRAP_LINES: readonly string[] = [
   "})();",
 ];
 
-const BOOTSTRAP_SOURCE = BOOTSTRAP_LINES.join("\n");
+/** Exported so tests can prove the in-child socket fence holds under
+ * plain node: the permission model fences network only from v25 up and CI
+ * pins node 24, so the fence must not depend on --permission at all. */
+export const BOOTSTRAP_SOURCE = BOOTSTRAP_LINES.join("\n");
 
 interface ScriptedSessionInit {
   manifest: unknown;
@@ -1611,9 +1632,30 @@ const CANARY_CHECK_KEYS: readonly string[] = [
 /** Env keys the child may legitimately carry: TZ is passed through
  * deliberately, and macOS's CoreFoundation runtime injects
  * __CF_USER_TEXT_ENCODING into every process after exec — it is not
- * inherited from the parent and carries no secret. Anything else, an
- * inherited NODE_OPTIONS included, means the env scrub failed. */
-export const CANARY_ENV_ALLOWED = new Set(["TZ", "__CF_USER_TEXT_ENCODING"]);
+ * inherited from the parent and carries no secret. Windows children also
+ * re-acquire the platform's fixed per-process base set regardless of what
+ * the spawn block asked for (CI-verified: none of the runner's hundreds of
+ * GITHUB_* / RUNNER_* variables survive, so the scrub itself holds and the OS
+ * simply reattaches this fixed set). None of them is an option carrier like
+ * NODE_OPTIONS, and PATH is inert here — spawning is denied and the -e
+ * child resolves nothing through it. Anything else still means the env
+ * scrub failed. */
+export const CANARY_ENV_ALLOWED = new Set([
+  "TZ",
+  "__CF_USER_TEXT_ENCODING",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "LOGONSERVER",
+  "PATH",
+  "SYSTEMDRIVE",
+  "SYSTEMROOT",
+  "TEMP",
+  "TMP",
+  "USERDOMAIN",
+  "USERNAME",
+  "USERPROFILE",
+  "WINDIR",
+]);
 
 const CANARY_SCRIPT: ScriptedRoutineScript = {
   source: "",
