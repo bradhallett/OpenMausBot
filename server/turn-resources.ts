@@ -95,6 +95,10 @@ export class TurnResources {
 
   claim(resource: string, owner: TurnOwner): boolean {
     if (this.blocker(resource, owner)) return false;
+    // The holder's every-screen-call re-validation stays a grant once a
+    // waiter queues: the front-of-line rule must not refuse the seat's
+    // current owner (#1652).
+    if (this.owns(resource, owner)) return true;
     // The seat may be free with a waitlist: it is the front waiter's turn.
     // This is what makes a release grant position 1 deterministically — the
     // 100ms polls race, but only the front claim can land (#1652).
