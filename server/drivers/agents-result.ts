@@ -20,7 +20,7 @@ export async function boundedAgentResult(text: string, save: (text: string, trun
     // bytes stay in context exactly as before.
     const summary = typeof saved.summary === "string" ? saved.summary.trim() : "";
     if (summary) {
-      return `${summary}\n\n[OpenMausBot summarized this large tool result: ${fmt(retained.length)} → ${fmt(summary.length)} characters. The redacted original is saved in full${truncated || saved.truncated ? " up to the storage limit" : ""}; read it with tool_result_read id "${saved.id}" and offset 0. A summarized result stays retrievable for this conversation. Do not repeat an action just to retrieve its output.]`;
+      return `${summary}\n\n[OpenMausBot summarized this large tool result: ${fmt(retained.length)} → ${fmt(summary.length)} characters. The redacted original is saved in full${truncated || saved.truncated ? " up to the storage limit" : ""}; read it with tool_result_read id "${saved.id}" and offset 0. A summarized result is cached for one hour; restart or cache pressure can drop it, and its durable copy extends retrieval up to 30 days. Do not repeat an action just to retrieve its output.]`;
     }
     return `${prefix}\n\n[Large tool result: showing the first ${prefix.length} characters. ${truncated || saved.truncated
       ? "Only a bounded portion was retained; the remaining tail was omitted."

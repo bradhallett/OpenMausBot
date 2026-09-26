@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, readdirSync, rmSync, statSync, utimesSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ToolResults, TOOL_RESULT_DURABLE_MS, TOOL_RESULT_MAX_CHARS, TOOL_RESULT_PREVIEW_CHARS, TOOL_RESULT_TTL_MS } from "./tool-results.ts";
+import { shouldTriageResult } from "./tool-triage.ts";
 
 const owner = { botId: "a", threadId: "chat" };
 
@@ -96,6 +97,16 @@ describe("durable spill for triaged results", () => {
     expect(revived?.text.slice(0, 5)).toBe("xxxxx");
     expect(revived?.nextOffset).toBe(TOOL_RESULT_PREVIEW_CHARS);
     expect(revived?.truncated).toBe(false);
+  });
+
+  it("writes nothing under durableDir unless the save qualifies for triage", () => {
+    const results = new ToolResults(Date.now, { durableDir });
+    const qualify = (flagged: boolean, text: string) => shouldTriageResult({ triage: flagged }, text, 6_000);
+    results.save(spillOwner, "x".repeat(24_000), false, qualify(true, "x".repeat(24_000)));
+    results.save(spillOwner, "x".repeat(30_000), false, qualify(false, "x".repeat(30_000)));
+    expect(existsSync(durableDir) ? readdirSync(durableDir) : []).toEqual([]);
+    const saved = results.save(spillOwner, "x".repeat(24_001), false, qualify(true, "x".repeat(24_001)));
+    expect(existsSync(join(durableDir, "thread-durable", `${saved.id}.json`))).toBe(true);
   });
 
   it("re-checks ownership from the spilled record, never the path", () => {

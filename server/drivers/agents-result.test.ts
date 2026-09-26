@@ -50,7 +50,7 @@ it("replaces the preview with a checked summary and points at offset 0", async (
   expect(reply.startsWith(summary)).toBe(true);
   expect(reply).toContain(`OpenMausBot summarized this large tool result: 30,000 → ${summary.length.toLocaleString("en-US")} characters`);
   expect(reply).toContain(`read it with tool_result_read id "${id}" and offset 0`);
-  expect(reply).toContain("A summarized result stays retrievable for this conversation");
+  expect(reply).toContain("A summarized result is cached for one hour; restart or cache pressure can drop it, and its durable copy extends retrieval up to 30 days");
   expect(reply).not.toContain("showing the first");
   expect(reply.length).toBeLessThan(1_000);
 });

@@ -8,7 +8,7 @@ import { writeFileAtomic } from "./atomic.ts";
 import { rm as removeDirectory } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { ToolResults, TOOL_RESULT_MAX_CHARS } from "./tool-results.ts";
-import { overThreshold, triageThreshold, triageToolResult } from "./tool-triage.ts";
+import { shouldTriageResult, triageThreshold, triageToolResult } from "./tool-triage.ts";
 import { extname, join } from "node:path";
 import { authorizeExternalRuntime, externalRuntimeIsActive, type ExternalRuntimeGrant } from "./external-runtime.ts";
 
@@ -13537,10 +13537,13 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           return json(res, 400, { error: "Expected bounded text and an optional truncated boolean." });
         }
         // A triaged save also spills durably: a summarized result's pointer
-        // must outlive the one-hour cache while the conversation lives.
+        // must outlive the one-hour cache. Only a qualifying save spills —
+        // a configured threshold alone must not put under-threshold or
+        // unflagged saves on disk for the retention window.
         const threshold = triageThreshold(cfg.context);
-        const saved = toolResults.save(internalCapability, body.text, body.truncated, threshold !== null);
-        if (body.triage === true && threshold !== null && overThreshold(body.text.length, threshold)) {
+        const shouldTriage = shouldTriageResult(body, body.text, threshold);
+        const saved = toolResults.save(internalCapability, body.text, body.truncated, shouldTriage);
+        if (shouldTriage) {
           // The turn's own engine writes the summary with its tool-free
           // helper, the same first-party seam compaction uses; a refused or
           // failed check answers without a summary and the caller keeps the
