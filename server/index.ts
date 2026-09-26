@@ -150,6 +150,7 @@ import {
   sharedComputersEnabled,
   builtInBrowserEnabled,
   llmThreadTitlesEnabled,
+  computerClaimIdleReleaseEnabled,
   browserProfileReplacementConflict,
   browserProfilePartitionTarget,
   syncCredentialEnv,
@@ -296,6 +297,7 @@ import { Handoffs, handedStateUsable, recordHanded, renderUnseen, sessionStart, 
 import { extractTurnImages } from "./turn-images.ts";
 import { TurnWatchdog } from "./turn-watchdog.ts";
 import { TurnResources, workspaceResource, type TurnOwner } from "./turn-resources.ts";
+import { IdleReleasePolicy } from "./claim-idle.ts";
 import {
   ensureWorkspace,
   ensureTaskWorkspace,
@@ -1763,8 +1765,23 @@ const turnComputerResources = new Map<string, { owner: TurnOwner; resource: stri
 const teamComputerTurns = new Map<string, { owner: TurnOwner; computerId: string; botId: string; remoteAgent: boolean }>();
 const settlingResourceOwners = new Map<string, string>();
 
+/** Idle release for computer claims (#1653), disabled until the feature
+ * flag is on: a seat that stays screen-quiet for the policy's window is
+ * released to waiting turns while its holder's turn still lives, and the
+ * previous holder re-claims directly inside the reclaim window — it
+ * yields once another turn holds the seat. The durable VM profile keeps
+ * its login state, so that re-claim is cheap. Read per claim: a flag
+ * change applies to new claims, never to a seat held under the old
+ * setting. */
+const COMPUTER_CLAIM_IDLE_POLICY = new IdleReleasePolicy();
+
+function computerClaimIdlePolicy(resource: string): IdleReleasePolicy | undefined {
+  return resource.startsWith("computer:") && computerClaimIdleReleaseEnabled(cfg) ? COMPUTER_CLAIM_IDLE_POLICY : undefined;
+}
+
 function claimTurnResource(owner: TurnOwner, resource: string): boolean {
-  if (!turnResources.claim(resource, owner)) return false;
+  const idle = computerClaimIdlePolicy(resource);
+  if (!turnResources.claim(resource, owner, idle ? { idle } : {})) return false;
   turnResourceOwners.set(owner.threadId, owner);
   return true;
 }
@@ -5257,6 +5274,10 @@ async function computerCallGate(internalCapability: InternalCapability) {
     };
   }
   const computer = turnComputerResources.get(internalCapability.threadId);
+  // The screen call arriving here re-claims an idle-released seat directly
+  // (#1653): inside the reclaim window the previous holder picks its seat
+  // back up without re-entering the wait, and the successful claim
+  // restarts the quiet window. A seat another turn holds still refuses.
   if (!snapshot.held && computer && computer.owner.generation === internalCapability.generation &&
       !claimTurnResource(computer.owner, computer.resource)) {
     return {
@@ -5992,8 +6013,17 @@ bus.subscribe((event: RuntimeEvent) => {
         // narrower question, and only the allow-list answers it.
         if (bot) {
           const touches = screenTouchingTool(toolName);
+          const surface = screenSurfaceForTool(toolName);
           if (touches || /computer|screenshot|click|type_text|press_key|scroll|open_url|wait_for|browser_/i.test(toolName)) {
-            pokeScreenPoller(event.threadId, touches, screenSurfaceForTool(toolName));
+            pokeScreenPoller(event.threadId, touches, surface);
+          }
+          // A completed screen-touching computer tool is real screen
+          // activity (#1653): it restarts the idle clock on that turn's
+          // computer claim. The poller's own frames never arrive here, so
+          // they cannot keep a quiet seat held.
+          if (touches && surface === "computer") {
+            const computer = turnComputerResources.get(event.threadId);
+            if (computer) turnResources.activity(computer.resource, computer.owner);
           }
         }
       }

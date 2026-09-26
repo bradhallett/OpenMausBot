@@ -286,8 +286,14 @@ const featureConfigSchema = z.object({
   claudeUserMcp: z.boolean().optional(),
   /** LLM-generated titles for new bot threads. Off until explicitly
    * enabled; a one-shot that fails or answers junk leaves the first-message
-   * snippet in place — see llmThreadTitlesEnabled. */
+  * snippet in place — see llmThreadTitlesEnabled. */
   llmThreadTitles: z.boolean().optional(),
+  /** Idle release for computer claims (#1653): a desktop seat that stays
+   * screen-quiet for 90 seconds is released to waiting turns while its
+   * holder's turn still lives; the previous holder re-claims directly
+   * for 10 minutes and yields to an occupied seat. Off until baked; see
+   * computerClaimIdleReleaseEnabled for how to enable it by hand. */
+  computerClaimIdleRelease: z.boolean().optional(),
 });
 /** First-run progress. Kept in the workspace config rather than a browser so
  * it survives cleared site data and is shared by every paired client. Hint
@@ -515,7 +521,7 @@ export interface AppConfig {
    * separate container, durable workspace, viewer and lease. */
   localVm?: { mode?: "shared" | "per-bot"; maxInstances?: number };
   /** Opt-in product experiments. Every flag defaults to disabled. */
-  features?: { skillAuthoring?: boolean; showToolCalls?: boolean; browser?: boolean; sharedComputers?: boolean; claudeUserMcp?: boolean; llmThreadTitles?: boolean };
+  features?: { skillAuthoring?: boolean; showToolCalls?: boolean; browser?: boolean; sharedComputers?: boolean; claudeUserMcp?: boolean; llmThreadTitles?: boolean; computerClaimIdleRelease?: boolean };
   /** First-run progress; see onboardingConfigSchema. */
   onboarding?: { completedAt?: string; version?: number; reelSeen?: boolean; hintsSeen?: string[] };
   /** Named browser sessions any bot can be pointed at. */
@@ -737,6 +743,18 @@ export function claudeUserMcpEnabled(cfg: AppConfig): boolean {
  * answers anything unusable leaves the snippet untouched. */
 export function llmThreadTitlesEnabled(cfg: AppConfig): boolean {
   return cfg.features?.llmThreadTitles === true;
+}
+
+/** Idle release for computer claims (#1653): a whole-turn desktop hold
+ * ends after a screen-quiet window (default 90 seconds, screen-poller
+ * frames excluded) instead of at turn settle, and the previous holder
+ * re-claims directly inside a reclaim window (default 10 minutes) while
+ * yielding to a seat another turn already holds. Off unless an explicit
+ * `true` — bake it as a maintainer-only flag first, exactly like
+ * sharedComputers: enable by hand in ~/.openmausbot/config.json
+ * (`{"features": {"computerClaimIdleRelease": true}}`) and restart. */
+export function computerClaimIdleReleaseEnabled(cfg: AppConfig): boolean {
+  return cfg.features?.computerClaimIdleRelease === true;
 }
 
 /** Config sections no provider driver reads. A write that touches only
