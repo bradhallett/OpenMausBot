@@ -239,7 +239,7 @@ function nativeLinkDirectory(root: string, relative: string, create: boolean): s
 /** Approval and enablement state stays outside the bot's working directory.
  * The skill text is readable in the workspace; the control record is not a
  * file the agent is expected to edit as part of ordinary work. */
-function skillStateDir(botId: string): string {
+export function skillStateDir(botId: string): string {
   return join(DATA_DIR, "skill-state", botId);
 }
 
@@ -622,6 +622,17 @@ export function readSkillFile(botId: string, name: string): string | null {
       } catch {}
     }
   }
+}
+
+/** The absolute path of a bot's stored SKILL.md, for surfaces that name
+ * where to read a skill (the skill router's pointers). Null under the same
+ * conditions that make readSkillFile return null. */
+export function skillFilePath(botId: string, name: string): string | null {
+  if (!isSkillName(name)) return null;
+  const entry = readManifest(botId)[name];
+  if (!entry) return null;
+  const directory = skillDirectory(botId, name, entry);
+  return directory ? join(directory, "SKILL.md") : null;
 }
 
 /** Install a fetched skill, DISABLED. The caller has already fetched the
