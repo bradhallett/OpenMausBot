@@ -6,7 +6,7 @@
 // update here so the diff says so out loud.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DRAIN_COALESCE_WINDOW_MS } from "./admission.ts";
+import { DRAIN_COALESCE_MAX_ITEMS, DRAIN_COALESCE_WINDOW_MS } from "./admission.ts";
 import {
   _queuedCount,
   drainSteeredMessages,
@@ -14,6 +14,7 @@ import {
   type SteerStore,
 } from "./steer-queue.ts";
 import {
+  type ChannelQueueItem,
   _queuedChannelCount,
   drainChannelMessages,
   headChannelGroup,
@@ -209,6 +210,45 @@ describe("drain coalescing golden (M2)", () => {
     expect(run).toHaveBeenCalledTimes(3);
     expect(run.mock.calls.map((call) => call[0].items.map((item: { text: string }) => item.text)))
       .toEqual([["typed words"], ["programmatic words"], ["a goal"]]);
+    expect(_queuedChannelCount(thread)).toBe(0);
+  });
+
+  it("a regressed queuedAt never joins the head group", () => {
+    const item = (id: string, text: string, queuedAt: number): ChannelQueueItem => ({ id, text, mode: "chat", queuedAt });
+    // clock skew or a rewritten row: an earlier timestamp after a later one
+    // is not "within the window", so the run stops at the first item
+    expect(headChannelGroup([
+      item("q-earlier", "typed first", 1_000),
+      item("q-regressed", "clock went backwards", 500),
+      item("q-next", "typed next", 1_100),
+    ]).map((entry) => entry.id)).toEqual(["q-earlier"]);
+    // the same items in honest order still coalesce inside the window
+    expect(headChannelGroup([
+      item("q-earlier", "typed first", 1_000),
+      item("q-next", "typed next", 1_100),
+    ]).map((entry) => entry.id)).toEqual(["q-earlier", "q-next"]);
+  });
+
+  it("rooms cap a head group at the room-context window, leaving the remainder queued", () => {
+    const group = "gd-group-cap";
+    const thread = "gd-room-cap";
+    for (let i = 1; i <= DRAIN_COALESCE_MAX_ITEMS + 2; i += 1) {
+      queueChannelMessage(group, thread, `burst ${i}`);
+      vi.advanceTimersByTime(1_000);
+    }
+    const run = vi.fn();
+    drainChannelMessages(() => false, run);
+    expect(run).toHaveBeenCalledTimes(1);
+    // the turn sees the transcript through the context window, so the group
+    // never outgrows it: exactly the first window's worth drains now
+    expect(run.mock.calls[0][0].items.map((item: { text: string }) => item.text))
+      .toEqual(Array.from({ length: DRAIN_COALESCE_MAX_ITEMS }, (_, i) => `burst ${i + 1}`));
+    expect(_queuedChannelCount(thread)).toBe(2);
+
+    // the excess keeps its FIFO place and drains as the next turn
+    drainChannelMessages(() => false, run);
+    expect(run.mock.calls[1][0].items.map((item: { text: string }) => item.text))
+      .toEqual([`burst ${DRAIN_COALESCE_MAX_ITEMS + 1}`, `burst ${DRAIN_COALESCE_MAX_ITEMS + 2}`]);
     expect(_queuedChannelCount(thread)).toBe(0);
   });
 
