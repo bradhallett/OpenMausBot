@@ -8085,9 +8085,19 @@ async function startTurn(
       /** Pin the conversation at the moment its seat is actually claimed
        * (issue #1650): the same guards as the dispatch-time pin below, so
        * a claim landing later in the turn records exactly what a mount-time
-       * pin would have — and a turn that never claims records nothing. */
+       * pin would have — and a turn that never claims records nothing.
+       * The guard reads live bot and task state because a claim can land
+       * long after dispatch: a Works on change may have swept this
+       * thread's auto pins, or a person may have pinned it meanwhile, and
+       * a deferred claim must resurrect neither nor clobber either. */
+      const autoPinAllowed = () => {
+        const liveBot = store.bot(bot.id);
+        const liveTask = store.taskByThread(bot.id, threadId);
+        return liveBot?.computer === undefined && !teamComputer && opts?.runOn !== "cloud" && !plan.pinned &&
+          Boolean(liveTask && liveTask.surfaceSource !== "user");
+      };
       const pinAutoSurface = (surface: Surface) => {
-        if (bot.computer === undefined && !teamComputer && opts?.runOn !== "cloud" && !plan.pinned) {
+        if (autoPinAllowed()) {
           store.patchTask(bot.id, threadId, { surface, surfaceSource: "auto" });
         }
       };
@@ -8553,7 +8563,7 @@ async function startTurn(
       // for this turn — records its pin inside the claim itself, so a turn
       // that only mounted tools records nothing. A Box attached during
       // dispatch and the built-in browser (no seat to claim) pin here.
-      if (bot.computer === undefined && !teamComputer && opts?.runOn !== "cloud" && !plan.pinned) {
+      if (autoPinAllowed()) {
         const claimSlot = autoVmClaims.get(threadId);
         const pinsAtClaim = claimSlot?.owner.generation === resourceOwner.generation;
         const used = pinsAtClaim ? null : mountedComputer ?? (integrations.browser ? "browser" : null);
