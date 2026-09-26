@@ -17259,6 +17259,13 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // burst); Steer folds that whole group into the live turn as one.
       const headGroup = headChannelGroup(held.items);
       const [head] = headGroup;
+      // A live steer has no image side channel — the same rule as the
+      // 1:1 queue: attachment words wait for a real turn where central
+      // admission can hand the images to the engine.
+      if (headGroup.some((item) => extractTurnImages(item.text).images.length > 0)) {
+        restoreHeldChannelQueue(held);
+        return json(res, 200, { ok: true, queued: true, threadId: targetThreadId });
+      }
       const decision = admit("room-steer", {
         speakerPresent: Boolean(speaker),
         engineCanSteer: Boolean(instance?.adapter.capabilities.queueing && instance.adapter.steer),
@@ -17275,11 +17282,36 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // A reply target that cannot be resolved restores the held queue
       // before the request fails — the room's normal drain keeps the head.
       const replyTo = resolveHeldReplyTarget(held, resolveReplyTarget);
+      // Each burst line keeps its own reply relationship: the fold renders
+      // per-item reply context (the head through the helper above, the rest
+      // resolved here) so a mixed burst does not inherit the head's quote
+      // or drop its own. A target that cannot be resolved restores the held
+      // queue before the request fails, mirroring the helper's contract.
+      const speakerName = cfg.profile?.name?.trim() || "User";
+      let foldedPrompt: string;
+      try {
+        foldedPrompt = headGroup
+          .map((item, index) =>
+            promptWithReply(
+              item.text,
+              index === 0
+                ? replyTo
+                : item.replyToId
+                  ? resolveReplyTarget(targetThreadId, item.replyToId)
+                  : undefined,
+              speakerName,
+            ),
+          )
+          .join("\n\n");
+      } catch (error) {
+        restoreHeldChannelQueue(held);
+        throw error;
+      }
       // steer was offered only when a live speaker instance could take it;
       // the check carries that invariant to the type system.
       const steered: SteerOutcome = instance?.adapter.steer
         ? await instance.adapter
-            .steer(targetThreadId, promptWithReply(headGroup.map((item) => item.text).join("\n\n"), replyTo, cfg.profile?.name?.trim() || "User"))
+            .steer(targetThreadId, foldedPrompt)
             .catch((): SteerOutcome => "indeterminate")
         : "refused";
       // The steer was awaited adapter work: re-read every ownership

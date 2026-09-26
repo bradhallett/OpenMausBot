@@ -613,4 +613,109 @@ posixOnly("mid-turn steering e2e", () => {
     await api("POST", `/api/groups/${room.id}/interrupt`, {});
     await waitFor(async () => (await getGroup())?.working === false, "the drained room turn to settle");
   }, 40_000);
+
+  it("a room steer keeps each burst line's own reply context in the fold", async () => {
+    const created = (await api("POST", "/api/bots")).body.bot;
+    const instances = (await api("GET", "/api/instances")).body.instances;
+    const model = instances.find((i: any) => i.instanceId === "codex").models.default;
+    await api("PATCH", `/api/bots/${created.id}`, { modelSelection: { instanceId: "codex", model } });
+    const room = (await api("POST", "/api/groups", {
+      name: "Reply burst room",
+      memberIds: [created.id],
+      setup: { bulletin: "", defaultResponder: { kind: "member", botId: created.id } },
+    })).body.group;
+    const getGroup = async () =>
+      (await api("GET", "/api/bots?messages=30")).body.groups.find((g: any) => g.id === room.id);
+
+    expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "first room turn" })).status).toBe(202);
+    await waitFor(async () => (await getGroup())?.busyBotId === created.id, "the room turn to start");
+    await waitFor(async () => (await getGroup())?.messages.some((m: any) => m.card), "the room question card");
+    const firstTurnId = (await getGroup())?.messages.find(
+      (m: any) => m.role === "user" && m.text === "first room turn",
+    )?.id;
+    expect(firstTurnId).toBeTruthy();
+
+    // one person's back-to-back burst: the FIRST line replies to the
+    // opener, the second does not — the fold must not smear that boundary
+    const person = await asPairedPerson();
+    const replying = await person("POST", `/api/groups/${room.id}/messages`, {
+      text: "steer this reply line",
+      replyToId: firstTurnId,
+    });
+    const plain = await person("POST", `/api/groups/${room.id}/messages`, { text: "and this plain line" });
+    expect(replying.body).toMatchObject({ ok: true, queued: true });
+    expect(plain.body).toMatchObject({ ok: true, queued: true });
+
+    const steered = await api("POST", `/api/groups/${room.id}/queue/${replying.body.queueId}/steer`, {
+      threadId: room.threadId,
+    });
+    expect(steered.status).toBe(200);
+    expect(steered.body.steered).toBe(true);
+    expect(steered.body.queueIds).toEqual([replying.body.queueId, plain.body.queueId]);
+
+    const nativeRows = readFileSync(join(home, ".openmausbot", "native", `${room.threadId}.ndjson`), "utf8")
+      .trim().split("\n").map((line) => JSON.parse(line));
+    const foldRow = nativeRows.find((row) => row.dir === "out" && row.msg?.method === "turn/steer")?.msg;
+    const foldedText = foldRow?.params.input.map((block: any) => block.text).join("\n") ?? "";
+    expect(foldedText).toContain("steer this reply line");
+    expect(foldedText).toContain("and this plain line");
+    // exactly ONE line carries reply context — the burst's replying line,
+    // never both and never neither
+    expect(foldedText.match(/The current message is a reply to/g)).toHaveLength(1);
+    expect(foldedText).toContain("first room turn");
+
+    await api("POST", `/api/groups/${room.id}/interrupt`, {});
+    await waitFor(async () => (await getGroup())?.working === false, "the steered room turn to settle");
+  }, 40_000);
+
+  it("a queued room attachment refuses the fold and waits for a real turn", async () => {
+    const created = (await api("POST", "/api/bots")).body.bot;
+    const instances = (await api("GET", "/api/instances")).body.instances;
+    const model = instances.find((i: any) => i.instanceId === "codex").models.default;
+    await api("PATCH", `/api/bots/${created.id}`, { modelSelection: { instanceId: "codex", model } });
+    const room = (await api("POST", "/api/groups", {
+      name: "Attachment steer room",
+      memberIds: [created.id],
+      setup: { bulletin: "", defaultResponder: { kind: "member", botId: created.id } },
+    })).body.group;
+    const getGroup = async () =>
+      (await api("GET", "/api/bots?messages=30")).body.groups.find((g: any) => g.id === room.id);
+
+    expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "first room turn" })).status).toBe(202);
+    await waitFor(async () => (await getGroup())?.busyBotId === created.id, "the room turn to start");
+    await waitFor(async () => (await getGroup())?.messages.some((m: any) => m.card), "the room question card");
+
+    const attachments = join(home, ".openmausbot", "attachments");
+    mkdirSync(attachments, { recursive: true });
+    const imagePath = join(attachments, "123e4567-e89b-42d3-a456-426614174005.png");
+    writeFileSync(imagePath, "clip png");
+    const imageText = `look at the clip\n\n<attached-image path="${imagePath}" name="clip.png" />`;
+
+    const person = await asPairedPerson();
+    const queued = await person("POST", `/api/groups/${room.id}/messages`, { text: imageText });
+    expect(queued.body).toMatchObject({ ok: true, queued: true });
+
+    // the fold has no image side channel: Steer leaves the words queued
+    const steered = await api("POST", `/api/groups/${room.id}/queue/${queued.body.queueId}/steer`, {
+      threadId: room.threadId,
+    });
+    expect(steered.status).toBe(200);
+    expect(steered.body).toMatchObject({ ok: true, queued: true });
+    expect(steered.body.steered).toBeUndefined();
+    expect((await getGroup())?.working).toBe(true);
+    expect((await getGroup())?.messages.some((m: any) => m.text === imageText)).toBe(false);
+
+    // Stop ends the parked turn; the attachment drains into a REAL turn
+    await api("POST", `/api/groups/${room.id}/interrupt`, {});
+    await waitFor(
+      async () => (await getGroup())?.messages.some((m: any) => m.text === imageText),
+      "the attachment line to drain",
+    );
+    await api("POST", `/api/groups/${room.id}/interrupt`, {});
+    await waitFor(async () => (await getGroup())?.working === false, "the drained attachment turn to settle");
+
+    const nativeRows = readFileSync(join(home, ".openmausbot", "native", `${room.threadId}.ndjson`), "utf8")
+      .trim().split("\n").map((line) => JSON.parse(line));
+    expect(nativeRows.filter((row) => row.dir === "out" && row.msg?.method === "turn/steer")).toHaveLength(0);
+  }, 40_000);
 });
