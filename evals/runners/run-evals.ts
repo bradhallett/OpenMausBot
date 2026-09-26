@@ -20,7 +20,12 @@ async function main(): Promise<number> {
   if (args.includes("--help") || args.includes("-h")) {
     console.log("usage: pnpm eval [--scenario <id>]... [--out <dir>]");
     console.log("       pnpm eval --golden [--scenario <id>]... [--update-baseline]  # tier 2: replay + trace baselines");
+    console.log("       pnpm eval --live [--out <dir>]                                # tier 3: opt-in live-model smoke (needs OMB_EVAL_LIVE=1)");
     return 0;
+  }
+  if (args.includes("--live")) {
+    const { runLiveMain } = await import("../live/run-live.ts");
+    return runLiveMain(args.filter((arg) => arg !== "--live"));
   }
   if (args.includes("--golden")) {
     const { runGoldenCli } = await import("../golden/run-golden-cli.ts");
