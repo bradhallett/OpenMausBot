@@ -493,7 +493,11 @@ export async function launchVerificationServer(
   // deterministic for every suite built on this launcher; identity remains
   // the honest comparison in tests either way.
   try {
-    const list = await fetch(`${url}/api/bots`, { headers: { origin: url } });
+    const timeout = AbortSignal.timeout(1_000);
+    const list = await fetch(`${url}/api/bots`, {
+      headers: { origin: url },
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+    });
     const body = list.ok ? await list.json() as { bots?: Array<{ id: string }> } : null;
     const seeded = body?.bots;
     if (!Array.isArray(seeded) || seeded.length !== 1) {
@@ -503,6 +507,7 @@ export async function launchVerificationServer(
       method: "PATCH",
       headers: { "content-type": "application/json", origin: url },
       body: JSON.stringify({ name: FIXTURE_STARTER_BOT_NAME }),
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     });
     if (!rename.ok) throw new Error(`verification starter rename failed (${rename.status}); see ${logPath}`);
   } catch (error) {

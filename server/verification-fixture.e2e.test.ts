@@ -9,7 +9,10 @@ it("pins the fixture starter bot's name deterministically (#1257)", async () => 
   for (let launch = 0; launch < 2; launch++) {
     const fixture = await launchVerificationServer({});
     try {
-      const response = await fetch(fixture.info.url + "/api/bots", { headers: { origin: fixture.info.url } });
+      const response = await fetch(fixture.info.url + "/api/bots", {
+        headers: { origin: fixture.info.url },
+        signal: AbortSignal.timeout(10_000),
+      });
       expect(response.ok).toBe(true);
       const bots = ((await response.json()) as { bots: Array<{ name: string }> }).bots;
       expect(bots).toHaveLength(1);
