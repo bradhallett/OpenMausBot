@@ -2532,7 +2532,13 @@ export class Store {
    *   from live turn state) gets its own work thread, so two jobs never
    *   interleave in one transcript. `label` names that thread; the caller
    *   closes it once its result has been reported. A pair conversation
-   *   never auto-closes. */
+   *   never auto-closes.
+   *
+   *   ownThread — an explicit per-assignment policy (`thread_policy:
+   *   "own_thread"`) asks for that work thread up front even when the
+   *   standing conversation is free, without start_thread's contract. It
+   *   never mints or reuses the pair row: the assignment always lands in a
+   *   `@Sender · label` work row of its own. */
 
   /** The identity a peer-opened row belongs to: its opener's id while that
    * bot lives, else the one live bot the stamp's name still points at —
@@ -2548,7 +2554,7 @@ export class Store {
   resolvePairConversation(
     sender: Pick<BotRecord, "id" | "name">,
     recipientId: string,
-    options: { label?: string; working: (threadId: string) => boolean },
+    options: { label?: string; working: (threadId: string) => boolean; ownThread?: boolean },
   ): { task: TaskRecord; created: boolean } | null {
     if (!this.bot(recipientId)) return null;
     const title = `@${sender.name}`;
@@ -2584,7 +2590,7 @@ export class Store {
         pair = adopted;
       }
     }
-    if (pair && !options.working(pair.threadId)) {
+    if (!options.ownThread && pair && !options.working(pair.threadId)) {
       // A conversation the sender closed after reading a result is picked
       // back up, never replaced: closing is only the sidebar's idle state.
       if (pair.closedBy) this.setTaskClosedBy(recipientId, pair.threadId, null);
@@ -2601,8 +2607,9 @@ export class Store {
     // The brief is never a title. An 80-character slice of an assignment
     // is the row nobody can read, and a durable conversation outlives the
     // one brief that opened it.
-    const task = this.createTask(recipientId, pair ? `${title} · ${options.label || "parallel work"}` : title,
-      false, undefined, opener(pair ? "work" : "pair"));
+    const isolated = Boolean(pair || options.ownThread);
+    const task = this.createTask(recipientId, isolated ? `${title} · ${options.label || "parallel work"}` : title,
+      false, undefined, opener(isolated ? "work" : "pair"));
     return task ? { task, created: true } : null;
   }
 
