@@ -1127,9 +1127,17 @@ describe("harness HTTP API", () => {
     let stuck = { bots: [] as string[], groups: [] as string[], computers: [] as string[] };
     while (Date.now() < deadline) {
       const state = (await api("GET", "/api/bots?messages=0")).body;
+      // bot.busy aggregates every task, but a bare interrupt reaches only the
+      // bot's default thread — a busy task on another thread survives it and
+      // the drain times out. Read each busy task's thread from the same
+      // listing and interrupt those threads explicitly.
+      const bots = state.bots as Array<{
+        id: string;
+        busy?: boolean;
+        tasks?: Array<{ threadId: string; busy?: boolean }>;
+      }>;
       stuck = {
-        bots: (state.bots as Array<{ id: string; busy?: boolean }>)
-          .filter((bot) => bot.busy).map((bot) => bot.id),
+        bots: bots.filter((bot) => bot.busy).map((bot) => bot.id),
         groups: (state.groups as Array<{ id: string; busyBotId?: string | null }>)
           .filter((group) => group.busyBotId).map((group) => group.id),
         computers: Object.entries((state.computerControl ?? {}) as Record<string, { held?: boolean }>)
@@ -1137,7 +1145,17 @@ describe("harness HTTP API", () => {
       };
       if (!stuck.bots.length && !stuck.groups.length && !stuck.computers.length) break;
       for (const id of stuck.groups) await api("POST", `/api/groups/${id}/interrupt`, {}).catch(() => undefined);
-      for (const id of stuck.bots) await api("POST", `/api/bots/${id}/interrupt`, {}).catch(() => undefined);
+      for (const id of stuck.bots) {
+        const busyThreads = bots.find((bot) => bot.id === id)?.tasks
+          ?.filter((task) => task.busy).map((task) => task.threadId) ?? [];
+        if (busyThreads.length) {
+          for (const threadId of busyThreads) {
+            await api("POST", `/api/bots/${id}/interrupt`, { threadId }).catch(() => undefined);
+          }
+        } else {
+          await api("POST", `/api/bots/${id}/interrupt`, {}).catch(() => undefined);
+        }
+      }
       for (const id of stuck.computers) await api("POST", `/api/bots/${id}/computer/control`, { action: "release" }).catch(() => undefined);
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
