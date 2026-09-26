@@ -14,7 +14,15 @@ describe("embedding provider seam", () => {
   let server: Server;
   let base: string;
   let seen: Array<{ path: string; authorization: string | undefined; body: { model?: unknown; input?: unknown } | null }>;
-  let behavior: "ok" | "wrong-count" | "non-finite" | "unauthorized";
+  let behavior:
+    | "ok"
+    | "wrong-count"
+    | "non-finite"
+    | "unauthorized"
+    | "out-of-order"
+    | "missing-index"
+    | "duplicate-index"
+    | "out-of-range-index";
 
   beforeEach(async () => {
     seen = [];
@@ -40,9 +48,16 @@ describe("embedding provider seam", () => {
           return;
         }
         const input = (JSON.parse(raw) as { input: string[] }).input;
-        const rows = input.map((_, index) => ({ embedding: [index * 0.5, 0.25, -1] }));
+        const rows: Array<{ index?: number; embedding: number[] }> = input.map((_, index) => ({
+          index,
+          embedding: [index * 0.5, 0.25, -1],
+        }));
+        if (behavior === "out-of-order") rows.reverse();
         if (behavior === "wrong-count") rows.pop();
         if (behavior === "non-finite") rows[0]!.embedding = [0.5, Number.NaN];
+        if (behavior === "missing-index") rows[0] = { embedding: rows[0]!.embedding };
+        if (behavior === "duplicate-index") rows[1]!.index = 0;
+        if (behavior === "out-of-range-index") rows[0]!.index = rows.length;
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ data: rows, model: "fixture-embed" }));
       });
@@ -110,6 +125,28 @@ describe("embedding provider seam", () => {
       await expect(provider.embed(["alpha"])).rejects.toThrow(/malformed vector/i);
     });
 
+    it("maps response rows to inputs by their index field, not response order", async () => {
+      behavior = "out-of-order";
+      const provider = openAICompatEmbedder(endpoint(), { model: "m" });
+      await expect(provider.embed(["alpha", "beta", "gamma"])).resolves.toEqual([
+        [0, 0.25, -1],
+        [0.5, 0.25, -1],
+        [1, 0.25, -1],
+      ]);
+    });
+
+    it("rejects responses with missing, duplicate, or out-of-range indexes", async () => {
+      behavior = "missing-index";
+      await expect(openAICompatEmbedder(endpoint(), { model: "m" }).embed(["alpha"]))
+        .rejects.toThrow(/malformed embedding index/i);
+      behavior = "duplicate-index";
+      await expect(openAICompatEmbedder(endpoint(), { model: "m" }).embed(["alpha", "beta"]))
+        .rejects.toThrow(/malformed embedding index/i);
+      behavior = "out-of-range-index";
+      await expect(openAICompatEmbedder(endpoint(), { model: "m" }).embed(["alpha", "beta"]))
+        .rejects.toThrow(/malformed embedding index/i);
+    });
+
     it("times out a hanging endpoint instead of waiting forever", async () => {
       const provider = openAICompatEmbedder(endpoint({ url: `${base}/hang` }), { model: "m" }, { timeoutMs: 150 });
       await expect(provider.embed(["alpha"])).rejects.toThrow(/timed out after 150ms/);
@@ -135,6 +172,14 @@ describe("embedding provider seam", () => {
       await expect(provider.embed([""])).rejects.toThrow(/non-empty string/i);
       await expect(provider.embed(Array.from({ length: 129 }, () => "x"))).rejects.toThrow(/at most 128 texts/i);
       await expect(provider.embed(["x".repeat(32_769)])).rejects.toThrow(/32,768-character cap/i);
+    });
+
+    it("does not mistake a 127.-prefixed DNS name for loopback", () => {
+      expect(() => openAICompatEmbedder({ url: "http://127.attacker.example/v1", apiKey: "k" }, { model: "m" }))
+        .toThrow(/only over https/i);
+      expect(() => openAICompatEmbedder({ url: "http://127.1.2.3/v1", apiKey: "k" }, { model: "m" })).not.toThrow();
+      expect(() => openAICompatEmbedder({ url: "http://localhost/v1", apiKey: "k" }, { model: "m" })).not.toThrow();
+      expect(() => openAICompatEmbedder({ url: "http://[::1]/v1", apiKey: "k" }, { model: "m" })).not.toThrow();
     });
   });
 

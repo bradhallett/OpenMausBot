@@ -8,6 +8,7 @@
 // surface through local-inject, which already filters embed/bge/nomic ids
 // out of chat model lists, and no second key store exists here — resolution
 // reads the same config.json surfaces and env fallbacks the chat drivers do.
+import { isIP } from "node:net";
 import type { AppConfig } from "./config.ts";
 import type { InstanceConfigMap } from "./contracts.ts";
 import { OpenAICompatDriver } from "./drivers/openai-compat.ts";
@@ -88,7 +89,9 @@ const DEFAULT_EMBEDDING_TIMEOUT_MS = 30_000;
 
 function isLoopback(hostname: string): boolean {
   const host = hostname.replace(/^\[|\]$/g, "");
-  return host === "localhost" || host === "127.0.0.1" || host === "::1" || host.startsWith("127.");
+  // isIP gates the 127. prefix so a DNS name like 127.attacker.example
+  // cannot pose as loopback and receive the bearer key in cleartext.
+  return host === "localhost" || host === "::1" || (isIP(host) === 4 && host.startsWith("127."));
 }
 
 function embeddingsUrl(base: string): URL {
@@ -161,15 +164,28 @@ export function openAICompatEmbedder(
             `The embedding provider returned ${Array.isArray(rows) ? rows.length : "no"} vectors for ${texts.length} texts.`,
           );
         }
-        const vectors: number[][] = [];
+        const vectors: Array<number[] | undefined> = Array.from({ length: texts.length });
         for (const row of rows) {
+          const index = row && typeof row === "object" ? (row as { index?: unknown }).index : null;
+          if (
+            typeof index !== "number" ||
+            !Number.isInteger(index) ||
+            index < 0 ||
+            index >= texts.length ||
+            vectors[index] !== undefined
+          ) {
+            throw new Error("The embedding provider returned a malformed embedding index.");
+          }
           const vector = row && typeof row === "object" ? (row as { embedding?: unknown }).embedding : null;
           if (!Array.isArray(vector) || !vector.length || !vector.every(isFiniteNumber)) {
             throw new Error("The embedding provider returned a malformed vector.");
           }
-          vectors.push(vector);
+          vectors[index] = vector;
         }
-        return vectors;
+        if (vectors.some((vector) => vector === undefined)) {
+          throw new Error("The embedding provider returned incomplete embedding indexes.");
+        }
+        return vectors as number[][];
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") {
           throw new Error(`The embedding request to ${url.host} timed out after ${timeoutMs}ms.`);
