@@ -984,8 +984,10 @@ describe("PiDriver mid-turn steer (fake CLI)", () => {
     const rows = readFileSync(dump, "utf8")
       .split("\n")
       .filter(Boolean)
-      .map((line) => JSON.parse(line) as { steer?: { message?: string } });
-    expect(rows.find((row) => row.steer)?.steer).toEqual({ message: envelope });
+      .map((line) => JSON.parse(line) as { steer?: { id?: string; message?: string } });
+    const frame = rows.find((row) => row.steer)?.steer;
+    expect(frame?.message).toBe(envelope);
+    expect(typeof frame?.id).toBe("string");
     // Finish the held turn: the seam belongs to the RUNNING turn only.
     await instance.adapter.respondToRequest("t-steer", "ask-1", { behavior: "allow" });
     await recorder.until((e) => e.type === "turn.completed");
@@ -998,6 +1000,31 @@ describe("PiDriver mid-turn steer (fake CLI)", () => {
     await recorder.until((e) => e.type === "request.opened");
     await expect(instance.adapter.steer!("t-refuse", "peer context")).resolves.toBe("refused");
     await instance.adapter.respondToRequest("t-refuse", "ask-1", { behavior: "allow" });
+    await recorder.until((e) => e.type === "turn.completed");
+  });
+
+  it("correlates concurrent steers by frame id so a refusal lands only on its own caller", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-pi-steer-"));
+    const dump = join(dir, "dump.jsonl");
+    await create({ FAKE_PI_DUMP: dump, FAKE_PI_MODE: "permission", FAKE_PI_STEER_OUT_OF_ORDER: "1" });
+    await instance.adapter.sendTurn({ threadId: "t-race", text: "go" });
+    await recorder.until((e) => e.type === "request.opened");
+    // The fake holds the first steer's refusal until the second frame exists,
+    // then answers refusal-for-first / success-for-second: keyed by command
+    // name alone, the refusal would reject the second caller (requeueing
+    // words pi accepted) and the first caller would hang to its timeout.
+    const first = instance.adapter.steer!("t-race", "first aside");
+    const second = instance.adapter.steer!("t-race", "second aside");
+    await expect(first).resolves.toBe("refused");
+    await expect(second).resolves.toBe("steered");
+    const frames = readFileSync(dump, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { steer?: { id?: string } })
+      .flatMap((row) => (row.steer ? [row.steer] : []));
+    expect(frames).toHaveLength(2);
+    expect(new Set(frames.map((frame) => frame.id)).size).toBe(2);
+    await instance.adapter.respondToRequest("t-race", "ask-1", { behavior: "allow" });
     await recorder.until((e) => e.type === "turn.completed");
   });
 });
