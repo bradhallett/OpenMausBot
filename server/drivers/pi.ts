@@ -40,6 +40,7 @@ import type {
   RuntimeEvent,
   RuntimeEventListener,
   SendTurnInput,
+  SteerOutcome,
   TurnImageInput,
 } from "../contracts.ts";
 import { EFFORT_LEVELS } from "../../shared/wire.ts";
@@ -58,6 +59,12 @@ const DRIVER_KIND = "piAgent";
 const PI_ARGS = ["--mode", "rpc", "--no-session"];
 const PI_MODEL_UPDATE_ARGS = ["update", "--models", "--no-approve"];
 const NODE_ENV_FLAG = { ELECTRON_RUN_AS_NODE: "1" };
+
+/** pi answered a command with success:false — an explicit refusal from a
+ * live runtime, not a transport failure. Only steer branches on the
+ * difference today ("refused": provably not delivered, safe to re-queue);
+ * the handshake commands keep their catch-all ignore. */
+class PiRpcRefusalError extends Error {}
 
 type PiPromptImage = {
   type: "image";
@@ -486,6 +493,7 @@ export const PiDriver: ProviderDriver<PiConfig> = {
       turnId: string;
       pending: Map<string, (decision: { behavior: "allow" | "deny" | "answer"; message?: string }) => void>;
       child?: { stdin: { write: (s: string) => void } };
+      steer?: (text: string) => Promise<SteerOutcome>;
     }>();
 
     const emit = (event: RuntimeEvent) => {
@@ -663,7 +671,32 @@ export const PiDriver: ProviderDriver<PiConfig> = {
         }
         settle(true, "cancelled");
       };
-      active.set(threadId, { stop, turnId, pending, child });
+
+      // Mid-turn input rides pi's native steer frame — the runtime queues
+      // it into the running agent without aborting the in-flight step, and
+      // answers success only after session.steer() accepted it. A success:
+      // false response is an explicit refusal (nothing consumed the words:
+      // safe to re-queue), while a death or timeout after the frame was
+      // written leaves the outcome unknowable — those are "indeterminate"
+      // so the caller can never run the words twice.
+      const steerActiveTurn = async (text: string): Promise<SteerOutcome> => {
+        if (settled || child.exitCode !== null || child.signalCode !== null) return "refused";
+        let ack: Promise<unknown>;
+        try {
+          ack = awaitResponse("steer");
+          send({ type: "steer", message: text });
+        } catch {
+          // stdin closed before the frame was written: provably undelivered.
+          return "refused";
+        }
+        try {
+          await ack;
+          return "steered";
+        } catch (error) {
+          return error instanceof PiRpcRefusalError ? "refused" : "indeterminate";
+        }
+      };
+      active.set(threadId, { stop, turnId, pending, child, steer: steerActiveTurn });
 
       const onEvent = (evt: PiEvent) => {
         appendNative(threadId, { dir: "in", source: "pi.rpc", msg: evt });
@@ -674,7 +707,7 @@ export const PiDriver: ProviderDriver<PiConfig> = {
               responseWaiters.delete(evt.command);
               clearTimeout(waiter.timer);
               if (evt.success) waiter.resolve(evt.data);
-              else waiter.reject(new Error(`pi ${evt.command} failed`));
+              else waiter.reject(new PiRpcRefusalError(`pi ${evt.command} failed`));
             }
             return;
           }
@@ -975,6 +1008,9 @@ export const PiDriver: ProviderDriver<PiConfig> = {
           // xhigh/max only land on models that expose them; pi rejects an
           // unsupported level and the turn keeps the engine default.
           effortLevels: EFFORT_LEVELS,
+          // pi's RPC mode takes a mid-turn steer frame the runtime queues
+          // into the running agent without aborting the current step.
+          queueing: true,
         },
         sendTurn,
         interruptTurn: async (threadId) => active.get(threadId)?.stop(),
@@ -992,6 +1028,10 @@ export const PiDriver: ProviderDriver<PiConfig> = {
             source: "user",
           });
           return decision.behavior === "allow" ? "allowed-once" : decision.behavior === "answer" ? "answered" : "rejected";
+        },
+        steer: async (threadId, text) => {
+          const entry = active.get(threadId);
+          return entry?.steer ? await entry.steer(text) : "refused";
         },
         hasSession: (threadId) => active.has(threadId),
         stopAll: async () => {

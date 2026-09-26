@@ -2,7 +2,7 @@
 // Fake of the pi coding agent's `--mode rpc --no-session` stdio surface, for
 // driver contract tests of server/drivers/pi.ts. Speaks pi's JSON-RPC-over-
 // stdio protocol: answers get_available_models / new_session / switch_session
-// / set_model, and streams a scripted turn in response to `prompt`. Failure
+// / set_model / steer, and streams a scripted turn in response to `prompt`. Failure
 // modes mirror how the real CLI misbehaves:
 //
 //   FAKE_PI_MODE   happy (default) | tooluse | permission | interleave | question-select | question-input
@@ -256,6 +256,21 @@ function handle(cmd: any) {
       else if (mode === "interleave") streamInterleaveTurn();
       else if (mode === "turn-error") streamErrorTurn();
       else streamTurn();
+      return;
+    case "steer":
+      // Mid-turn input frame: ack like the real runtime (success only after
+      // session.steer accepted it); FAKE_PI_STEER_REFUSE scripts an explicit
+      // success:false refusal so the driver's tri-state mapping is testable.
+      if (process.env.FAKE_PI_DUMP) {
+        try {
+          appendFileSync(process.env.FAKE_PI_DUMP, JSON.stringify({ steer: { message: cmd.message } }) + "\n");
+        } catch {
+          /* never let dumping break a run */
+        }
+      }
+      send(process.env.FAKE_PI_STEER_REFUSE
+        ? { type: "response", command: "steer", success: false, error: "fake pi: nothing to steer" }
+        : { type: "response", command: "steer", success: true });
       return;
     case "extension_ui_response":
       if (process.env.FAKE_PI_DUMP) {

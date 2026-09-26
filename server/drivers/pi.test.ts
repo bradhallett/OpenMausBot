@@ -939,6 +939,69 @@ describe("applyPiLocalCatalog", () => {
   });
 });
 
+describe("PiDriver mid-turn steer (fake CLI)", () => {
+  let instance: ProviderInstance;
+  let recorder: EventRecorder;
+
+  const create = async (environment: Record<string, string> = {}) => {
+    instance = await PiDriver.create({
+      instanceId: "pi-steer-test",
+      displayName: "pi Steer Test",
+      environment,
+      enabled: true,
+      config: { cli: FAKE_CLI, fullAuto: false },
+    });
+    recorder = recordEvents(instance.adapter);
+  };
+
+  beforeEach(() => {
+    ensureDirs();
+    chmodSync(FAKE_CLI, 0o755);
+  });
+  afterEach(async () => {
+    recorder?.stop();
+    await instance?.dispose();
+  });
+
+  it("declares queueing so the harness offers the mid-turn seam", async () => {
+    await create();
+    expect(instance.adapter.capabilities.queueing).toBe(true);
+  });
+
+  it("refuses steer on a thread with no running turn", async () => {
+    await create();
+    await expect(instance.adapter.steer!("t-idle", "peer context")).resolves.toBe("refused");
+  });
+
+  it("steers a running turn through the native steer frame and refuses once settled", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-pi-steer-"));
+    const dump = join(dir, "dump.jsonl");
+    await create({ FAKE_PI_DUMP: dump, FAKE_PI_MODE: "permission" });
+    await instance.adapter.sendTurn({ threadId: "t-steer", text: "go" });
+    await recorder.until((e) => e.type === "request.opened");
+    const envelope = "[aside from @Peer — peer context, not steering]\nheads up\n[end aside]";
+    await expect(instance.adapter.steer!("t-steer", envelope)).resolves.toBe("steered");
+    const rows = readFileSync(dump, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { steer?: { message?: string } });
+    expect(rows.find((row) => row.steer)?.steer).toEqual({ message: envelope });
+    // Finish the held turn: the seam belongs to the RUNNING turn only.
+    await instance.adapter.respondToRequest("t-steer", "ask-1", { behavior: "allow" });
+    await recorder.until((e) => e.type === "turn.completed");
+    await expect(instance.adapter.steer!("t-steer", "late")).resolves.toBe("refused");
+  });
+
+  it("maps an explicit runtime refusal to refused so the words stay queued", async () => {
+    await create({ FAKE_PI_MODE: "permission", FAKE_PI_STEER_REFUSE: "1" });
+    await instance.adapter.sendTurn({ threadId: "t-refuse", text: "go" });
+    await recorder.until((e) => e.type === "request.opened");
+    await expect(instance.adapter.steer!("t-refuse", "peer context")).resolves.toBe("refused");
+    await instance.adapter.respondToRequest("t-refuse", "ask-1", { behavior: "allow" });
+    await recorder.until((e) => e.type === "turn.completed");
+  });
+});
+
 describe("PiDriver snapshot", () => {
   beforeEach(() => chmodSync(FAKE_CLI, 0o755));
 
