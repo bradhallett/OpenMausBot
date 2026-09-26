@@ -624,8 +624,15 @@ it("does not cancel a live coordination when an automation turn lands in the con
   const { routine } = await f.api("/api/routines", { name: "Nightly note", prompt: "Send the nightly note.", botId: ops.id,
     enabled: false, schedule: { type: "interval", everyMinutes: 60, anchorAt: Date.now() + 3_600_000 } });
   await f.api(`/api/routines/${routine.id}/run`, {});
-  // The delegated turn really reaches the conversation the coordination lives in.
-  await expect.poll(async () => (await f.messages(f.chief.activeTaskId)).some((message: any) => message.peerAsk?.botId === ops.id), { timeout: 25_000 }).toBe(true);
+  // The delegated turn really reaches the chief — through the pair
+  // conversation the two bots share (#1684), never the chief's active
+  // thread, where the live coordination keeps running untouched.
+  const opsPairRow = async () =>
+    (await f.api("/api/bots")).bots.find((b: any) => b.id === f.chief.id).tasks.find((t: any) => t.title === "@Ops")?.threadId as string | undefined;
+  await expect.poll(async () => {
+    const threadId = await opsPairRow();
+    return threadId ? (await f.messages(threadId)).some((message: any) => message.peerAsk?.botId === ops.id) : false;
+  }, { timeout: 25_000 }).toBe(true);
   expect(f.nodes().find((node: any) => node.id === assignment.id).status).not.toBe("cancelled");
 
   await expect.poll(() => f.nodes().find((node: any) => node.id === assignment.id)?.status, { timeout: 25_000 }).toBe("completed");
