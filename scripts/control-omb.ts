@@ -513,11 +513,15 @@ export async function launchVerificationServer(
     if (!Array.isArray(seeded) || seeded.length !== 1) {
       throw new Error(`verification fixture did not seed exactly one starter bot; see ${logPath}`);
     }
+    // The list request may consume most of its own budget, so the rename
+    // gets a fresh timeout; sharing one signal could abort a healthy PATCH
+    // and terminate the whole fixture over a slow first request.
+    const renameTimeout = AbortSignal.timeout(1_000);
     const rename = await fetch(`${url}/api/bots/${seeded[0].id}/profile`, {
       method: "PATCH",
       headers: { "content-type": "application/json", origin: url },
       body: JSON.stringify({ name: FIXTURE_STARTER_BOT_NAME }),
-      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+      signal: signal ? AbortSignal.any([signal, renameTimeout]) : renameTimeout,
     });
     if (!rename.ok) throw new Error(`verification starter rename failed (${rename.status}); see ${logPath}`);
   } catch (error) {
