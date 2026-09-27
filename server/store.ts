@@ -23,7 +23,7 @@ import { redactSecretsInText } from "./redact.ts";
 import { applyContentClasses } from "./content-boundary.ts";
 import { botAvatarProfile } from "../shared/bot-avatar.ts";
 import { approvalModeFor, isApprovalMode } from "../shared/approval-mode.ts";
-import type { ProfileRequestChanges } from "../shared/profile-request.ts";
+import type { ProfileRequestChanges, ProfileRequestField } from "../shared/profile-request.ts";
 import type { TeamSetupRequest, TeamSetupResult } from "../shared/team-setup.ts";
 import type { GroupGoalRunCardData } from "../shared/group-goal-run.ts";
 import { isMentionBoundary, isMentionNameContinuation } from "../shared/mention-boundary.ts";
@@ -267,7 +267,9 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
         const out = { ...changes };
         for (const [key, value] of Object.entries(changes)) {
           // Booleans carry no text to scrub; only string fields pass through redaction.
-          if (typeof value === "string") out[key as keyof ProfileRequestChanges] = scrub(value);
+          if (typeof value !== "string") continue;
+          const textField = key as Exclude<ProfileRequestField, "notifications" | "speakReplies">;
+          out[textField] = scrub(value);
         }
         return out;
       };
