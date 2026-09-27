@@ -20775,6 +20775,7 @@ function autoArchiveClosedThreadsNow(): void {
       autoArchiveDays: days,
       closedAt: task.closedBy?.at ?? null,
       archivedAt: task.archivedAt ?? null,
+      restoredAt: task.restoredAt ?? null,
       unread: task.unread === true,
       busy: threadBusy(bot.id, task.threadId),
       // Same asleep rule as the thread list: "until activity" (0) or a

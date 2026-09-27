@@ -330,8 +330,11 @@ const threadsConfigSchema = z.object({
   /** Days a closed or archived thread's event logs survive (#1280).
    * Absent keeps them forever. */
   eventLogRetentionDays: z.number().int().min(1).max(3650).optional(),
-  /** Days a closed thread waits before auto-archive (#1280). Absent
-   * keeps auto-archive off, the default. */
+  /** Days a closed thread waits before auto-archive (#1280). The window
+   * runs from the thread's most recent close. Snoozed, pinned, and
+   * queued-work-carrying threads are never archived, and a thread
+   * explicitly restored after archiving is exempt until it is closed
+   * again. Absent keeps auto-archive off, the default. */
   autoArchiveDays: z.number().int().min(1).max(3650).optional(),
 }).strict();
 /** Workspace-wide defaults every new bot starts with (Store.createBot). */
@@ -688,8 +691,10 @@ export function threadEventLogRetentionDays(cfg: AppConfig): number | null {
   return cfg.threads?.eventLogRetentionDays ?? null;
 }
 
-/** Days a closed thread waits before auto-archive (#1280). Null — the
- * default — keeps auto-archive off. */
+/** Days a closed thread waits before auto-archive (#1280), measured from
+ * its most recent close; snoozed, pinned, queued-work, handoff-carrying,
+ * and post-restore threads are exempt. Null — the default — keeps
+ * auto-archive off. */
 export function threadAutoArchiveDays(cfg: AppConfig): number | null {
   return cfg.threads?.autoArchiveDays ?? null;
 }

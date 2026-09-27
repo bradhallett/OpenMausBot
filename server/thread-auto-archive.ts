@@ -4,7 +4,9 @@
 // context — resume cursors, last instance state, cwd, and handoff state
 // (#1194). Only threads closed (close_thread) longer than the configured
 // window are eligible, and never one that is busy, unread, snoozed,
-// pinned, carrying queued work, or carrying an open direct handoff. The window comes
+// pinned, carrying queued work, or carrying an open direct handoff. The
+// window runs from the thread's most recent close; explicitly restoring an
+// archived thread exempts it until it is closed again. The window comes
 // from the global
 // threads.autoArchiveDays setting, overridden per bot via autoArchiveDays
 // on the bot record (0 opts a single bot out). Off by default everywhere.
@@ -19,6 +21,11 @@ export interface AutoArchiveCandidate {
   closedAt: number | null;
   /** task.archivedAt — an already-archived thread is never re-archived. */
   archivedAt: number | null;
+  /** task.restoredAt — set when a person explicitly restored (unarchived)
+   * the thread. Newer than closedAt, it exempts the thread: restoring is
+   * a statement that the thread is wanted, so only closing it again
+   * re-arms the window. */
+  restoredAt: number | null;
   unread: boolean;
   busy: boolean;
   /** Snoozed ("until activity" or a future wake) — hidden, not filed away. */
@@ -52,6 +59,9 @@ export function selectAutoArchiveThreads(
       || candidate.hasQueuedWork || candidate.openDirectHandoff) continue;
     if (candidate.archivedAt !== null) continue;
     if (candidate.closedAt === null) continue;
+    // Restore exemption: the newest explicit restore wins over the close
+    // that would have archived the thread; a later close re-arms it.
+    if (candidate.restoredAt !== null && candidate.restoredAt > candidate.closedAt) continue;
     if (candidate.closedAt >= now - candidate.autoArchiveDays * DAY_MS) continue;
     selected.push(candidate.threadId);
   }

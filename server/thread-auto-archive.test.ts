@@ -40,6 +40,7 @@ function candidate(overrides: Partial<AutoArchiveCandidate> & { threadId: string
     autoArchiveDays: 30,
     closedAt: now - 31 * DAY_MS,
     archivedAt: null,
+    restoredAt: null,
     unread: false,
     busy: false,
     snoozed: false,
@@ -89,6 +90,22 @@ describe("auto-archive selection", () => {
     expect(selectAutoArchiveThreads(cases, now)).toEqual([]);
   });
 
+  it("exempts a thread restored after its close until it is closed again", () => {
+    // Restored 1 day ago; closed 31 days ago. The restore is newer than the
+    // close that would have archived it, so the sweep leaves it alone.
+    expect(selectAutoArchiveThreads([candidate({ threadId: "restored", restoredAt: now - DAY_MS })], now)).toEqual([]);
+    // Closed again 31 days ago... after a still-earlier restore: the newest
+    // close re-arms the window, so the thread is selected once past it.
+    expect(selectAutoArchiveThreads([candidate({
+      threadId: "re-closed", closedAt: now - 31 * DAY_MS, restoredAt: now - 32 * DAY_MS,
+    })], now)).toEqual(["re-closed"]);
+    // A restore older than the window-plus-close changes nothing: only the
+    // ordering of restore vs close matters, then the close's own clock.
+    expect(selectAutoArchiveThreads([candidate({
+      threadId: "stale-restore", closedAt: now - 31 * DAY_MS, restoredAt: now - 60 * DAY_MS,
+    })], now)).toEqual(["stale-restore"]);
+  });
+
   it("never re-archives a thread and skips bots whose window resolved off", () => {
     const cases = [
       candidate({ threadId: "archived", archivedAt: now - DAY_MS }),
@@ -115,6 +132,7 @@ describe("auto-archive through the store", () => {
         autoArchiveDays: 30,
         closedAt: record.closedBy?.at ?? null,
         archivedAt: record.archivedAt ?? null,
+        restoredAt: record.restoredAt ?? null,
         unread: record.unread === true,
         busy: false,
         snoozed: false,
@@ -136,4 +154,37 @@ describe("auto-archive through the store", () => {
     expect(selectAutoArchiveThreads([candidateFrom(task.threadId)], now)).toEqual([]);
   });
 
+  it("stamps a restore so the next sweep does not archive the thread again (#1286 hold)", async () => {
+    const { store } = await freshStore();
+    const bot = store.createBot();
+    const task = store.createTask(bot.id)!;
+    const closedAt = now - 40 * DAY_MS;
+    store.setTaskClosedBy(bot.id, task.threadId, { botId: bot.id, name: bot.name, at: closedAt });
+    // Unarchiving a thread that was never archived is not a restore.
+    store.patchTask(bot.id, task.threadId, { archivedAt: undefined });
+    expect(store.taskByThread(bot.id, task.threadId)?.restoredAt).toBeUndefined();
+
+    store.patchTask(bot.id, task.threadId, { archivedAt: now - 5 * DAY_MS });
+    store.patchTask(bot.id, task.threadId, { archivedAt: undefined });
+    const restored = store.taskByThread(bot.id, task.threadId)!;
+    // closedBy.at survives the restore verbatim — the exemption is carried
+    // by restoredAt, not by rewriting who closed the thread when.
+    expect(restored.closedBy?.at).toBe(closedAt);
+    expect(restored.archivedAt).toBeUndefined();
+    expect(restored.restoredAt).toBeGreaterThan(now);
+    const record = store.taskByThread(bot.id, task.threadId)!;
+    expect(selectAutoArchiveThreads([{
+      threadId: task.threadId,
+      autoArchiveDays: 30,
+      closedAt: record.closedBy?.at ?? null,
+      archivedAt: record.archivedAt ?? null,
+      restoredAt: record.restoredAt ?? null,
+      unread: record.unread === true,
+      busy: false,
+      snoozed: false,
+      pinned: false,
+      hasQueuedWork: false,
+      openDirectHandoff: false,
+    }], Date.now())).toEqual([]);
+  });
 });
