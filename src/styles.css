@@ -11,8 +11,8 @@
   text-decoration: underline;
   text-decoration-color: var(--mention-color);
   text-underline-offset: 3px;
-  box-decoration-break: clone;
-  -webkit-box-decoration-break: clone;
+  boat-decoration-break: clone;
+  -webkit-boat-decoration-break: clone;
 }
 .mention-editor-mirror {
   /* Match the native textarea's direction independently for each paragraph. */
