@@ -108,6 +108,15 @@ export class LocalVmSeatPool {
     this.affinity.set(threadId, { seat, expiresAt: this.now() + this.affinityTtlMs });
   }
 
+  /** Renew a thread's affinity with the seat its settled turn ran on. A
+   * turn that outlasted the affinity TTL finds its entry expired —
+   * touch() treats it as gone — but the conversation still used that
+   * desktop for the whole turn, so settlement re-records it. */
+  renew(threadId: string, seat: number): void {
+    if (!Number.isInteger(seat) || seat < 0 || seat >= this.count()) return;
+    this.affinity.set(threadId, { seat, expiresAt: this.now() + this.affinityTtlMs });
+  }
+
   /** Drop a thread's affinity explicitly, without waiting for the TTL. */
   forget(threadId: string): void {
     this.affinity.delete(threadId);

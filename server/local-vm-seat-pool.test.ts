@@ -19,7 +19,11 @@ function harness(seatCount: () => number) {
     if (granted) seats.touch(threadId);
     return { seat, granted };
   };
-  const release = (seat: number, threadId: string) => leases.forTarget("pool:" + seat).release(threadId);
+  const release = (seat: number, threadId: string) => {
+    leases.forTarget("pool:" + seat).release(threadId);
+    // Mirror server/index.ts settlement: renew with the seat the turn ran on.
+    seats.renew(threadId, seat);
+  };
   return { now, seats, leases, busy, claim, release, holderOf };
 }
 
@@ -51,6 +55,21 @@ describe("LocalVmSeatPool", () => {
     const first = claim("thread-a", "bot-a");
     release(first.seat, "thread-a");
     now.value += 60_000;
+
+    const again = claim("thread-a", "bot-a");
+    expect(again.seat).toBe(first.seat);
+    expect(again.granted).toBe(true);
+  });
+
+  it("renews the recorded seat after a turn longer than the affinity TTL", () => {
+    const { now, claim, release } = harness(() => 2);
+
+    const first = claim("thread-a", "bot-a");
+    // A turn that outlasts the TTL: touch() alone would find the entry
+    // expired and drop it, but the conversation ran on that desktop for
+    // the whole turn, so settlement renews with the seat it used.
+    now.value += 30 * 60_000 + 1;
+    release(first.seat, "thread-a");
 
     const again = claim("thread-a", "bot-a");
     expect(again.seat).toBe(first.seat);

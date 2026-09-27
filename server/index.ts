@@ -5815,8 +5815,15 @@ function releaseLocalVmThread(threadId: string): void {
   if (!target) return;
   // Renew affinity at settlement so a turn that consumed part of the TTL
   // still leaves the full window after it ends; failed claims never reach
-  // here (no target), so only settled turns renew.
-  if (localVmMode(cfg) === "pool") localVmSeatPool.touch(threadId);
+  // here (no target), so only settled turns renew. A turn longer than the
+  // TTL finds its entry expired — touch() alone would drop it — so renew
+  // with the seat the turn actually ran on. A target recorded before a
+  // mid-turn mode change is not a pool seat; touch still covers that.
+  if (localVmMode(cfg) === "pool") {
+    const pooled = /^pool:(\d+)$/.exec(target.key);
+    if (pooled) localVmSeatPool.renew(threadId, Number(pooled[1]));
+    else localVmSeatPool.touch(threadId);
+  }
   localVmLeaseFor(target).release(threadId);
   if (localVmActiveThreads.get(target.key) === threadId) localVmActiveThreads.delete(target.key);
   localVmThreadTargets.delete(threadId);
