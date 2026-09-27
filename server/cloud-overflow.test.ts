@@ -37,7 +37,8 @@ describe("cloud overflow consent", () => {
   it("keeps consent per conversation, with a configured allowlist pre-consenting", () => {
     const consent = new CloudOverflowConsent();
     expect(consent.consented("t1")).toBe(false);
-    consent.grant("t1", 1_000);
+    consent.markOffered("t1", 0.0004, 500);
+    consent.grant("t1", 0.0004, 1_000);
     expect(consent.consented("t1")).toBe(true);
     expect(consent.consented("t2")).toBe(false);
     expect(consent.consented("t2", new Set(["t2"]))).toBe(true);
@@ -47,9 +48,9 @@ describe("cloud overflow consent", () => {
 
   it("resets the card on revoke, so a later wait may ask again", () => {
     const consent = new CloudOverflowConsent();
-    consent.markOffered("t1", 1_000);
+    consent.markOffered("t1", 0.0004, 1_000);
     expect(consent.offered("t1")).toBe(true);
-    consent.grant("t1", 2_000);
+    consent.grant("t1", 0.0004, 2_000);
     consent.revoke("t1");
     expect(consent.offered("t1")).toBe(false);
   });
@@ -61,15 +62,32 @@ describe("cloud overflow consent", () => {
     consent.revoke("t1");
     expect(consent.consented("t1", allowlist)).toBe(false);
     // A new consent answers a new offer and beats the old revocation.
-    consent.markOffered("t1", 2_000);
-    consent.grant("t1", 3_000);
+    consent.markOffered("t1", 0.0004, 2_000);
+    consent.grant("t1", 0.0004, 3_000);
     expect(consent.consented("t1", allowlist)).toBe(true);
+  });
+
+  it("binds card consent to the offered rate; a rate change re-offers", () => {
+    const consent = new CloudOverflowConsent();
+    consent.markOffered("t1", 0.0004, 1_000);
+    expect(consent.offered("t1", 0.0004)).toBe(true);
+    // The configured rate moved: the old card no longer counts as offered.
+    expect(consent.offered("t1", 0.0005)).toBe(false);
+    expect(consent.offeredRate("t1")).toBe(0.0004);
+    consent.grant("t1", 0.0004, 2_000);
+    expect(consent.consented("t1", new Set(), 0.0004)).toBe(true);
+    // Consent at the old rate must not start a seat at the new one.
+    expect(consent.consented("t1", new Set(), 0.0005)).toBe(false);
+    // Allowlisted standing consent applies at the current rate: the
+    // operator who allowlisted the thread also sets the rate.
+    expect(consent.consented("t2", new Set(["t2"]), 0.0005)).toBe(true);
   });
 });
 
 describe("cloud seat idle stop (#1655)", () => {
   it("stops the machine only once idle passes the window; a real touch restarts it", () => {
-    const lease = new CloudSeatLease({ botId: "b1", threadId: "t1", now: 0, idleStopMs: 5 * 60_000 });
+    const lease = new CloudSeatLease({ botId: "b1", threadId: "t1", generation: "g1", now: 0, idleStopMs: 5 * 60_000 });
+    expect(lease.generation).toBe("g1");
     expect(lease.idleElapsed(5 * 60_000 - 1)).toBe(false);
     expect(lease.idleElapsed(5 * 60_000)).toBe(true);
     lease.touch(5 * 60_000);
@@ -80,8 +98,28 @@ describe("cloud seat idle stop (#1655)", () => {
 
   it("defaults to a few idle minutes and validates the window", () => {
     expect(CLOUD_SEAT_IDLE_STOP_MS).toBe(5 * 60_000);
-    expect(() => new CloudSeatLease({ botId: "b", threadId: "t", idleStopMs: 0 })).toThrow();
-    expect(() => new CloudSeatLease({ botId: "b", threadId: "t", idleStopMs: Number.NaN })).toThrow();
+    expect(() => new CloudSeatLease({ botId: "b", threadId: "t", generation: "g", idleStopMs: 0 })).toThrow();
+    expect(() => new CloudSeatLease({ botId: "b", threadId: "t", generation: "g", idleStopMs: Number.NaN })).toThrow();
+  });
+
+  it("keeps a failed stop retryable with bounded backoff; real work resets it", () => {
+    const lease = new CloudSeatLease({ botId: "b1", threadId: "t1", generation: "g1", now: 0, idleStopMs: 5 * 60_000 });
+    expect(lease.sleepDue(300_000)).toBe(true);
+    lease.deferSleep(300_000);
+    expect(lease.sleepDue(360_000 - 1)).toBe(false);
+    expect(lease.sleepDue(360_000)).toBe(true);
+    lease.deferSleep(360_000);
+    expect(lease.sleepDue(480_000 - 1)).toBe(false); // doubled to 120s
+    lease.deferSleep(480_000);
+    lease.deferSleep(600_000);
+    lease.deferSleep(720_000); // 480s then capped at 600s
+    expect(lease.sleepDue(720_000 + 600_000 - 1)).toBe(false);
+    expect(lease.sleepDue(720_000 + 600_000)).toBe(true);
+    // Real screen work earns a fresh stop attempt and restarts the idle
+    // window, so an old backoff never gates a newly idle seat for long.
+    lease.touch(1_400_000);
+    expect(lease.sleepDue(1_400_000)).toBe(true);
+    expect(lease.idleElapsed(1_400_000)).toBe(false);
   });
 });
 

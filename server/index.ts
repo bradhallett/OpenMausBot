@@ -1796,6 +1796,9 @@ function computerClaimIdlePolicy(resource: string): IdleReleasePolicy | undefine
 const cloudOverflowConsent = new CloudOverflowConsent();
 const cloudSeatLeases = new Map<string, CloudSeatLease>();
 let cloudSeatSweepTimer: ReturnType<typeof setInterval> | undefined;
+/** One stop attempt per seat at a time (#1655): the sweep ticks faster
+ * than a Box sleeps, and a second stop call would race the first. */
+const cloudSeatStopsInFlight = new Set<string>();
 
 /** The waits that may overflow: a turn queued for a local desktop, never
  * one already bound for a cloud or VPS seat. */
@@ -1806,14 +1809,18 @@ function localComputerWait(resource: string): boolean {
 function cloudOverflowSituation(owner: TurnOwner, resource: string, started: boolean): CloudOverflowSituation | null {
   if (!localComputerWait(resource)) return null;
   if (!store.botByThread(owner.threadId)) return null;
+  const perSecondCostUsd = cloudOverflowPerSecondCostUsd(cfg);
   return {
     featureEnabled: cloudOverflowEnabled(cfg),
     // An organisation that refuses the Box kind has nothing to offer, and
     // the decision must fail closed before any card is written.
     cloudConfigured: box.boxConfigured(cfg) && managedPolicy.computerRefusal("box") === undefined,
-    perSecondCostUsd: cloudOverflowPerSecondCostUsd(cfg),
-    consented: cloudOverflowConsent.consented(owner.threadId, cloudOverflowAllowlistedThreads(cfg)),
-    offered: cloudOverflowConsent.offered(owner.threadId),
+    perSecondCostUsd,
+    // Consent answers the priced card (#1655): a grant counts only at the
+    // rate its card showed, so a config change re-offers instead of
+    // starting at a price nobody approved.
+    consented: cloudOverflowConsent.consented(owner.threadId, cloudOverflowAllowlistedThreads(cfg), perSecondCostUsd ?? undefined),
+    offered: cloudOverflowConsent.offered(owner.threadId, perSecondCostUsd ?? undefined),
     started,
   };
 }
@@ -1840,7 +1847,24 @@ async function startCloudSeat(owner: TurnOwner): Promise<boolean> {
     broadcast({ kind: "computer", botId: bot.id, state: "waking" });
     const machine = await box.readyBox(cfg, bot.id);
     if (!machine) throw new Error("the cloud computer did not wake");
-    cloudSeatLeases.set(bot.id, new CloudSeatLease({ botId: bot.id, threadId: owner.threadId, idleStopMs: cloudOverflowIdleStopMs(cfg) }));
+    // Consent can be revoked while the Box wakes (#1655): a seat nobody
+    // consented to must not bill. It is released and put straight back to
+    // sleep — and if even that fails, leased as already idle so the sweep
+    // keeps retrying with backoff.
+    if (!cloudOverflowConsent.consented(owner.threadId, cloudOverflowAllowlistedThreads(cfg), perSecondCostUsd)) {
+      turnResources.releaseOne(boxBotResource, owner);
+      const idleStopMs = cloudOverflowIdleStopMs(cfg);
+      void box.sleepBox(cfg, bot.id).catch(() => {
+        cloudSeatLeases.set(bot.id, new CloudSeatLease({ botId: bot.id, threadId: owner.threadId, generation: owner.generation, now: Date.now() - idleStopMs - 1, idleStopMs }));
+        ensureCloudSeatSweep();
+      });
+      store.appendMessage(owner.threadId, {
+        role: "bot", kind: "activity",
+        tool: { name: "Cloud overflow consent was revoked while the cloud computer woke; it stops unbilled and the local wait continues.", ok: true },
+      });
+      return true;
+    }
+    cloudSeatLeases.set(bot.id, new CloudSeatLease({ botId: bot.id, threadId: owner.threadId, generation: owner.generation, idleStopMs: cloudOverflowIdleStopMs(cfg) }));
     ensureCloudSeatSweep();
     store.appendMessage(owner.threadId, {
       role: "bot", kind: "activity",
@@ -1876,17 +1900,34 @@ function ensureCloudSeatSweep(): void {
  * archived, billing pauses, and the transcript says which wait's seat it
  * was. Only real computer tool completions refresh a lease — the poller's
  * preview frames never reach the touch call. */
+/** Stop one running cloud seat (#1655): the Box sleeps, and only a
+ * successful stop clears the lease and its Box claim — a failed stop
+ * stays leased and retryable with backoff, because the seat still bills
+ * until it sleeps. The claim releases for the lease's own generation,
+ * never a newer turn's. */
+function stopCloudSeat(botId: string, lease: CloudSeatLease, stoppedName: string, now = Date.now()): void {
+  if (cloudSeatStopsInFlight.has(botId)) return;
+  if (cloudSeatLeases.get(botId) !== lease) return;
+  cloudSeatStopsInFlight.add(botId);
+  void box.sleepBox(cfg, botId)
+    .then(() => {
+      if (cloudSeatLeases.get(botId) === lease) cloudSeatLeases.delete(botId);
+      // The stopped seat's Box claim goes with it, so a still-waiting
+      // turn may start a fresh seat for the same bot.
+      turnResources.releaseOne(`computer:box-bot:${botId}`, { threadId: lease.threadId, generation: lease.generation });
+      store.appendMessage(lease.threadId, { role: "bot", kind: "activity", tool: { name: stoppedName, ok: true } });
+    })
+    .catch(() => {
+      lease.deferSleep(now);
+      store.appendMessage(lease.threadId, { role: "bot", kind: "activity", tool: { name: "Cloud computer could not stop — the sweep retries with backoff; stop it from Settings if it stays awake. Billing continues until it sleeps.", ok: false } });
+    })
+    .finally(() => cloudSeatStopsInFlight.delete(botId));
+}
+
 function sweepIdleCloudSeats(now = Date.now()): void {
   for (const [botId, lease] of cloudSeatLeases) {
-    if (!lease.idleElapsed(now)) continue;
-    cloudSeatLeases.delete(botId);
-    void box.sleepBox(cfg, botId)
-      .then(() => {
-        store.appendMessage(lease.threadId, { role: "bot", kind: "activity", tool: { name: cloudSeatStoppedText(lease.idleFor(now)), ok: true } });
-      })
-      .catch(() => {
-        store.appendMessage(lease.threadId, { role: "bot", kind: "activity", tool: { name: "Cloud computer could not stop after its idle window — stop it from Settings; billing continues until it sleeps.", ok: false } });
-      });
+    if (!lease.idleElapsed(now) || !lease.sleepDue(now)) continue;
+    stopCloudSeat(botId, lease, cloudSeatStoppedText(lease.idleFor(now)), now);
   }
 }
 
@@ -2000,7 +2041,7 @@ async function bindTurnComputer(owner: TurnOwner, resource: string, exclusive = 
             role: "bot", kind: "activity",
             tool: { name: cloudOverflowOfferText({ perSecondCostUsd, idleStopMs: cloudOverflowIdleStopMs(cfg) }), ok: true },
           });
-          cloudOverflowConsent.markOffered(owner.threadId);
+          cloudOverflowConsent.markOffered(owner.threadId, perSecondCostUsd);
         }
       }
       // #1655: consent can arrive mid-wait — the card's answer, or a
@@ -16254,10 +16295,22 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (body.consent) {
         // Consent answers the priced card, never a guess: without a prior
         // offer the rate was never shown, so a seat must not start yet.
-        if (!cloudOverflowConsent.offered(threadId)) return json(res, 409, { error: "no cloud overflow offer" });
-        cloudOverflowConsent.grant(threadId);
+        // The grant binds to the rate the card showed (#1655): a config
+        // change re-offers instead of starting at a new price silently.
+        const offeredRate = cloudOverflowConsent.offeredRate(threadId);
+        if (offeredRate === null) return json(res, 409, { error: "no cloud overflow offer" });
+        cloudOverflowConsent.grant(threadId, offeredRate);
       } else {
         cloudOverflowConsent.revoke(threadId);
+        // Revocation must reach the machine (#1655): the ledger alone
+        // would leave this conversation's seat billing to its idle
+        // timeout. A start still waking is caught by its own revoke
+        // check once readyBox resolves.
+        const seatBot = store.botByThread(threadId);
+        const lease = seatBot ? cloudSeatLeases.get(seatBot.id) : undefined;
+        if (seatBot && lease && lease.threadId === threadId) {
+          stopCloudSeat(seatBot.id, lease, "Cloud computer stopped because overflow consent was revoked — billing pauses while it sleeps.");
+        }
       }
       store.appendMessage(threadId, {
         role: "bot", kind: "activity",

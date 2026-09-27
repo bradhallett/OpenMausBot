@@ -14,6 +14,13 @@ import { computerWaitDuration } from "./computer-wait.ts";
  * it runs. "A few idle minutes" per the issue. */
 export const CLOUD_SEAT_IDLE_STOP_MS = 5 * 60_000;
 
+/** Retry cadence for an idle stop that failed (#1655): the first retry
+ * after one minute, doubling per failure up to ten. A failed stop keeps
+ * its lease — the seat still bills — so the sweep always retries instead
+ * of abandoning a running machine. */
+export const CLOUD_SEAT_SLEEP_RETRY_MS = 60_000;
+export const CLOUD_SEAT_SLEEP_RETRY_MAX_MS = 10 * 60_000;
+
 /** What the wait loop should do about cloud overflow, evaluated fresh on
  * every poll. `off` is fail-closed: the feature is disabled, the cloud
  * is not usable, or no per-second cost is configured — no card, no
@@ -49,17 +56,26 @@ export function cloudOverflowAction(situation: CloudOverflowSituation): CloudOve
  * allowlisted in config carries standing consent and never needs the
  * card. */
 export class CloudOverflowConsent {
-  private readonly grants = new Map<string, number>();
-  private readonly offers = new Map<string, number>();
+  private readonly grants = new Map<string, { at: number; perSecondCostUsd: number }>();
+  private readonly offers = new Map<string, { at: number; perSecondCostUsd: number }>();
   private readonly revocations = new Set<string>();
 
-  consented(threadId: string, allowlistedThreads: ReadonlySet<string> = new Set()): boolean {
-    return !this.revocations.has(threadId) && (this.grants.has(threadId) || allowlistedThreads.has(threadId));
+  /** Consent for this conversation. With `perSecondCostUsd`, a card
+   * consent counts only at the rate its card showed — an allowlisted
+   * thread carries the operator's standing consent, and the operator is
+   * also the one who sets the rate. */
+  consented(threadId: string, allowlistedThreads: ReadonlySet<string> = new Set(), perSecondCostUsd?: number): boolean {
+    if (this.revocations.has(threadId)) return false;
+    if (allowlistedThreads.has(threadId)) return true;
+    const grant = this.grants.get(threadId);
+    if (!grant) return false;
+    return perSecondCostUsd === undefined || grant.perSecondCostUsd === perSecondCostUsd;
   }
 
-  grant(threadId: string, now = Date.now()): void {
+  /** `perSecondCostUsd` is the rate the answered card showed. */
+  grant(threadId: string, perSecondCostUsd: number, now = Date.now()): void {
     this.revocations.delete(threadId);
-    this.grants.set(threadId, now);
+    this.grants.set(threadId, { at: now, perSecondCostUsd });
   }
 
   /** Revoking also clears the offered mark, so a later wait in the same
@@ -71,12 +87,22 @@ export class CloudOverflowConsent {
     return had;
   }
 
-  offered(threadId: string): boolean {
-    return this.offers.has(threadId);
+  /** A card is outstanding for this conversation — at the given rate
+   * when one is supplied, so a config change re-offers with the new
+   * price instead of meeting silence at the old one. */
+  offered(threadId: string, perSecondCostUsd?: number): boolean {
+    const offer = this.offers.get(threadId);
+    if (!offer) return false;
+    return perSecondCostUsd === undefined || offer.perSecondCostUsd === perSecondCostUsd;
   }
 
-  markOffered(threadId: string, now = Date.now()): void {
-    this.offers.set(threadId, now);
+  /** The rate the outstanding card showed, or null when no card is out. */
+  offeredRate(threadId: string): number | null {
+    return this.offers.get(threadId)?.perSecondCostUsd ?? null;
+  }
+
+  markOffered(threadId: string, perSecondCostUsd: number, now = Date.now()): void {
+    this.offers.set(threadId, { at: now, perSecondCostUsd });
   }
 }
 
@@ -87,15 +113,21 @@ export class CloudOverflowConsent {
 export class CloudSeatLease {
   readonly botId: string;
   readonly threadId: string;
+  /** The claim generation that started the seat: a stop releases the Box
+   * claim for exactly this owner, never a newer turn's. */
+  readonly generation: string;
   readonly startedAt: number;
   readonly idleStopMs: number;
   private lastActivityAt: number;
+  private sleepRetryNotBefore = 0;
+  private sleepRetryMs = CLOUD_SEAT_SLEEP_RETRY_MS;
 
-  constructor(init: { botId: string; threadId: string; now?: number; idleStopMs?: number }) {
+  constructor(init: { botId: string; threadId: string; generation: string; now?: number; idleStopMs?: number }) {
     const idleStopMs = init.idleStopMs ?? CLOUD_SEAT_IDLE_STOP_MS;
     if (!Number.isFinite(idleStopMs) || idleStopMs <= 0) throw new Error("Cloud seat idle stop window must be positive");
     this.botId = init.botId;
     this.threadId = init.threadId;
+    this.generation = init.generation;
     this.startedAt = init.now ?? Date.now();
     this.lastActivityAt = this.startedAt;
     this.idleStopMs = idleStopMs;
@@ -103,6 +135,23 @@ export class CloudSeatLease {
 
   touch(now = Date.now()): void {
     this.lastActivityAt = now;
+    // Real work earns a fresh stop attempt: the backoff only paces
+    // retries against an idle seat that keeps failing to sleep.
+    this.sleepRetryNotBefore = 0;
+    this.sleepRetryMs = CLOUD_SEAT_SLEEP_RETRY_MS;
+  }
+
+  /** An idle stop may run now — true until a failure defers it. */
+  sleepDue(now = Date.now()): boolean {
+    return now >= this.sleepRetryNotBefore;
+  }
+
+  /** The idle stop failed: keep the lease and back off, bounded, so the
+   * sweep retries gently instead of hammering a sick Box — and never
+   * abandons a seat that still bills. */
+  deferSleep(now = Date.now()): void {
+    this.sleepRetryNotBefore = now + this.sleepRetryMs;
+    this.sleepRetryMs = Math.min(this.sleepRetryMs * 2, CLOUD_SEAT_SLEEP_RETRY_MAX_MS);
   }
 
   idleFor(now = Date.now()): number {
