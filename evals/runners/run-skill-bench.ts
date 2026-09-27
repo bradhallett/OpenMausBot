@@ -166,7 +166,9 @@ export async function runSkillBench(bench: SkillBenchFixture, replicates = bench
       }
     }
   }
-  return scoreSkillBench(bench, runs);
+  // Score the fixture the override produced: with --replicates the report
+  // must publish the count that ran, not the fixture's default.
+  return scoreSkillBench({ ...bench, replicates }, runs);
 }
 
 const round = (value: number, digits = 1): number => Math.round(value * 10 ** digits) / 10 ** digits;
