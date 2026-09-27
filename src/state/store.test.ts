@@ -28,6 +28,7 @@ import {
 } from "./store";
 import { openLiveEvents, type LiveEventSourceLike, type LiveEventsPlatform } from "../lib/live-events";
 import type { ModelVariantState, RuntimeEvent } from "../../shared/runtime-events";
+import type { ConnectorToolGrant } from "../../shared/wire";
 import type { RoutineRun } from "../lib/routines";
 
 describe("api refusals", () => {
@@ -350,6 +351,39 @@ describe("keyboard shortcuts dialog state", () => {
     const closed = reducer(opened, { type: "toggleShortcuts" });
     expect(closed.shortcutsOpen).toBe(false);
     expect(closed.botSettingsSection).toBe("soul");
+  });
+});
+
+describe("connector grants persistence", () => {
+  const announcement = () => ({
+    id: "bot-1",
+    threadId: "thread-1",
+    name: "Maus",
+    title: "Helper",
+    description: "",
+    notifications: true,
+    color: "green" as const,
+    unread: false,
+    modelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+    approvalMode: "ask" as const,
+  });
+
+  it("PATCHes the exact explicit tool set the editor saved", async () => {
+    const request = vi.fn(async (_path: string, _init?: RequestInit) => ({ bot: announcement() }));
+    const grants: Record<string, ConnectorToolGrant> = {
+      gmail: { tools: ["GMAIL_FETCH_EMAILS", "GMAIL_SEND_EMAIL"] },
+      slack: { tools: "*" },
+    };
+    await persistBotUpdate("bot-1", { connectorTools: grants }, new AbortController().signal, request);
+    // Exact-set semantics: the wire body is the record verbatim, so a
+    // reload of what the server stored equals what the person picked.
+    expect(JSON.parse(String(request.mock.calls[0]?.[1]?.body))).toEqual({ connectorTools: grants });
+  });
+
+  it("sends null to drop the record and return to the legacy boolean", async () => {
+    const request = vi.fn(async (_path: string, _init?: RequestInit) => ({ bot: announcement() }));
+    await persistBotUpdate("bot-1", { connectorTools: null }, new AbortController().signal, request);
+    expect(JSON.parse(String(request.mock.calls[0]?.[1]?.body))).toEqual({ connectorTools: null });
   });
 });
 
@@ -2106,6 +2140,12 @@ describe("live config frames", () => {
     rooms: { turnTimeoutMinutes: 10 },
     localVm: { mode: "shared", maxInstances: 1 },
   };
+
+  it("keeps automatic recovery and its backup through live config refreshes", () => {
+    const automaticRecovery = { enabled: true, backup: { instanceId: "backup", model: "fixture-model" } };
+    expect(configStatusFromFrame({ ...baseFrame, automaticRecovery }).automaticRecovery).toEqual(automaticRecovery);
+    expect(configStatusFromFrame({ ...baseFrame, automaticRecovery: { enabled: false } }).automaticRecovery).toEqual({ enabled: false });
+  });
 
   it("preserves edition, budgets and billing through configStatusFromFrame", () => {
     const frame: ConfigStatusFrame = {

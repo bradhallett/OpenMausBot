@@ -8,6 +8,7 @@ import {
   connectorUnrecognizedText,
   evaluateConnectorTools,
   serviceSlugFor,
+  serviceSlugForCandidates,
 } from "./connector-verdict.ts";
 
 const toolsCall = (name: string, args: unknown) => ({
@@ -81,6 +82,20 @@ describe("serviceSlugFor", () => {
   });
 });
 
+describe("serviceSlugForCandidates", () => {
+  it("prefers the longest known slug across an underscore boundary", () => {
+    expect(serviceSlugForCandidates("BLAND_AI_MAKE_CALL", ["bland", "bland_ai"])).toBe("bland_ai");
+    expect(serviceSlugForCandidates("GITHUB_CREATE_ISSUE", ["git", "github"])).toBe("github");
+  });
+
+  it("matches whole slug segments only and reports no match for the caller's fallback", () => {
+    // "git" must not claim GITHUB_* — the candidate has to end at an underscore.
+    expect(serviceSlugForCandidates("GITHUB_CREATE_ISSUE", ["git"])).toBeNull();
+    expect(serviceSlugForCandidates("BLAND_AI_MAKE_CALL", ["gmail", "slack"])).toBeNull();
+    expect(serviceSlugForCandidates("GMAIL_SEND_EMAIL", [])).toBeNull();
+  });
+});
+
 describe("evaluateConnectorTools", () => {
   it("passes everything for a legacy bot with no grants record", () => {
     const verdict = evaluateConnectorTools(["GMAIL_SEND_EMAIL", "SLACK_POST_MESSAGE"], undefined);
@@ -91,6 +106,18 @@ describe("evaluateConnectorTools", () => {
     const verdict = evaluateConnectorTools(["GMAIL_SEND_EMAIL"], {});
     expect(verdict.allowed).toBe(false);
     expect(verdict.denials).toEqual([{ tool: "GMAIL_SEND_EMAIL", service: "gmail", onGrantedService: false }]);
+  });
+
+  it("treats inherited object keys as no grant", () => {
+    // CONSTRUCTOR_X resolves to the "constructor" service; without the
+    // own-property check the prototype's constructor poses as a grant and
+    // grant.tools.includes throws a 500 into the relay.
+    const verdict = evaluateConnectorTools(["CONSTRUCTOR_X", "TOSTRING_Y"], {});
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.denials).toEqual([
+      { tool: "CONSTRUCTOR_X", service: "constructor", onGrantedService: false },
+      { tool: "TOSTRING_Y", service: "tostring", onGrantedService: false },
+    ]);
   });
 
   it("allows only the exact tools a service's list names", () => {
@@ -111,6 +138,30 @@ describe("evaluateConnectorTools", () => {
     const grants: Record<string, ConnectorToolGrant> = { gmail: { tools: "*" } };
     expect(evaluateConnectorTools(["GMAIL_SEND_EMAIL", "GMAIL_FETCH_EMAILS"], grants).allowed).toBe(true);
     expect(evaluateConnectorTools(["SLACK_POST_MESSAGE"], grants).allowed).toBe(false);
+  });
+
+  it("keeps an underscored service's tools under its own grant", () => {
+    const grants: Record<string, ConnectorToolGrant> = {
+      bland: { tools: "*" },
+      bland_ai: { tools: ["BLAND_AI_MAKE_CALL"] },
+    };
+    expect(evaluateConnectorTools(["BLAND_AI_MAKE_CALL"], grants, ["bland", "bland_ai"])).toMatchObject({
+      allowed: true,
+      rule: "connectorTools.bland_ai",
+    });
+    // bland_ai claims BLAND_AI_* before bland's star grant can widen it.
+    expect(evaluateConnectorTools(["BLAND_AI_SEND_SMS"], grants, ["bland", "bland_ai"]).denials).toEqual([
+      { tool: "BLAND_AI_SEND_SMS", service: "bland_ai", onGrantedService: true },
+    ]);
+  });
+
+  it("does not let a plain-prefix grant capture an underscored connected service", () => {
+    // bland_ai is the connected service, so its tools must resolve there
+    // even when the record only holds a wildcard for the plain prefix.
+    const grants: Record<string, ConnectorToolGrant> = { bland: { tools: "*" } };
+    expect(evaluateConnectorTools(["BLAND_AI_MAKE_CALL"], grants, ["bland_ai"]).denials).toEqual([
+      { tool: "BLAND_AI_MAKE_CALL", service: "bland_ai", onGrantedService: false },
+    ]);
   });
 
   it("denies a name that maps to no service and judges a batch once per distinct tool", () => {

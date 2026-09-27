@@ -165,7 +165,9 @@ export type RuntimeEvent = RuntimeEventBase &
     // configuring something, not by retrying — the UI offers setup instead.
     // `terminal: true` records failure of the complete turn, rather than a
     // transient error or a legacy provider's diagnostic during cancellation.
-    | { type: "runtime.error"; message: string; setup?: boolean; terminal?: boolean }
+    // `claudeUpdate: true` narrows a setup failure to "this Claude Code is
+    // too old for the model": the UI offers to run `claude update` for them.
+    | { type: "runtime.error"; message: string; setup?: boolean; terminal?: boolean; claudeUpdate?: boolean }
     // The content boundary's escape-hatch audit (#1670): this bot is
     // configured to loosen a class, and that class was detected flowing
     // through unredacted. Never delivered live — the boundary writes it

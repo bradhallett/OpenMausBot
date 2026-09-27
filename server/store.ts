@@ -264,9 +264,10 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
     // transcript's secret-redaction boundary.
     if (card.profileRequest) {
       const scrubChanges = (changes: ProfileRequestChanges): ProfileRequestChanges => {
-        const out: ProfileRequestChanges = {};
+        const out = { ...changes };
         for (const [key, value] of Object.entries(changes)) {
-          out[key as keyof ProfileRequestChanges] = scrub(value);
+          // Booleans carry no text to scrub; only string fields pass through redaction.
+          if (typeof value === "string") out[key as keyof ProfileRequestChanges] = scrub(value);
         }
         return out;
       };
@@ -388,6 +389,8 @@ export interface BotRecord extends Omit<WireBot, "avatarUrl" | "tasks"> {
   };
   /** Receipt committed with a confirmed profile, for retrying card settlement. */
   lastProfileRequestId?: string;
+  /** Receipt committed with a confirmed authority tightening, for retrying card settlement. */
+  lastTighteningRequestId?: string;
   /** Receipt committed with a reviewed team batch; prevents replay after a lost response. */
   lastTeamSetupReceipt?: { requestId: string; result: TeamSetupResult };
   /** Organization library only: each part's release and written hashes
@@ -400,7 +403,7 @@ export interface BotRecord extends Omit<WireBot, "avatarUrl" | "tasks"> {
  * WireTask[], avatarUrl is coerced to always-present). The exactness
  * assertion fails to compile when either side drifts, so a new server
  * field forces a decision — wire-visible or private here. */
-export type BotWirePrivateKeys = "resumeCursors" | "tasks" | "avatarUrl" | "approvalGrant" | "lastProfileRequestId" | "lastTeamSetupReceipt" | "packageBase";
+export type BotWirePrivateKeys = "resumeCursors" | "tasks" | "avatarUrl" | "approvalGrant" | "lastProfileRequestId" | "lastTighteningRequestId" | "lastTeamSetupReceipt" | "packageBase";
 export type BotWireProjection = Pick<BotRecord, Exclude<keyof BotRecord, BotWirePrivateKeys>>;
 export type BotWireProjectionIsExact = AssertExact<Omit<WireBot, "avatarUrl" | "tasks">, BotWireProjection> & AssertSameKeys<Omit<WireBot, "avatarUrl" | "tasks">, BotWireProjection>;
 export const botWireProjectionIsExact: BotWireProjectionIsExact = true;
@@ -1681,7 +1684,7 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
     profile: Partial<
       Pick<
         BotRecord,
-        "name" | "title" | "description" | "soul" | "color" | "mascotExpression" | "mascotBody" | "modelSelection" | "section" | "visibility"
+        "name" | "title" | "description" | "soul" | "color" | "mascotExpression" | "mascotBody" | "modelSelection" | "section" | "cwd" | "visibility"
       >
     > = {},
     opts: {
@@ -1713,6 +1716,7 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
       createdAt: Date.now(),
     };
     if (section) bot.section = section;
+    if (profile.cwd) bot.cwd = profile.cwd;
     bot.tasks = [{
       threadId: bot.threadId,
       title: UNTITLED_THREAD,
@@ -1777,6 +1781,9 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
             modelSelection: structuredClone(modelSelection), approvalMode: "ask", autoApprove: false,
             unread: false, activity: "idle", busy: false }],
         };
+        // "" is the private-workspace spelling on proposal; the record
+        // stays clean with the field absent, exactly like the PATCH path.
+        if (!next.cwd) delete next.cwd;
         nextBots.unshift(next);
       } else {
         if (at < 0) throw new Error("A setup target no longer exists");
@@ -1818,6 +1825,28 @@ says it spoke. Unconfigured bots keep the credential-only pass. */
     }
     this.emit({ type: "bot", botId: chief.id });
     return result;
+  }
+
+  /** One reviewed default-model change (propose_model): task stamping is
+   * identical to applyTeamSetup's update branch — saved per-thread
+   * selections are never rewritten, and a thread with no selection of its
+   * own is pinned to the previous default so it does not silently follow
+   * the new one. */
+  applyModelDefault(id: string, modelSelection: ModelSelection): BotRecord | null {
+    const previous = this.bot(id);
+    if (!previous) return null;
+    const next: BotRecord = { ...previous, modelSelection: structuredClone(modelSelection) };
+    next.tasks = previous.tasks?.map((task) => ({
+      ...task,
+      modelSelection: structuredClone(task.modelSelection ?? previous.modelSelection),
+      approvalMode: approvalModeFor(this.projectBotForTask(previous.id, task.threadId)!),
+      autoApprove: task.autoApprove ?? previous.autoApprove,
+      alwaysAllow: structuredClone(task.alwaysAllow ?? previous.alwaysAllow ?? []),
+    }));
+    this.saveBots(this.bots.map((candidate) => candidate.id === id ? next : candidate));
+    this.bots = this.bots.map((candidate) => candidate.id === id ? next : candidate);
+    this.emit({ type: "bot", botId: id });
+    return next;
   }
 
   deleteBot(id: string, setupRequest?: TeamSetupRequest): boolean {

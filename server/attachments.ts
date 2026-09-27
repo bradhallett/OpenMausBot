@@ -80,6 +80,9 @@ const IMAGE_MIMES: Record<string, string> = {
  * despite using ZIP internally. The claimed mime determines the extension;
  * an attacker-controlled filename never does. */
 const FILE_MIMES: Readonly<Record<string, string>> = {
+  "video/mp4": ".mp4",
+  "video/webm": ".webm",
+  "video/quicktime": ".mov",
   "audio/opus": ".opus",
   "audio/ogg": ".ogg",
   "audio/mpeg": ".mp3",
@@ -651,7 +654,7 @@ export function attachmentExists(name: string): boolean {
  * filename (no separators, no dotfiles) inside ATTACHMENTS_DIR resolve —
  * the route must never become a general file server for the data dir. */
 export function readAttachment(name: string): { bytes: Buffer; mime: string } | null {
-  if (!/^[A-Za-z0-9-]+\.(png|jpg|jpeg|gif|webp)$/.test(name)) return null;
+  if (!/^[A-Za-z0-9-]+\.(png|jpg|jpeg|gif|webp|mp3)$/.test(name)) return null;
   const path = join(ATTACHMENTS_DIR, name);
   if (extname(path) === ".jpeg") return null; // saved as .jpg; .jpeg is not a name we write
   try {
@@ -671,7 +674,51 @@ function mimeForExt(ext: string): string {
       return "image/gif";
     case ".webp":
       return "image/webp";
+    case ".mp3":
+      return "audio/mpeg";
     default:
       return "application/octet-stream";
   }
+}
+
+/** Verdict on a `Range` header for audio serving (#1745). `none` means
+ * "answer as if the header was absent" — the pre-Range full 200 that
+ * images and documents keep forever — and covers absent, malformed,
+ * non-bytes, and multi-range headers alike. `unsatisfiable` is the one
+ * malformed-but-meaningful case (a start at or past EOF) that must answer
+ * 416 rather than silently degrade, so players learn the truth about the
+ * file they are seeking inside. */
+export type AudioRange =
+  | { kind: "none" }
+  | { kind: "unsatisfiable" }
+  | { kind: "range"; start: number; end: number };
+
+/** Parse a single `bytes=` range against a stored audio file. Only the
+ * canonical shapes a player sends are honored: `a-b`, `a-`, and `-n`
+ * (the last-n-bytes suffix). Anything else — commas, letters, reversed
+ * bounds, internal spaces — reads as "not understood" and the caller sends
+ * the whole file, which is always a correct answer to a GET. */
+export function parseAudioRange(header: string | undefined, size: number): AudioRange {
+  const raw = header?.trim();
+  if (!raw) return { kind: "none" };
+  const m = raw.match(/^bytes=(\d*)-(\d*)$/);
+  if (!m) return { kind: "none" };
+  const [, rawStart, rawEnd] = m;
+  if (rawStart === "") {
+    // `bytes=-` carries no bounds at all: malformed input, not a suffix
+    // range, so the caller answers with the whole file. A real zero-length
+    // suffix (`bytes=-0`) stays unsatisfiable below, per RFC 9110.
+    if (rawEnd === "") return { kind: "none" };
+    // suffix range: the final n bytes; zero is unsatisfiable by definition
+    const suffix = Number(rawEnd);
+    if (!suffix) return { kind: "unsatisfiable" };
+    if (size === 0) return { kind: "unsatisfiable" };
+    return { kind: "range", start: Math.max(0, size - suffix), end: size - 1 };
+  }
+  const start = Number(rawStart);
+  if (start >= size) return { kind: "unsatisfiable" };
+  if (rawEnd === "") return { kind: "range", start, end: size - 1 };
+  const end = Number(rawEnd);
+  if (end < start) return { kind: "none" };
+  return { kind: "range", start, end: Math.min(end, size - 1) };
 }
