@@ -59,7 +59,7 @@ describe("provider key rows", () => {
   it("renders the decision-model key write-only like every other provider key", () => {
     vi.spyOn(store, "useStore").mockReturnValue({
       state: { ...store.initialState, config: {
-        ...store.initialState.config, decisionModel: { configured: true, url: "", model: "jev-latest", threshold: 0.9 },
+        ...store.initialState.config, decisionModel: { configured: true, hasKey: true, url: "", model: "jev-latest", threshold: 0.9 },
       } as store.ConfigStatus },
       dispatch: vi.fn(),
       flushBotPatches: vi.fn(),
@@ -72,6 +72,25 @@ describe("provider key rows", () => {
     expect(html).toContain('value=""');
     expect(html).not.toContain("Connected");
     expect(html).toContain(">Test<");
+  });
+
+  it("keeps a key saved ahead of its connection clearable, with nothing to test yet", () => {
+    vi.spyOn(store, "useStore").mockReturnValue({
+      state: { ...store.initialState, config: {
+        ...store.initialState.config, decisionModel: { configured: false, hasKey: true, url: "", model: "", threshold: 0.9 },
+      } as store.ConfigStatus },
+      dispatch: vi.fn(),
+      flushBotPatches: vi.fn(),
+      refreshInstances: vi.fn(),
+      refreshModels: vi.fn(),
+    });
+    const html = render(createElement(ApiKeyRow, { section: "decisionModel", testProvider: "decisionModel" }));
+    // The stored key exists, so Clear must work even though the
+    // connection is incomplete; an incomplete connection is not testable.
+    const clearButton = html.match(/<button[^>]*>Clear<\/button>/)?.[0] ?? "";
+    expect(clearButton).toContain(">Clear</button>");
+    expect(clearButton).not.toMatch(/\sdisabled(=|[>\s])/);
+    expect(html).not.toContain(">Test<");
   });
 });
 
@@ -105,7 +124,7 @@ describe("decision model routing", () => {
   });
 
   it("echoes a saved connection and points at the calibration probe", () => {
-    mockStore({ configured: true, provider: "custom", url: "http://127.0.0.1:8787/v1", model: "local", threshold: 0.75 });
+    mockStore({ configured: true, hasKey: true, provider: "custom", url: "http://127.0.0.1:8787/v1", model: "local", threshold: 0.75 });
     const html = render(createElement(DecisionModelRouting));
     expect(html).toContain('value="local"');
     expect(html).toContain('value="http://127.0.0.1:8787/v1"');
@@ -114,7 +133,7 @@ describe("decision model routing", () => {
   });
 
   it("offers Not configured only before a lane is saved, so a saved route has no dead-end selection", () => {
-    mockStore({ configured: true, provider: "typesafe", url: "", model: "jev-latest", threshold: 0.9 });
+    mockStore({ configured: true, hasKey: true, provider: "typesafe", url: "", model: "jev-latest", threshold: 0.9 });
     const html = render(createElement(DecisionModelRouting));
     expect(html).not.toContain('<option value="">');
     expect(html).toContain('value="typesafe"');

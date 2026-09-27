@@ -112,30 +112,45 @@ function validateChoice(answer: { choice?: unknown; confidence?: unknown; probab
 /** The native dialect shared by the typesafe, vercel and openrouter lanes:
  * one zero-dependency SDK pointed at each lane's root. */
 function systemOneClient(options: { baseUrl: string; apiKey?: string; model: string; fetchImpl?: typeof fetch }): DecisionModelClient {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  // A 3xx could replay this POST — state, criteria, and the key — to an
+  // attacker-chosen destination; like the custom lane below, the
+  // configured URL is the only destination either lane may ever answer.
+  const guarded = (input: string, init?: RequestInit) => fetchImpl(input, { ...init, redirect: "error" });
   const client = new TypeSafeClient({
     ...(options.apiKey ? { apiKey: options.apiKey } : {}),
     baseURL: options.baseUrl,
-    ...(options.fetchImpl ? { fetch: options.fetchImpl } : {}),
+    fetch: guarded,
   });
   return {
     async decide(request) {
-      const response = await client.systemOne(
-        {
-          model: options.model,
-          state: request.state,
-          questions: {
-            next_action: choiceQuestion(request.instructions ?? null, request.criteria),
+      // Same 30-second lane budget as the custom lane: the SDK's own
+      // per-attempt timeout has no total retry budget, so retries could
+      // otherwise hold a decision (and its caller) far past the budget.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 30_000);
+      const signal = request.signal ? AbortSignal.any([request.signal, controller.signal]) : controller.signal;
+      try {
+        const response = await client.systemOne(
+          {
+            model: options.model,
+            state: request.state,
+            questions: {
+              next_action: choiceQuestion(request.instructions ?? null, request.criteria),
+            },
           },
-        },
-        request.signal ? { signal: request.signal } : undefined,
-      );
-      const answer = (response.answers as Record<string, unknown>).next_action as Record<string, unknown>;
-      if (answer?.type !== "choice") throw new Error("decision model returned a non-choice answer");
-      const choice = validateChoice(answer as { choice?: unknown; confidence?: unknown; probabilities?: unknown }, request.criteria);
-      if (!choice) throw new Error("decision model returned an invalid choice answer");
-      return typeof response.model === "string" && response.model.trim()
-        ? { ...choice, model: response.model }
-        : choice;
+          { signal },
+        );
+        const answer = (response.answers as Record<string, unknown>).next_action as Record<string, unknown>;
+        if (answer?.type !== "choice") throw new Error("decision model returned a non-choice answer");
+        const choice = validateChoice(answer as { choice?: unknown; confidence?: unknown; probabilities?: unknown }, request.criteria);
+        if (!choice) throw new Error("decision model returned an invalid choice answer");
+        return typeof response.model === "string" && response.model.trim()
+          ? { ...choice, model: response.model }
+          : choice;
+      } finally {
+        clearTimeout(timer);
+      }
     },
   };
 }
@@ -195,7 +210,16 @@ function chatCompletionsClient(options: { baseUrl: string; apiKey?: string; mode
         if (!response.ok) throw Object.assign(new Error(`decision endpoint answered ${response.status}`), { status: response.status });
         const body: unknown = await response.json().catch(() => null);
         const content = (body as { choices?: Array<{ message?: { content?: unknown } }> } | null)?.choices?.[0]?.message?.content;
-        const parsed: unknown = typeof content === "string" ? JSON.parse(content) : content;
+        let parsed: unknown = content;
+        if (typeof content === "string") {
+          try {
+            parsed = JSON.parse(content);
+          } catch {
+            // a wrapper that answers prose (or a truncated body) is a
+            // decision failure, not a raw SyntaxError for the caller
+            throw new Error("decision endpoint returned no JSON decision");
+          }
+        }
         if (!parsed || typeof parsed !== "object") throw new Error("decision endpoint returned no JSON decision");
         const choice = validateChoice(parsed as { choice?: unknown; confidence?: unknown; probabilities?: unknown }, request.criteria);
         if (!choice) throw new Error("decision endpoint returned an invalid decision envelope");

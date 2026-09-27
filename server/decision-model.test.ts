@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_DECISION_THRESHOLD,
   createCalibrationGate,
+  createDecisionModelClient,
   decisionModelBaseUrl,
   decisionModelConfigured,
   decisionThreshold,
@@ -113,6 +114,51 @@ describe("probeDecisionModel (systemone lanes)", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it("never follows a redirect on systemone lanes: every fetch refuses one", async () => {
+    const inits: Array<{ redirect?: string }> = [];
+    const fetchImpl = vi.fn(async (_input: string | URL, init?: RequestInit) => {
+      inits.push({ redirect: init?.redirect });
+      return ok(systemOneBody({ choice: "two", confidence: 0.97, probabilities: CANARY_PROBABILITIES }));
+    });
+    await expect(probeDecisionModel(config, fetchImpl as unknown as typeof fetch)).resolves.toMatchObject({ ok: true });
+    expect(inits).toHaveLength(2);
+    expect(inits.every((init) => init.redirect === "error")).toBe(true);
+  });
+
+  it("aborts a hung systemone request at the 30-second lane budget", async () => {
+    vi.useFakeTimers();
+    try {
+      // The fetch never settles on its own: it rejects only when the SDK
+      // aborts it, which the lane's 30-second budget must trigger no
+      // matter how the SDK's own 10-second per-attempt retries interleave.
+      const aborts: number[] = [];
+      const start = Date.now();
+      const fetchImpl = vi.fn((_input: string | URL, init?: RequestInit) =>
+        new Promise<never>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => {
+              aborts.push(Date.now() - start);
+              reject(new Error("This operation was aborted."));
+            },
+            { once: true },
+          );
+        }),
+      ) as unknown as typeof fetch;
+      const settled = createDecisionModelClient(config, fetchImpl)!
+        .client.decide({ state: "The assistant must pick the only even prime number.", criteria: { two: "The only even prime number." } })
+        .then(
+          () => "settled",
+          (error: unknown) => error,
+        );
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(settled).resolves.toBeInstanceOf(Error);
+      expect(aborts.at(-1)).toBe(30_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("answers an incomplete connection before any network call", async () => {
     const fetchImpl = vi.fn();
     await expect(probeDecisionModel({ provider: "custom", model: "m" }, fetchImpl as unknown as typeof fetch)).resolves.toMatchObject({
@@ -171,6 +217,14 @@ describe("probeDecisionModel (custom lane)", () => {
     await expect(probeDecisionModel(config, fetchImpl as unknown as typeof fetch)).resolves.toMatchObject({ ok: true });
     expect(inits).toHaveLength(2);
     expect(inits.every((init) => init.redirect === "error")).toBe(true);
+  });
+
+  it("reports a prose answer as a decision failure, not a raw SyntaxError", async () => {
+    const fetchImpl = vi.fn(async () => ok({ choices: [{ message: { content: "The even prime is two." } }] }));
+    await expect(
+      createDecisionModelClient(config, fetchImpl as unknown as typeof fetch)!
+        .client.decide({ state: "The assistant must pick the only even prime number.", criteria: { two: "The only even prime number." } }),
+    ).rejects.toThrow("decision endpoint returned no JSON decision");
   });
 });
 

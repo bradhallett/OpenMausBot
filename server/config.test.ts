@@ -90,6 +90,25 @@ describe("configuration boundaries", () => {
     expect(() => parseConfigPatch({ tts: { provider: "unknown" } })).toThrow("provider");
   });
 
+  it("restricts the decision endpoint to https, or http on a loopback host", () => {
+    for (const url of ["https://decide.test/v1", "http://127.0.0.1:8787/v1", "http://localhost:8787/v1", "http://[::1]:8787/v1"]) {
+      expect(parseConfigPatch({ decisionModel: { url } }).decisionModel).toEqual({ url });
+    }
+    // Empty clears the endpoint and stays allowed.
+    expect(parseConfigPatch({ decisionModel: { url: "" } }).decisionModel).toEqual({ url: "" });
+    for (const url of [
+      "http://lan-server:8000/v1",
+      "http://192.168.1.4:8000/v1",
+      "http://decide.test/v1",
+      "http://127.999.0.1/v1",
+      "http://127.0.0.1.1/v1",
+      "ftp://decide.test/v1",
+      "not-a-url",
+    ]) {
+      expect(() => parseConfigPatch({ decisionModel: { url } })).toThrow("decisionModel.url");
+    }
+  });
+
   it("defaults to three parallel threads and validates a configurable maximum of ten", () => {
     expect(maxConcurrentBotThreads({})).toBe(3);
     expect(parseStoredConfig({ threads: { maxConcurrentPerBot: 10 } })).toEqual({ threads: { maxConcurrentPerBot: 10 } });

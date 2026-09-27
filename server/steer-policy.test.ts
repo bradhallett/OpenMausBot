@@ -104,6 +104,13 @@ describe("steer-policy chooser", () => {
     expect(observed?.aborted).toBe(true);
   });
 
+  it("a budget abort classifies as a timeout whatever message the transport rejects with", async () => {
+    const decision = await run(clientOf((signal) => new Promise<DecisionChoice>((_, reject) => {
+      signal?.addEventListener("abort", () => reject(new Error("This operation was aborted")), { once: true });
+    })));
+    expect(decision).toMatchObject({ action: "steer", layer: "preference-default", detail: "timeout" });
+  });
+
   it("builds bounded state: truncated words, integer queue depth, positive elapsed time", () => {
     const built = buildAdmissionState({
       message: "x".repeat(2_000),

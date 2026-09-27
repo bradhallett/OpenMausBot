@@ -14,7 +14,14 @@ export type TestableProvider = "anthropic" | "openaiCompat" | "decisionModel" | 
 
 const SECTIONS: Record<
   ConfigSection,
-  { body: (value: string) => unknown; flag: (config: ConfigStatus) => boolean }
+  {
+    body: (value: string) => unknown;
+    flag: (config: ConfigStatus) => boolean;
+    /** Sections whose stored secret can exist while the section reads
+     * unconfigured (a decision-model key saved before its connection was
+     * completed): such a key must stay clearable. Absent = flag. */
+    clearFlag?: (config: ConfigStatus) => boolean;
+  }
 > = {
   composio: {
     body: (v) => ({ composio: { apiKey: v } }),
@@ -24,7 +31,11 @@ const SECTIONS: Record<
   opencodeGo: { body: (v) => ({ opencodeGo: { apiKey: v } }), flag: (c) => c.opencodeGo?.configured ?? false },
   anthropic: { body: (v) => ({ anthropic: { key: v } }), flag: (c) => c.anthropic?.configured ?? false },
   openaiCompat: { body: (v) => ({ openaiCompat: { key: v } }), flag: (c) => c.openaiCompat?.configured ?? false },
-  decisionModel: { body: (v) => ({ decisionModel: { apiKey: v } }), flag: (c) => c.decisionModel?.configured ?? false },
+  decisionModel: {
+    body: (v) => ({ decisionModel: { apiKey: v } }),
+    flag: (c) => c.decisionModel?.configured ?? false,
+    clearFlag: (c) => c.decisionModel?.hasKey ?? false,
+  },
   mistral: { body: (v) => ({ mistral: { key: v } }), flag: (c) => c.mistral?.configured ?? false },
   xai: { body: (v) => ({ xai: { key: v } }), flag: (c) => c.xai?.configured ?? false },
 };
@@ -227,12 +238,15 @@ export function ApiKeyRow({
   }, [state.config]);
 
   const configured = state.config ? SECTIONS[section].flag(state.config) : false;
-  const clearing = !value.trim() && configured;
+  // Clearing is about the stored secret, not the complete connection: a
+  // key saved ahead of its settings must be removable.
+  const clearable = state.config ? (SECTIONS[section].clearFlag?.(state.config) ?? configured) : false;
+  const clearing = !value.trim() && clearable;
   const emptyDraft = edited && !value.trim();
   const credential = credentialCopy(section);
 
   const save = () => {
-    if (saving || (!value.trim() && !configured)) return;
+    if (saving || (!value.trim() && !clearable)) return;
     setSaving(true);
     setError(null);
     testGeneration.current++;
@@ -310,7 +324,7 @@ export function ApiKeyRow({
         />
         <button
           onClick={save}
-          disabled={saving || (!value.trim() && !configured)}
+          disabled={saving || (!value.trim() && !clearable)}
           className={cn(
             "flex w-[72px] shrink-0 items-center justify-center gap-1.5 rounded-lg py-2 text-[13px]",
             clearing

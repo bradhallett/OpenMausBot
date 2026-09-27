@@ -186,6 +186,25 @@ export function windowStateElements(payload: JsonRecord): JsonRecord[] {
   return [];
 }
 
+/** The window's frame origin and size as the driver reports it. Element
+ * frames are window points while a click against the captured screenshot
+ * needs pixels, so this frame plus the shot's scale are what make a
+ * faithful conversion possible. Null when the payload carries none. */
+export function windowStateBounds(payload: JsonRecord): { x: number; y: number; width: number; height: number } | null {
+  const value = payload.window_bounds;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { x, y, width, height } = value as JsonRecord;
+  if (![x, y, width, height].every((n) => typeof n === "number" && Number.isFinite(n))) return null;
+  if ((width as number) <= 0 || (height as number) <= 0) return null;
+  return { x: x as number, y: y as number, width: width as number, height: height as number };
+}
+
+/** The screenshot's pixel scale against window points (Retina = 2). */
+export function windowStateScale(payload: JsonRecord): number | null {
+  const value = payload.screenshot_scale;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+
 const ACTIVATION_ROLES = new Set([
   "button", "push button", "icon button", "link", "checkbox", "radio", "menuitem", "menu item",
   "menuitemcheckbox", "menuitemradio", "tab", "switch", "toggle", "option", "combobox",
@@ -235,6 +254,14 @@ function elementBounds(element: JsonRecord): { x: number; y: number; width: numb
   return null;
 }
 
+/** The driver's stable per-element handle, when the snapshot carries one:
+ * a token click is bound to the observed element itself rather than to
+ * coordinates derived from that observation. */
+function elementToken(element: JsonRecord): string | undefined {
+  const value = element.element_token;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
 function elementActivatable(element: JsonRecord, role: string): boolean {
   if (element.interactive === true || element.clickable === true) return true;
   return ACTIVATION_ROLES.has(role);
@@ -245,6 +272,7 @@ export type ClickTarget = {
   y: number;
   description: string;
   captureId?: string;
+  elementToken?: string;
   pid?: number;
   windowId?: number;
 };
@@ -272,6 +300,8 @@ export function buildChoice(options: {
   history: Array<{ selected_id?: string; outcome?: string }>;
   pid?: number;
   windowId?: number;
+  windowBounds?: { x: number; y: number; width: number; height: number };
+  screenshotScale?: number;
 }): BuiltChoice | null {
   const regions: JsonRecord[] = [];
   const candidates: Array<{ id: string; description: string }> = [];
@@ -303,11 +333,36 @@ export function buildChoice(options: {
     const candidateId = `click:${candidates.length}`;
     const description = `Click ${label.slice(0, 140)} at ${center.x},${center.y}`.slice(0, 1_000);
     candidates.push({ id: candidateId, description });
+    // Element frames are window points; a click against the captured
+    // screenshot needs its pixels. When the driver reports the window's
+    // frame and the shot's scale, convert the element center into capture
+    // pixels; otherwise keep the AX center and let the capture_id taken
+    // with the snapshot carry the coordinate space.
+    const pixel =
+      options.windowBounds && options.screenshotScale
+        ? {
+            x: Math.max(
+              0,
+              Math.round(
+                (bounds.x - options.windowBounds.x) * options.screenshotScale +
+                  (bounds.width * options.screenshotScale) / 2,
+              ),
+            ),
+            y: Math.max(
+              0,
+              Math.round(
+                (bounds.y - options.windowBounds.y) * options.screenshotScale +
+                  (bounds.height * options.screenshotScale) / 2,
+              ),
+            ),
+          }
+        : center;
     clicks.set(candidateId, {
-      x: center.x,
-      y: center.y,
+      x: pixel.x,
+      y: pixel.y,
       description,
       captureId: options.captureId,
+      ...(elementToken(element) ? { elementToken: elementToken(element)! } : {}),
       ...(options.pid !== undefined ? { pid: options.pid } : {}),
       ...(options.windowId !== undefined ? { windowId: options.windowId } : {}),
     });
@@ -419,6 +474,21 @@ export function createDecisionChooser(options: {
     async intercept(call) {
       if (call.name !== "screenshot") return { handled: false };
       if (disabled) return { handled: false };
+      // get_window_state is window-scoped — the 0.28.x driver requires a
+      // pid and window id — and the only trustworthy source for both is
+      // the screenshot call being intercepted: the agent already chose
+      // its window. Without them there is nothing to observe on the
+      // agent's behalf, so the frame forwards untouched, silently and
+      // before any driver call or goal fetch, like every other
+      // non-eligible step.
+      const callArgs =
+        call.arguments && typeof call.arguments === "object" && !Array.isArray(call.arguments)
+          ? (call.arguments as JsonRecord)
+          : null;
+      const pid = callArgs?.pid;
+      const windowId = callArgs?.window_id;
+      if (typeof pid !== "number" || !Number.isInteger(pid)) return { handled: false };
+      if (typeof windowId !== "number" || !Number.isInteger(windowId)) return { handled: false };
       let goal: string | null = null;
       try {
         goal = await options.goal();
@@ -428,7 +498,12 @@ export function createDecisionChooser(options: {
       if (!goal || !goal.trim()) return { handled: false };
       let state: unknown;
       try {
-        state = await options.callDriver("get_window_state", { include_accessibility_tree: true });
+        state = await options.callDriver("get_window_state", {
+          pid,
+          window_id: windowId,
+          include_accessibility_tree: true,
+          include_screenshot: true,
+        });
       } catch (error) {
         return fail(`window state unavailable: ${messageOf(error)}`);
       }
@@ -439,16 +514,17 @@ export function createDecisionChooser(options: {
         // Nothing decision-shaped to reason over; the loop continues.
         return { handled: false };
       }
-      const pid = typeof payload.pid === "number" && Number.isFinite(payload.pid) ? payload.pid : undefined;
-      const windowId =
-        typeof payload.window_id === "number" && Number.isFinite(payload.window_id) ? payload.window_id : undefined;
+      const windowBounds = windowStateBounds(payload);
+      const screenshotScale = windowStateScale(payload);
       const built = buildChoice({
         goal,
         captureId,
         elements: windowStateElements(payload),
         history: [...history],
-        ...(pid !== undefined ? { pid } : {}),
-        ...(windowId !== undefined ? { windowId } : {}),
+        pid,
+        windowId,
+        ...(windowBounds ? { windowBounds } : {}),
+        ...(screenshotScale !== null ? { screenshotScale } : {}),
       });
       if (!built) return { handled: false };
       try {
@@ -552,13 +628,20 @@ export function createDecisionChooser(options: {
       }
       let clicked: unknown;
       try {
-        clicked = await options.callDriver("click", {
-          x: target.x,
-          y: target.y,
-          ...(target.captureId ? { capture_id: target.captureId } : {}),
-          ...(target.pid !== undefined ? { pid: target.pid } : {}),
-          ...(target.windowId !== undefined ? { window_id: target.windowId } : {}),
-        });
+        // A token click is bound to the observed element itself; a
+        // coordinate click rides the capture the snapshot was taken with.
+        clicked = await options.callDriver(
+          "click",
+          target.elementToken
+            ? { element_token: target.elementToken, pid: target.pid, window_id: target.windowId }
+            : {
+                x: target.x,
+                y: target.y,
+                ...(target.captureId ? { capture_id: target.captureId } : {}),
+                ...(target.pid !== undefined ? { pid: target.pid } : {}),
+                ...(target.windowId !== undefined ? { window_id: target.windowId } : {}),
+              },
+        );
       } catch (error) {
         return fail(`click failed: ${messageOf(error)}`);
       }

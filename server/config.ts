@@ -507,8 +507,37 @@ const appConfigSchema = z.object({
 const storedAppConfigSchema = appConfigSchema.extend({
   browserProfiles: storedBrowserProfilesSchema.optional(),
 });
+/** Plain HTTP for the decision endpoint is reserved for the operator's
+ * own machine: the requests carry accessibility text and, when one is
+ * configured, the key. Empty clears the endpoint and stays allowed. */
+function isDecisionUrlTransportSecure(value: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol === "https:") return true;
+  if (parsed.protocol !== "http:") return false;
+  const host = parsed.hostname.toLowerCase();
+  if (host === "localhost" || host === "::1" || host === "[::1]") return true;
+  const octets = host.match(/^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  return octets !== null && octets.slice(1).every((octet) => Number(octet) <= 255);
+}
+
 const appConfigPatchSchema = appConfigSchema.omit({ instances: true, mcpServers: true, cliStartup: true, customDomain: true })
-  .extend({ threads: threadsPatchSchema.optional(), newBots: newBotsPatchSchema.optional() });
+  .extend({ threads: threadsPatchSchema.optional(), newBots: newBotsPatchSchema.optional() })
+  .superRefine((value, ctx) => {
+    const url = value.decisionModel?.url?.trim();
+    if (!url) return;
+    if (!isDecisionUrlTransportSecure(url)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["decisionModel", "url"],
+        message: "decisionModel.url must use https (http is allowed only on a loopback host)",
+      });
+    }
+  });
 const jsonObjectSchema = z.record(z.string(), z.json());
 
 export interface AppConfig {

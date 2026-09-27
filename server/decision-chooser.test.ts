@@ -167,7 +167,7 @@ describe("createDecisionChooser", () => {
     return { chooser, reports, driverCalls, decisions };
   }
 
-  const screenshot = { id: 1, name: "screenshot", arguments: {} };
+  const screenshot = { id: 1, name: "screenshot", arguments: { pid: 4242, window_id: 7 } };
 
   it("acts above threshold: one click, an honest answer text, a report", async () => {
     const h = harness({ decide: () => ({ selectedId: "click:0", confidence: 0.95, probabilities: { click: 0.95 } }) });
@@ -175,9 +175,61 @@ describe("createDecisionChooser", () => {
     expect(decision.handled).toBe(true);
     expect(decision.text).toContain("confidence 95%");
     expect(decision.text).toContain("No screenshot was taken");
+    // The observation must target the very window the agent asked about,
+    // and must ask for the screenshot the click coordinates ride on.
+    expect(h.driverCalls[0]!.args).toEqual({
+      pid: 4242,
+      window_id: 7,
+      include_accessibility_tree: true,
+      include_screenshot: true,
+    });
     expect(h.driverCalls.map((c) => c.name)).toEqual(["get_window_state", "click"]);
     expect(h.driverCalls[1]!.args).toMatchObject({ x: 160, y: 220, capture_id: "cap-1", pid: 4242, window_id: 7 });
     expect(h.reports).toEqual([{ outcome: "acted", selectedId: "click:0", confidence: 0.95 }]);
+  });
+
+  it("forwards silently when the screenshot call is not window-scoped", async () => {
+    // get_window_state needs the agent's pid and window id; a call that
+    // does not carry both is not eligible and must cost nothing.
+    const h = harness({});
+    expect(await h.chooser.intercept({ id: 1, name: "screenshot", arguments: {} })).toEqual({ handled: false });
+    expect(await h.chooser.intercept({ id: 2, name: "screenshot", arguments: { pid: 4242 } })).toEqual({ handled: false });
+    expect(await h.chooser.intercept({ id: 3, name: "screenshot", arguments: { pid: "4242", window_id: 7 } })).toEqual({ handled: false });
+    expect(await h.chooser.intercept({ id: 4, name: "screenshot", arguments: { pid: 4242, window_id: 1.5 } })).toEqual({ handled: false });
+    expect(h.driverCalls).toEqual([]);
+    expect(h.reports).toEqual([]);
+  });
+
+  it("clicks by element_token when the snapshot provides one", async () => {
+    const h = harness({
+      windowState: {
+        structuredContent: {
+          ...snapshot,
+          elements: [{ ...snapshot.elements[0], element_token: "tok-9" }, snapshot.elements[1]],
+        },
+      },
+    });
+    expect(await h.chooser.intercept(screenshot)).toEqual(expect.objectContaining({ handled: true }));
+    // The token binds the click to the observed element itself; no
+    // derived coordinates or capture id ride along.
+    expect(h.driverCalls[1]!.args).toEqual({ element_token: "tok-9", pid: 4242, window_id: 7 });
+  });
+
+  it("converts window-point frames into screenshot pixels for the click", async () => {
+    const h = harness({
+      windowState: {
+        structuredContent: {
+          ...snapshot,
+          window_bounds: { x: 40, y: 80, width: 800, height: 600 },
+          screenshot_scale: 2,
+          elements: [snapshot.elements[0]],
+        },
+      },
+    });
+    expect(await h.chooser.intercept(screenshot)).toEqual(expect.objectContaining({ handled: true }));
+    // Element frame {x:100,y:200,w:120,h:40} inside window frame
+    // {x:40,y:80} at scale 2: ((100-40)+60)*2 = 240, ((200-80)+20)*2 = 280.
+    expect(h.driverCalls[1]!.args).toMatchObject({ x: 240, y: 280, capture_id: "cap-1", pid: 4242, window_id: 7 });
   });
 
   it("clears the decision timeout once a fast decision lands", async () => {
@@ -309,7 +361,7 @@ describe("createDecisionChooser", () => {
       },
       isHeld: async () => false,
     });
-    for (let i = 0; i < 3; i += 1) await chooser.intercept({ id: i, name: "screenshot", arguments: {} });
+    for (let i = 0; i < 3; i += 1) await chooser.intercept({ id: i, name: "screenshot", arguments: { pid: 4242, window_id: 7 } });
     expect(reports).toHaveLength(3);
     expect(reports.map((r) => r.outcome)).toEqual(["error", "error", "error"]);
     expect(reports[2]).toMatchObject({ detail: expect.stringContaining("chooser disabled") });

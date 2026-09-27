@@ -12798,6 +12798,9 @@ function configStatus() {
     // the key; incomplete = the chooser stays off
     decisionModel: {
       configured: decisionModelConfigured(cfg.decisionModel),
+      // a stored key with no provider/model yet still exists and must
+      // stay clearable from the keys page; the value never leaves
+      hasKey: Boolean(cfg.decisionModel?.apiKey?.trim()),
       ...(cfg.decisionModel?.provider ? { provider: cfg.decisionModel.provider } : {}),
       url: decisionModelBaseUrl(cfg.decisionModel ?? {}) ?? "",
       model: cfg.decisionModel?.model ?? "",

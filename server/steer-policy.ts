@@ -194,7 +194,10 @@ export async function decideAdmission(options: {
     ]);
   } catch (error) {
     const message = (error instanceof Error ? error.message : String(error)).slice(0, 120);
-    return fallback(preference, message === "decision timed out" ? "timeout" : `error: ${message}`);
+    // The budget aborting the signal IS the timeout, whatever message the
+    // transport rejects with (fetch layers word their abort errors
+    // differently); anything else is an ordinary bounded error.
+    return fallback(preference, decisionAbort.signal.aborted ? "timeout" : `error: ${message}`);
   } finally {
     if (decisionTimeout) clearTimeout(decisionTimeout);
   }

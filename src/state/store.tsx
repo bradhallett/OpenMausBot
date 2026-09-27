@@ -591,6 +591,8 @@ export interface ConfigStatus {
    * key is write-only like every other credential. */
   decisionModel?: {
     configured: boolean;
+    /** a stored key exists even when the connection is not yet complete */
+    hasKey: boolean;
     provider?: "typesafe" | "vercel" | "openrouter" | "custom";
     url: string;
     model: string;
