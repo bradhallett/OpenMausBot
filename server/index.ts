@@ -1778,11 +1778,12 @@ const settlingResourceOwners = new Map<string, string>();
  * yields once another turn holds the seat. The durable VM profile keeps
  * its login state, so that re-claim is cheap. Read per claim: a flag
  * change applies to new claims, never to a seat held under the old
- * setting. */
+ * setting. computer:phone is excluded: it is the #1663 exclusivity lock,
+ * claimed once per turn with no activity signal to renew it. */
 const COMPUTER_CLAIM_IDLE_POLICY = new IdleReleasePolicy();
 
 function computerClaimIdlePolicy(resource: string): IdleReleasePolicy | undefined {
-  return resource.startsWith("computer:") && computerClaimIdleReleaseEnabled(cfg) ? COMPUTER_CLAIM_IDLE_POLICY : undefined;
+  return resource.startsWith("computer:") && resource !== "computer:phone" && computerClaimIdleReleaseEnabled(cfg) ? COMPUTER_CLAIM_IDLE_POLICY : undefined;
 }
 
 function claimTurnResource(owner: TurnOwner, resource: string): boolean {
@@ -6028,7 +6029,14 @@ bus.subscribe((event: RuntimeEvent) => {
           // they cannot keep a quiet seat held.
           if (touches && surface === "computer") {
             const computer = turnComputerResources.get(event.threadId);
-            if (computer) turnResources.activity(computer.resource, computer.owner);
+            if (computer) {
+              // Completion drops the in-flight fence first (#1653): a call
+              // that outran the quiet window releases the seat only now,
+              // never mid-call, and the activity tick below still governs
+              // the clock for calls that finish inside the window.
+              turnResources.endComputerCall(computer.resource, computer.owner);
+              turnResources.activity(computer.resource, computer.owner);
+            }
           }
         }
       }
@@ -6050,6 +6058,14 @@ bus.subscribe((event: RuntimeEvent) => {
           turnId: liveTurnId,
         });
         if (event.itemId) toolMessageByItem.set(`${event.threadId}:${event.itemId}`, message.id);
+        // A screen-touching computer tool opening is an in-flight call on
+        // that turn's claim (#1653): the seat cannot be idle-released out
+        // from under I/O the desktop is still executing. Its completion —
+        // or the turn settling — drops the fence.
+        if (screenTouchingTool(name) && screenSurfaceForTool(name) === "computer") {
+          const computer = turnComputerResources.get(event.threadId);
+          if (computer) turnResources.beginComputerCall(computer.resource, computer.owner);
+        }
       }
       break;
     case "request.opened": {
