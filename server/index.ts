@@ -8159,6 +8159,9 @@ async function startTurn(
         if (!localVmLeaseFor(localVmTarget).claim(claimThreadId, bot.id, localVmOwnerBusy)) {
           throw new Error("this Local VM is already being used by another turn — wait for that turn to finish");
         }
+        // Only a turn that wins its lease extends pool affinity; a thread
+        // retrying behind a stranger lets the TTL lapse and migrates.
+        if (localVmMode(cfg) === "pool") localVmSeatPool.touch(claimThreadId);
         localVmThreadTargets.set(claimThreadId, localVmTarget);
         localVmActiveThreads.set(localVmTarget.key, claimThreadId);
         localVmIdleFor(localVmTarget).touch();
@@ -8243,6 +8246,14 @@ async function startTurn(
         if (!mountsComputerMcp || instance.adapter.capabilities.remoteAgent === true) {
           if (!strict) return false;
           throw new Error("this model engine cannot use the Local VM — choose Claude or an ACP engine, or select another computer destination");
+        }
+        if (!strict && localVmMode(cfg) === "pool") {
+          // localVmTargetForThread records pool affinity, so a turn the
+          // fast path is about to skip must not reserve or refresh a seat.
+          // Gate on the side-effect-free candidate assign() would pick —
+          // the automationSource bypass below stays authoritative.
+          const poolCandidate = poolLocalVmTarget(localVmSeatPool.candidate(threadId, localVmPoolSeatHolder));
+          if (!localVmSeen.has(poolCandidate.key) && !opts?.automationSource) return false;
         }
         const localVmTarget = localVmTargetForThread(bot.id, threadId);
         let lazyReadyVm: { runtime: Runtime } | null = null;
@@ -10503,6 +10514,7 @@ async function runGroupMemberTurn(
     if (!localVmLeaseFor(target).claim(threadId, readyBot.id, localVmOwnerBusy)) {
       throw new Error("this Local VM is already being used by another turn");
     }
+    if (localVmMode(cfg) === "pool") localVmSeatPool.touch(threadId);
     roomVmTarget = target;
     localVmThreadTargets.set(threadId, target);
     localVmActiveThreads.set(target.key, threadId);

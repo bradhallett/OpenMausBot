@@ -14,10 +14,10 @@ function harness(seatCount: () => number) {
   const holderOf = (seat: number) => leases.forTarget("pool:" + seat).current(busy, now.value);
   const claim = (threadId: string, botId: string) => {
     const seat = seats.assign(threadId, holderOf);
-    return {
-      seat,
-      granted: leases.forTarget("pool:" + seat).claim(threadId, botId, busy, now.value),
-    };
+    const granted = leases.forTarget("pool:" + seat).claim(threadId, botId, busy, now.value);
+    // Mirror server/index.ts: only a won lease renews pool affinity.
+    if (granted) seats.touch(threadId);
+    return { seat, granted };
   };
   const release = (seat: number, threadId: string) => leases.forTarget("pool:" + seat).release(threadId);
   return { now, seats, leases, busy, claim, release, holderOf };
@@ -82,6 +82,30 @@ describe("LocalVmSeatPool", () => {
     expect(again.granted).toBe(false);
   });
 
+  it("stops renewing affinity while claims keep failing behind a stranger", () => {
+    const { now, claim, release, leases, busy } = harness(() => 2);
+
+    const first = claim("thread-a", "bot-a");
+    release(first.seat, "thread-a");
+    // A stranger takes the seat's lease, as can happen after a restart
+    // lost the affinity table.
+    expect(leases.forTarget("pool:" + first.seat).claim("thread-x", "bot-x", busy, now.value)).toBe(true);
+
+    // Failed retries never win the lease, so they never renew the affinity
+    // TTL: once it lapses the thread migrates to the free seat instead of
+    // waiting without limit while other seats sit idle.
+    const held = claim("thread-a", "bot-a");
+    expect(held.seat).toBe(first.seat);
+    expect(held.granted).toBe(false);
+    now.value += 30 * 60_000 + 1;
+    // The stranger's own turns keep its lease alive; thread-a's failed
+    // retries renewed nothing, so its affinity lapsed.
+    expect(leases.forTarget("pool:" + first.seat).claim("thread-x", "bot-x", busy, now.value)).toBe(true);
+    const migrated = claim("thread-a", "bot-a");
+    expect(migrated.seat).not.toBe(first.seat);
+    expect(migrated.granted).toBe(true);
+  });
+
   it("drops affinity once the TTL lapses", () => {
     const { now, claim, release } = harness(() => 2);
 
@@ -132,6 +156,21 @@ describe("LocalVmSeatPool", () => {
     seats.assign("thread-a", holderOf);
     expect(seats.affinitySeat("thread-a")).toBe(0);
     seats.forget("thread-a");
+    expect(seats.affinitySeat("thread-a")).toBeNull();
+  });
+
+  it("reads the candidate seat without recording or renewing affinity", () => {
+    const { now, seats, holderOf, claim, release } = harness(() => 2);
+
+    expect(seats.candidate("thread-a", holderOf)).toBe(0);
+    expect(seats.affinitySeat("thread-a")).toBeNull();
+
+    const first = claim("thread-a", "bot-a");
+    release(first.seat, "thread-a");
+    now.value += 30 * 60_000 - 1;
+    expect(seats.candidate("thread-a", holderOf)).toBe(first.seat);
+    now.value += 2;
+    // The candidate read did not renew the TTL a won claim would have.
     expect(seats.affinitySeat("thread-a")).toBeNull();
   });
 });

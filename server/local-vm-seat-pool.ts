@@ -26,12 +26,21 @@ interface SeatAffinityEntry {
  */
 export class LocalVmSeatPool {
   private readonly affinity = new Map<string, SeatAffinityEntry>();
+  private readonly seatCount: () => number;
+  private readonly affinityTtlMs: number;
+  private readonly now: () => number;
 
+  // Explicit fields, not parameter properties: the group e2e harness boots
+  // the server under node's strip-only TypeScript loader, which rejects
+  // constructor parameter properties.
   constructor(
-    private readonly seatCount: () => number,
-    private readonly affinityTtlMs: number = DEFAULT_LOCAL_VM_SEAT_AFFINITY_TTL_MS,
-    private readonly now: () => number = Date.now,
+    seatCount: () => number,
+    affinityTtlMs: number = DEFAULT_LOCAL_VM_SEAT_AFFINITY_TTL_MS,
+    now: () => number = Date.now,
   ) {
+    this.seatCount = seatCount;
+    this.affinityTtlMs = affinityTtlMs;
+    this.now = now;
     if (!Number.isFinite(affinityTtlMs) || affinityTtlMs <= 0) {
       throw new Error("Local VM seat affinity TTL must be positive");
     }
@@ -61,21 +70,54 @@ export class LocalVmSeatPool {
     return entry.seat;
   }
 
+  /** The seat a thread's next Local VM claim addresses, without recording
+   * or renewing anything: a status probe or a skipped fast path must not
+   * steer a later turn onto a desktop its claim would not choose. */
+  candidate(threadId: string, holderOf: (seat: number) => LocalVmSeatHolder | null): number {
+    const now = this.now();
+    this.prune(now);
+    const live = this.affinitySeat(threadId);
+    if (live !== null) return live;
+    return this.selectSeat(threadId, holderOf, now);
+  }
+
   /**
-   * Choose the seat a thread's next Local VM claim addresses. Live affinity
-   * wins outright: reusing the desktop that holds the conversation's login
-   * state is worth queueing behind its current holder. Otherwise prefer a
-   * seat nobody holds and no other thread has live affinity with, then any
-   * unheld seat, and when every seat is held, the seat whose lease expires
-   * first, so the caller waits where capacity returns soonest. The choice is
-   * recorded immediately: two threads assigning concurrently must diverge
-   * even before their lease claims land.
+   * Choose the seat a thread's next Local VM claim addresses. Live
+   * affinity wins outright and is returned untouched: reusing the desktop
+   * that holds the conversation's login state is worth queueing behind its
+   * current holder, but a retry that has not won its lease must not extend
+   * how long it waits there — touch(), called only after a successful
+   * claim, is what renews the TTL. A first-time choice is recorded
+   * immediately: two threads assigning concurrently must diverge even
+   * before their lease claims land.
    */
   assign(threadId: string, holderOf: (seat: number) => LocalVmSeatHolder | null): number {
     const now = this.now();
     this.prune(now);
     const live = this.affinitySeat(threadId);
-    if (live !== null) return this.take(threadId, live, now);
+    if (live !== null) return live;
+    return this.take(threadId, this.selectSeat(threadId, holderOf, now), now);
+  }
+
+  /** Renew a thread's existing affinity without creating one. Called after
+   * a successful lease claim: only a turn that actually owns its desktop
+   * extends how long the conversation keeps preferring it. */
+  touch(threadId: string): void {
+    const seat = this.affinitySeat(threadId);
+    if (seat === null) return;
+    this.affinity.set(threadId, { seat, expiresAt: this.now() + this.affinityTtlMs });
+  }
+
+  /** Drop a thread's affinity explicitly, without waiting for the TTL. */
+  forget(threadId: string): void {
+    this.affinity.delete(threadId);
+  }
+
+  /** Prefer a seat nobody holds and no other thread has live affinity
+   * with, then any unheld seat, and when every seat is held, the seat whose
+   * lease expires first, so the caller waits where capacity returns
+   * soonest. */
+  private selectSeat(threadId: string, holderOf: (seat: number) => LocalVmSeatHolder | null, now: number): number {
     const seats = this.count();
     const holders: Array<LocalVmSeatHolder | null> = [];
     for (let seat = 0; seat < seats; seat += 1) holders.push(holderOf(seat));
@@ -87,21 +129,16 @@ export class LocalVmSeatPool {
       for (let seat = 0; seat < seats; seat += 1) {
         if (holders[seat] !== null) continue;
         if (pass === 0 && softHeld.has(seat)) continue;
-        return this.take(threadId, seat, now);
+        return seat;
       }
     }
     let soonest = 0;
     for (let seat = 1; seat < seats; seat += 1) {
       const best = holders[soonest];
-      const candidate = holders[seat];
-      if (best && candidate && candidate.expiresAt < best.expiresAt) soonest = seat;
+      const current = holders[seat];
+      if (best && current && current.expiresAt < best.expiresAt) soonest = seat;
     }
-    return this.take(threadId, soonest, now);
-  }
-
-  /** Drop a thread's affinity explicitly, without waiting for the TTL. */
-  forget(threadId: string): void {
-    this.affinity.delete(threadId);
+    return soonest;
   }
 
   private take(threadId: string, seat: number, now: number): number {
