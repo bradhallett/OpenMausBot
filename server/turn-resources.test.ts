@@ -109,9 +109,44 @@ describe("computer claim idle release (#1653)", () => {
     expect(leases.claim(seat, a, { now: 0, idle: policy })).toBe(true);
     leases.activity(seat, a, 60_000);
     expect(leases.blocker(seat, b, 120_000)).toEqual(a); // 60s quiet, not 120
+    // One tick short of the boundary the call is real activity and resets
+    // the window; at the boundary it is a straggler and must not.
+    leases.activity(seat, a, 149_999);
+    expect(leases.blocker(seat, b, 239_998)).toEqual(a);
+    expect(leases.blocker(seat, b, 239_999)).toBeUndefined();
+  });
+
+  it("a late completion does not resurrect an expired claim", () => {
+    const leases = new TurnResources();
+    expect(leases.claim(seat, a, { now: 0, idle: policy })).toBe(true);
+    leases.activity(seat, a, 60_000);
+    // Exactly 90s quiet: the seat is gone, and a straggler completion
+    // arriving now opens the reclaim window instead of holding the seat.
+    expect(leases.owns(seat, a, 150_000)).toBe(false);
     leases.activity(seat, a, 150_000);
-    expect(leases.blocker(seat, b, 239_999)).toEqual(a);
-    expect(leases.blocker(seat, b, 240_000)).toBeUndefined();
+    expect(leases.blocker(seat, b, 150_001)).toBeUndefined();
+    expect(leases.reclaimHolder(seat, 150_000)).toEqual(a);
+  });
+
+  it("a repeated claim by the sitting owner keeps the quiet window", () => {
+    const leases = new TurnResources();
+    expect(leases.claim(seat, a, { now: 0, idle: policy })).toBe(true);
+    leases.activity(seat, a, 60_000);
+    expect(leases.claim(seat, a, { now: 120_000, idle: policy })).toBe(true);
+    // The re-claim did not restart activityAt: 90s from the last real
+    // screen call still releases the seat.
+    expect(leases.blocker(seat, b, 149_999)).toEqual(a);
+    expect(leases.blocker(seat, b, 150_000)).toBeUndefined();
+  });
+
+  it("an early releaseOne keeps no reclaim priority, even at the deadline", () => {
+    const leases = new TurnResources();
+    expect(leases.claim(seat, a, { now: 0, idle: policy })).toBe(true);
+    leases.activity(seat, a, 60_000);
+    // At the quiet boundary owns() expires the claim into a reclaim
+    // record; releaseOne must clear that priority too, not just the seat.
+    leases.releaseOne(seat, a, 150_000);
+    expect(leases.reclaimHolder(seat, 150_000)).toBeUndefined();
   });
 
   it("releases with no screen activity — poller frames never count", () => {

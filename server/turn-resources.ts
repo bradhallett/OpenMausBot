@@ -48,6 +48,13 @@ export class TurnResources {
   claim(resource: string, owner: TurnOwner, options: ClaimOptions = {}): boolean {
     const now = options.now ?? Date.now();
     if (this.blocker(resource, owner, now)) return false;
+    const existing = this.owners.get(resource);
+    if (existing && sameOwner(existing.owner, owner)) {
+      // A repeated claim by the sitting owner changes nothing: replacing
+      // the record would restart activityAt, and re-claims alone would
+      // hold the seat past every quiet window (#1653).
+      return true;
+    }
     const record: ClaimRecord = { owner };
     if (options.idle) {
       record.idle = options.idle;
@@ -75,6 +82,10 @@ export class TurnResources {
    * window. Claims without an idle policy — and anything the screen
    * poller drives — are no-ops, so preview frames can never hold a seat. */
   activity(resource: string, owner: TurnOwner, now = Date.now()): void {
+    // Expiry first: a straggler screen completion arriving at or past the
+    // quiet boundary must release the seat and open the reclaim window,
+    // not restart the clock on a claim that already lapsed.
+    this.expireIdle(resource, now);
     const current = this.owners.get(resource);
     if (current?.idle && sameOwner(current.owner, owner)) current.activityAt = now;
   }
@@ -109,6 +120,10 @@ export class TurnResources {
    * could not finish. The owner's other claims stand until settle. */
   releaseOne(resource: string, owner: TurnOwner, now = Date.now()): void {
     if (this.owns(resource, owner, now)) this.owners.delete(resource);
+    // owns() may have just expired a quiet claim into a reclaim record
+    // for this same owner: an early release keeps no reclaim priority.
+    const reclaimed = this.reclaims.get(resource);
+    if (reclaimed && sameOwner(reclaimed.owner, owner)) this.reclaims.delete(resource);
   }
 
   /** Quiet-window expiry (#1653), evaluated when the claim is touched: a

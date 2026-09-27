@@ -51,12 +51,14 @@ export function cloudOverflowAction(situation: CloudOverflowSituation): CloudOve
 export class CloudOverflowConsent {
   private readonly grants = new Map<string, number>();
   private readonly offers = new Map<string, number>();
+  private readonly revocations = new Set<string>();
 
   consented(threadId: string, allowlistedThreads: ReadonlySet<string> = new Set()): boolean {
-    return this.grants.has(threadId) || allowlistedThreads.has(threadId);
+    return !this.revocations.has(threadId) && (this.grants.has(threadId) || allowlistedThreads.has(threadId));
   }
 
   grant(threadId: string, now = Date.now()): void {
+    this.revocations.delete(threadId);
     this.grants.set(threadId, now);
   }
 
@@ -64,6 +66,7 @@ export class CloudOverflowConsent {
    * conversation may ask again instead of meeting silence. */
   revoke(threadId: string): boolean {
     const had = this.grants.delete(threadId);
+    this.revocations.add(threadId);
     this.offers.delete(threadId);
     return had;
   }
@@ -111,10 +114,17 @@ export class CloudSeatLease {
   }
 }
 
-/** Dollars per second at rate-card precision: enough places for
- * fractions of a cent, trailing zeros trimmed past two. */
+/** Dollars per second at rate-card precision: enough places for small
+ * per-second rates to stay visible, trailing zeros trimmed but never
+ * past two decimals. */
 export function formatPerSecondUsd(perSecondCostUsd: number): string {
-  return "$" + perSecondCostUsd.toFixed(4).replace(/(\.\d\d)0+$/, "$1");
+  let text = perSecondCostUsd.toFixed(6).replace(/0+$/, "");
+  if (text.endsWith(".")) text += "00";
+  else {
+    const decimals = text.length - text.indexOf(".") - 1;
+    if (decimals < 2) text += "0".repeat(2 - decimals);
+  }
+  return "$" + text;
 }
 
 /** The consent card (#1655): the per-second cost sits beside the local

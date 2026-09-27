@@ -53,6 +53,18 @@ describe("cloud overflow consent", () => {
     consent.revoke("t1");
     expect(consent.offered("t1")).toBe(false);
   });
+
+  it("revokes standing allowlist consent until a fresh grant", () => {
+    const consent = new CloudOverflowConsent();
+    const allowlist = new Set(["t1"]);
+    expect(consent.consented("t1", allowlist)).toBe(true);
+    consent.revoke("t1");
+    expect(consent.consented("t1", allowlist)).toBe(false);
+    // A new consent answers a new offer and beats the old revocation.
+    consent.markOffered("t1", 2_000);
+    consent.grant("t1", 3_000);
+    expect(consent.consented("t1", allowlist)).toBe(true);
+  });
 });
 
 describe("cloud seat idle stop (#1655)", () => {
@@ -87,6 +99,9 @@ describe("cloud overflow chip text", () => {
   it("names the cost when the seat starts, the idle reason when it stops, and the consent verdict", () => {
     expect(formatPerSecondUsd(0.0004)).toBe("$0.0004");
     expect(formatPerSecondUsd(0.02)).toBe("$0.02");
+    expect(formatPerSecondUsd(0.00001)).toBe("$0.00001");
+    expect(formatPerSecondUsd(1.5)).toBe("$1.50");
+    expect(formatPerSecondUsd(0)).toBe("$0.00");
     expect(cloudSeatStartedText({ perSecondCostUsd: 0.0004, idleStopMs: 5 * 60_000 })).toContain("Cloud computer started at $0.0004 per second");
     expect(cloudSeatStartedText({ perSecondCostUsd: 0.0004, idleStopMs: 5 * 60_000 })).toContain("stops automatically after 5 minutes idle");
     expect(cloudSeatStoppedText(5 * 60_000)).toContain("Cloud computer stopped after 5 minutes idle");

@@ -16251,8 +16251,14 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const body = await readBody(req);
       if (!body || typeof body !== "object" || Array.isArray(body)) return json(res, 400, { error: "body must be a JSON object" });
       if (typeof body.consent !== "boolean") return json(res, 400, { error: "consent must be a boolean" });
-      if (body.consent) cloudOverflowConsent.grant(threadId);
-      else cloudOverflowConsent.revoke(threadId);
+      if (body.consent) {
+        // Consent answers the priced card, never a guess: without a prior
+        // offer the rate was never shown, so a seat must not start yet.
+        if (!cloudOverflowConsent.offered(threadId)) return json(res, 409, { error: "no cloud overflow offer" });
+        cloudOverflowConsent.grant(threadId);
+      } else {
+        cloudOverflowConsent.revoke(threadId);
+      }
       store.appendMessage(threadId, {
         role: "bot", kind: "activity",
         tool: { name: cloudOverflowConsentText(body.consent, cloudOverflowIdleStopMs(cfg)), ok: true },
