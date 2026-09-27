@@ -20756,8 +20756,11 @@ setInterval(sweepThreadEventLogsNow, THREAD_LOG_RETENTION_SWEEP_MS).unref();
 // delete — it is reversible and keeps resume cursors, instance state, cwd,
 // and handoff state (#1194). A thread qualifies only when it has been
 // closed longer than the window (global setting, per-bot override) and is
-// not busy, unread, or carrying an open direct handoff; already-archived
-// threads are never re-archived.
+// not busy, unread, snoozed, pinned, carrying queued work, or carrying an
+// open direct handoff; already-archived threads are never re-archived, and
+// a thread explicitly restored after its close is exempt until closed
+// again. The initial run waits for the queues to restore below: queued
+// work must be visible before the first sweep files anything away.
 const THREAD_AUTO_ARCHIVE_SWEEP_MS = 24 * 60 * 60 * 1000;
 
 function autoArchiveClosedThreadsNow(): void {
@@ -20774,6 +20777,11 @@ function autoArchiveClosedThreadsNow(): void {
       archivedAt: task.archivedAt ?? null,
       unread: task.unread === true,
       busy: threadBusy(bot.id, task.threadId),
+      // Same asleep rule as the thread list: "until activity" (0) or a
+      // wake time still in the future.
+      snoozed: task.snoozedUntil === 0 || (task.snoozedUntil !== undefined && task.snoozedUntil > now),
+      pinned: task.pinned === true,
+      hasQueuedWork: hasQueuedSteeredMessages(bot.id, task.threadId),
       openDirectHandoff: roomHandoffs.activeDirect(task.threadId),
     }));
     for (const threadId of selectAutoArchiveThreads(candidates, now)) {
@@ -20784,11 +20792,6 @@ function autoArchiveClosedThreadsNow(): void {
   if (archived > 0) console.log(`[auto-archive] archived ${archived} long-closed thread(s)`);
 }
 
-try {
-  autoArchiveClosedThreadsNow();
-} catch (error) {
-  console.warn(`thread auto-archive sweep failed: ${error instanceof Error ? error.message : String(error)}`);
-}
 // A days-scale window needs no tighter cadence; unref so the timer never
 // holds the process open.
 setInterval(() => {
@@ -20833,6 +20836,16 @@ for (const row of chatFollowups()) {
 }
 restoreSteeredMessages();
 restoreChannelMessages();
+
+// Now that interrupted sends are settled and every still-pending queue is
+// back in memory, the first auto-archive sweep can see queued work before
+// it decides — a startup sweep must never file away a thread whose words
+// are still waiting to run.
+try {
+  autoArchiveClosedThreadsNow();
+} catch (error) {
+  console.warn(`thread auto-archive sweep failed: ${error instanceof Error ? error.message : String(error)}`);
+}
 
 // Repair known auto pins that conflict with Works on before dispatch starts.
 // Legacy pins have no provenance and may be deliberate person selections:

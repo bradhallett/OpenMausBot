@@ -42,6 +42,9 @@ function candidate(overrides: Partial<AutoArchiveCandidate> & { threadId: string
     archivedAt: null,
     unread: false,
     busy: false,
+    snoozed: false,
+    pinned: false,
+    hasQueuedWork: false,
     openDirectHandoff: false,
     ...overrides,
   };
@@ -73,10 +76,14 @@ describe("auto-archive selection", () => {
     expect(selectAutoArchiveThreads([candidate({ threadId: "exact", closedAt: now - 30 * DAY_MS })], now)).toEqual([]);
   });
 
-  it("never selects busy, unread, or handoff-carrying threads", () => {
+  it("never selects busy, unread, snoozed, pinned, queued, or handoff-carrying threads", () => {
     const cases = [
       candidate({ threadId: "busy", busy: true }),
       candidate({ threadId: "unread", unread: true }),
+      candidate({ threadId: "snoozed-until-activity", snoozed: true }),
+      candidate({ threadId: "snoozed-with-wake-time", snoozed: true, closedAt: now - 40 * DAY_MS }),
+      candidate({ threadId: "pinned", pinned: true }),
+      candidate({ threadId: "queued-work", hasQueuedWork: true }),
       candidate({ threadId: "handoff", openDirectHandoff: true }),
     ];
     expect(selectAutoArchiveThreads(cases, now)).toEqual([]);
@@ -110,6 +117,9 @@ describe("auto-archive through the store", () => {
         archivedAt: record.archivedAt ?? null,
         unread: record.unread === true,
         busy: false,
+        snoozed: false,
+        pinned: false,
+        hasQueuedWork: false,
         openDirectHandoff: false,
       };
     };
@@ -125,4 +135,5 @@ describe("auto-archive through the store", () => {
     // idempotent: the archived thread is not picked again
     expect(selectAutoArchiveThreads([candidateFrom(task.threadId)], now)).toEqual([]);
   });
+
 });

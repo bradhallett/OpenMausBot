@@ -3,8 +3,9 @@
 // Archive, not delete: it is reversible and keeps the thread's durable
 // context — resume cursors, last instance state, cwd, and handoff state
 // (#1194). Only threads closed (close_thread) longer than the configured
-// window are eligible, and never one that is busy, unread, or carrying an
-// open direct handoff. The window comes from the global
+// window are eligible, and never one that is busy, unread, snoozed,
+// pinned, carrying queued work, or carrying an open direct handoff. The window comes
+// from the global
 // threads.autoArchiveDays setting, overridden per bot via autoArchiveDays
 // on the bot record (0 opts a single bot out). Off by default everywhere.
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -20,6 +21,12 @@ export interface AutoArchiveCandidate {
   archivedAt: number | null;
   unread: boolean;
   busy: boolean;
+  /** Snoozed ("until activity" or a future wake) — hidden, not filed away. */
+  snoozed: boolean;
+  /** Pinned above the update-ordered list — a person keeps it at hand. */
+  pinned: boolean;
+  /** Sends still queued for this thread behind capacity or a running turn. */
+  hasQueuedWork: boolean;
   openDirectHandoff: boolean;
 }
 
@@ -41,7 +48,8 @@ export function selectAutoArchiveThreads(
   const selected: string[] = [];
   for (const candidate of candidates) {
     if (candidate.autoArchiveDays < 1) continue;
-    if (candidate.unread || candidate.busy || candidate.openDirectHandoff) continue;
+    if (candidate.unread || candidate.busy || candidate.snoozed || candidate.pinned
+      || candidate.hasQueuedWork || candidate.openDirectHandoff) continue;
     if (candidate.archivedAt !== null) continue;
     if (candidate.closedAt === null) continue;
     if (candidate.closedAt >= now - candidate.autoArchiveDays * DAY_MS) continue;
