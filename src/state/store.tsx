@@ -814,6 +814,7 @@ export type AppSettingsSection =
   | "general"
   | "desktopWorkspaces"
   | "organization"
+  | "cloudAccount"
   | "appearance"
   | "experimental"
   | "connections"
