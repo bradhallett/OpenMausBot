@@ -87,4 +87,19 @@ describe("parseSkillBenchArgs", () => {
     expect(parseSkillBenchArgs(["--replicates"])).toEqual({ ok: false, error: "--replicates requires a value" });
     expect(parseSkillBenchArgs(["--out"])).toEqual({ ok: false, error: "--out requires a value" });
   });
+
+  it("rejects an unknown option instead of running defaults", () => {
+    expect(parseSkillBenchArgs(["--replicate", "10"])).toEqual({ ok: false, error: "unknown option --replicate" });
+  });
+
+  it("rejects an unexpected positional argument", () => {
+    expect(parseSkillBenchArgs(["my-bench"])).toEqual({ ok: false, error: "unexpected argument my-bench" });
+  });
+
+  it("rejects a flag consumed as another flag's value", () => {
+    expect(parseSkillBenchArgs(["--out", "--fixture", "my-bench"])).toEqual({
+      ok: false,
+      error: "--out requires a value",
+    });
+  });
 });

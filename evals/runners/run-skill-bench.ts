@@ -230,8 +230,9 @@ export function writeSkillBenchReport(outDir: string, report: SkillBenchReport, 
 }
 
 /** Parsed CLI state for the bench runner. Kept pure so the validation
- * contract — every flag consumes its value, and --replicates must be a
- * positive integer — is testable without spawning the runner. */
+ * contract — every flag consumes a non-flag value, unknown options and
+ * positional arguments are rejected, and --replicates must be a positive
+ * integer — is testable without spawning the runner. */
 export interface SkillBenchCliOptions {
   wanted: Set<string>;
   replicates: number | undefined;
@@ -246,13 +247,23 @@ export function parseSkillBenchArgs(args: string[]): ParsedSkillBenchArgs {
   let outDir = DEFAULT_OUT;
   for (let index = 0; index < args.length; index += 1) {
     const flag = args[index]!;
-    if (flag !== "--fixture" && flag !== "--replicates" && flag !== "--out") continue;
-    const value = args[index + 1];
-    if (value === undefined) return { ok: false, error: flag + " requires a value" };
-    if (flag === "--fixture") wanted.add(value);
-    else if (flag === "--replicates") replicates = Number(value);
-    else outDir = value;
-    index += 1;
+    if (flag === "--fixture" || flag === "--replicates" || flag === "--out") {
+      const value = args[index + 1];
+      // A trailing flag is a missing operand, not a value: consuming it
+      // would silently reroute the run (e.g. --out --fixture my-bench).
+      if (value === undefined || value.startsWith("--")) {
+        return { ok: false, error: flag + " requires a value" };
+      }
+      if (flag === "--fixture") wanted.add(value);
+      else if (flag === "--replicates") replicates = Number(value);
+      else outDir = value;
+      index += 1;
+      continue;
+    }
+    // A typo like --replicate must fail loudly, never fall back to the
+    // fixture defaults and report a run the user did not ask for.
+    if (flag.startsWith("--")) return { ok: false, error: "unknown option " + flag };
+    return { ok: false, error: "unexpected argument " + flag };
   }
   if (replicates !== undefined && (!Number.isInteger(replicates) || replicates < 1)) {
     return { ok: false, error: "--replicates must be a positive integer" };
