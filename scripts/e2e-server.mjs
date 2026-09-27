@@ -19,7 +19,7 @@ const opt = (n, d) => {
 };
 const PORT = Number(opt("--port", process.env.OMB_PORT ?? 8799));
 const BASE = `http://127.0.0.1:${PORT}`;
-const WITH_BOAT = flag("--with-box");
+const WITH_BOAT = flag("--with-boat") || flag("--with-box");
 const KEEP_BOTS = flag("--keep-bots");
 const BOX_TOKEN = process.env.OMB_E2E_BOX_TOKEN ?? "";
 
@@ -216,7 +216,7 @@ async function main() {
 
     // ── box: cloud computer ──
     if (WITH_BOAT) {
-      if (!BOX_TOKEN) fail("--with-box needs OMB_E2E_BOX_TOKEN");
+      if (!BOX_TOKEN) fail("--with-boat needs OMB_E2E_BOX_TOKEN");
       await api("/api/config", { method: "PUT", body: JSON.stringify({ box: { token: BOX_TOKEN } }) });
       const cfg = await api("/api/config");
       if (!cfg.box?.configured) fail("box token saved but /api/config still says unconfigured");

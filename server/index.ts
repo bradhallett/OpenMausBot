@@ -8353,7 +8353,7 @@ async function startTurn(
         }
       }
       if (wants === "cloud" && cloudBackend === "box" && !boat.boatConfigured(cfg)) {
-        throw new Error("Cloud box is not configured — add a Boat API key or choose Local VM");
+        throw new Error("Cloud Boat is not configured — add a Boat API key or choose Local VM");
       }
       if (wants === "cloud" && cloudBackend === "box" && !integrations.computer) {
         throw new Error("the cloud computer could not be created or reached");
@@ -10427,7 +10427,7 @@ async function runGroupMemberTurn(
       integrations.localComputer = mounted.integration;
       roomComputerKind = "vps";
     } else {
-      if (!boat.boatConfigured(cfg)) throw new Error("Cloud box is not configured — add a Boat API key or choose Local VM");
+      if (!boat.boatConfigured(cfg)) throw new Error("Cloud Boat is not configured — add a Boat API key or choose Local VM");
       const remoteAgent = instance.adapter.capabilities.remoteAgent === true;
       const attached = await attachBotBoat(readyBot, resourceOwner, { explicitCloud: true,
         canMount: instance.adapter.capabilities.usesCloudComputer === true, remoteAgent });

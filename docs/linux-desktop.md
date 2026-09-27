@@ -240,7 +240,7 @@ considered for automatic discovery.
 
 ### A bot needs computer tools
 
-Choose **Cloud box** and add a Boat token in App Settings, or use Local VM. Linux **This computer** remains disabled
+Choose **Cloud** (Boat) and add a Boat token in App Settings, or use Local VM. Linux **This computer** remains disabled
 on Wayland. On Xorg, enable it from the **Local control** card first.
 
 ### Local control is not ready

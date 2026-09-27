@@ -40,18 +40,18 @@ export async function launchTeamComputersPreview() {
         const id = `bx_2345678${"9abcdefghjkmnpqrstuvwxyz"[boats.length]}`;
         const boat = { id, name: "fixture-pending", state: "idle" };
         boats.push(boat); idempotency.set(key, id);
-        return send({ ok: true, boat }, 201);
+        return send({ ok: true, box: boat }, 201);
       }
       const match = path.match(/^\/boxes\/(bx_[23456789abcdefghjkmnpqrstuvwxyz]{8})(?:\/(commands|desktop|stop|resume))?$/);
       const boat = boats.find((candidate) => candidate.id === match?.[1]);
       if (!match || !boat) return send({ message: "fixture resource not found" }, 404);
-      if (method === "GET" && !match[2]) return send({ ok: true, boat });
-      if (method === "PATCH" && !match[2]) { boat.name = body.name; return send({ ok: true, boat }); }
+      if (method === "GET" && !match[2]) return send({ ok: true, box: boat });
+      if (method === "PATCH" && !match[2]) { boat.name = body.name; return send({ ok: true, box: boat }); }
       if (method === "POST" && match[2] === "commands") return send({ ok: true, exitCode: 0, stdout: "", stderr: "" });
       if (method === "POST" && match[2] === "desktop") return send({ ok: true, desktopUrl: `https://desktop.invalid/${boat.id}` });
       if (method === "POST" && (match[2] === "stop" || match[2] === "resume")) {
         boat.state = match[2] === "stop" ? "archived" : "idle";
-        return send({ ok: true, boat });
+        return send({ ok: true, box: boat });
       }
       // Unexpected deletion is deliberately refused and remains in receipts.
       return send({ message: "fixture does not implement this mutation" }, 405);
