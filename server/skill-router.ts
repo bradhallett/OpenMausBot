@@ -18,7 +18,7 @@ import { z } from "zod";
 
 import { writeFileAtomic } from "./atomic.ts";
 import { librarySkillFilePath, readLibrarySkillFile, skillLibraryEvents } from "./skill-library.ts";
-import { readSkillFile, resolveBotSkills, skillFilePath, skillStateDir } from "./skills.ts";
+import { listSkills, readSkillFile, resolveBotSkills, skillFilePath, skillStateDir } from "./skills.ts";
 import { parseSkillMd } from "../shared/skill-md.ts";
 import {
   DEDUP_TURNS,
@@ -121,6 +121,11 @@ export function shardDocumentText(entry: { name: string; description: string; ex
  * readers themselves. */
 export function collectBotSkillDocuments(botId: string, assignedLibrary?: readonly string[]): SkillDocument[] {
   const documents: SkillDocument[] = [];
+  // A private name shadows its library twin even when the private bytes
+  // cannot be read, and only an explicitly assigned library skill may be
+  // indexed: a failed private read must drop the skill from the shard, not
+  // fall through to an unassigned same-name library skill.
+  const privateNames = new Set(listSkills(botId).map((skill) => skill.name));
   for (const listing of resolveBotSkills(botId, assignedLibrary).filter((skill) => skill.enabled)) {
     const privateText = readSkillFile(botId, listing.name);
     if (privateText !== null) {
@@ -136,6 +141,7 @@ export function collectBotSkillDocuments(botId: string, assignedLibrary?: readon
       }
       continue;
     }
+    if (privateNames.has(listing.name) || !assignedLibrary?.includes(listing.name)) continue;
     const libraryText = readLibrarySkillFile(listing.name);
     if (libraryText !== null) {
       documents.push({
