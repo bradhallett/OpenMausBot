@@ -5770,6 +5770,10 @@ function localVmTargetForThread(botId: string, threadId: string): LocalVmTarget 
  * not steer a later turn onto a desktop its claim would not choose. */
 function localVmTargetForStatus(botId: string, threadId?: string): LocalVmTarget {
   if (localVmMode(cfg) !== "pool") return localVmTargetForBot(botId);
+  // An in-flight turn keeps its claimed seat even after its affinity TTL
+  // decays: prefer the live target so a preview cannot land on another seat.
+  const activeTarget = threadId ? localVmThreadTargets.get(threadId) : undefined;
+  if (activeTarget) return activeTarget;
   return poolLocalVmTarget((threadId ? localVmSeatPool.affinitySeat(threadId) : null) ?? 0);
 }
 
@@ -5809,6 +5813,10 @@ function releaseLocalVmThread(threadId: string): void {
   autoVmClaims.delete(threadId);
   const target = localVmThreadTargets.get(threadId);
   if (!target) return;
+  // Renew affinity at settlement so a turn that consumed part of the TTL
+  // still leaves the full window after it ends; failed claims never reach
+  // here (no target), so only settled turns renew.
+  if (localVmMode(cfg) === "pool") localVmSeatPool.touch(threadId);
   localVmLeaseFor(target).release(threadId);
   if (localVmActiveThreads.get(target.key) === threadId) localVmActiveThreads.delete(target.key);
   localVmThreadTargets.delete(threadId);
