@@ -390,19 +390,38 @@ export function createSkillRouter(options: { embed: EmbeddingClient; enabled: bo
 
   const held = new Map<string, HeldShard>();
 
-  const rebuildEntry = async (botId: string, entry: HeldShard): Promise<void> => {
-    try {
-      entry.shard = await buildSkillRouterShard({
-        botId,
-        assignedLibrary: entry.assignedLibrary,
-        embed: options.embed,
-      });
-      entry.stale = false;
-    } catch {
-      // Rebuild lazily on the next select instead of losing the shard.
-      entry.stale = true;
-    }
+  // One build queue per bot. buildSkillRouterShard captures its documents
+  // before the async embed and persists before returning, so two overlapping
+  // builds for one bot could finish out of order and let the older snapshot
+  // overwrite both the held entry and the persisted shard. Queueing capture,
+  // embed, persistence, and assignment per bot keeps the newest build the
+  // last writer — across invalidation-, select-, and explicit
+  // rebuild-triggered builds alike.
+  const buildQueues = new Map<string, Promise<void>>();
+  const enqueueBuild = <T>(botId: string, build: () => Promise<T>): Promise<T> => {
+    const run = (buildQueues.get(botId) ?? Promise.resolve()).then(build, build);
+    const tail = run.then(
+      () => { if (buildQueues.get(botId) === tail) buildQueues.delete(botId); },
+      () => { if (buildQueues.get(botId) === tail) buildQueues.delete(botId); },
+    );
+    buildQueues.set(botId, tail);
+    return run;
   };
+
+  const rebuildEntry = (botId: string, entry: HeldShard): Promise<void> =>
+    enqueueBuild(botId, async () => {
+      try {
+        entry.shard = await buildSkillRouterShard({
+          botId,
+          assignedLibrary: entry.assignedLibrary,
+          embed: options.embed,
+        });
+        entry.stale = false;
+      } catch {
+        // Rebuild lazily on the next select instead of losing the shard.
+        entry.stale = true;
+      }
+    });
 
   // S1's invalidation bus: every library write emits here. Assignments are
   // not evented yet, so any library write rebuilds every held shard — one
@@ -415,12 +434,19 @@ export function createSkillRouter(options: { embed: EmbeddingClient; enabled: bo
 
   const ensureShard = async (botId: string, assignedLibrary?: readonly string[]): Promise<SkillRouterShard> => {
     // Freshness check on every use: a held or persisted shard must still
-    // cover exactly the bot's current enabled skills. Library writes are
+    // cover exactly the bot's current enabled skills, on the indexed bytes
+    // and not just the names: an in-place edit that keeps every name would
+    // otherwise keep serving stale vectors and excerpts. Library writes are
     // evented, but assignments and private-skill writes are not — this
-    // catches both without re-embedding unless the set really changed.
+    // catches both without re-embedding unless something really changed.
     const covers = (shard: SkillRouterShard): boolean => {
-      const names = new Set(collectBotSkillDocuments(botId, assignedLibrary).map((document) => document.name));
-      return shard.entries.length === names.size && shard.entries.every((entry) => names.has(entry.name));
+      const documents = new Map(collectBotSkillDocuments(botId, assignedLibrary).map((document) => [document.name, document]));
+      return shard.entries.length === documents.size && shard.entries.every((entry) => {
+        const document = documents.get(entry.name);
+        return document !== undefined
+          && document.path === entry.path
+          && shardDocumentText(document) === shardDocumentText(entry);
+      });
     };
     const current = held.get(botId);
     if (current && !current.stale && covers(current.shard)) return current.shard;
@@ -434,7 +460,7 @@ export function createSkillRouter(options: { embed: EmbeddingClient; enabled: bo
         return persisted;
       }
     }
-    const shard = await buildSkillRouterShard({ botId, assignedLibrary, embed: options.embed });
+    const shard = await enqueueBuild(botId, () => buildSkillRouterShard({ botId, assignedLibrary, embed: options.embed }));
     held.set(botId, { shard, assignedLibrary, stale: false });
     return shard;
   };
@@ -453,7 +479,7 @@ export function createSkillRouter(options: { embed: EmbeddingClient; enabled: bo
       }
     },
     rebuild: async (botId, assignedLibrary) => {
-      const shard = await buildSkillRouterShard({ botId, assignedLibrary, embed: options.embed });
+      const shard = await enqueueBuild(botId, () => buildSkillRouterShard({ botId, assignedLibrary, embed: options.embed }));
       held.set(botId, { shard, assignedLibrary, stale: false });
       return shard;
     },

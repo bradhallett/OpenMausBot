@@ -261,6 +261,82 @@ describe("skill router shard build and service", () => {
     }
   });
 
+  it("rebuilds when a skill's content changes even though its name does not", async () => {
+    const install = (body: string) =>
+      skills.installSkill(bot, "private:test", [{ path: "SKILL.md", content: SKILL("deploy-runbook", "Deploy", body) }]);
+    expect("error" in install("Old runbook body.")).toBe(false);
+    expect("error" in skills.setSkillEnabled(bot, "deploy-runbook", true)).toBe(false);
+    const embed = countingEmbed();
+    const service = router.createSkillRouter({ embed: embed.client, enabled: true });
+    try {
+      await service.select({ botId: bot, text: "deploy the database" });
+      expect(service.shard(bot)!.entries[0]!.excerpt).toContain("Old runbook body");
+      // Remove and re-import with the same name: the indexed name set is
+      // unchanged, only the bytes differ. Name-only freshness would keep
+      // the stale vector and excerpt forever.
+      expect("error" in skills.removeSkill(bot, "deploy-runbook")).toBe(false);
+      expect("error" in install("New runbook body.")).toBe(false);
+      expect("error" in skills.setSkillEnabled(bot, "deploy-runbook", true)).toBe(false);
+      const selection = await service.select({ botId: bot, text: "deploy the database" });
+      expect(service.shard(bot)!.entries[0]!.excerpt).toContain("New runbook body");
+      expect(buildBatches(embed.batches)).toHaveLength(2);
+      expect(selection.pointers.map((pointer) => pointer.name)).toEqual(["deploy-runbook"]);
+    } finally {
+      service.close();
+    }
+  });
+
+  it("serializes overlapping builds per bot so the newest snapshot wins on disk", async () => {
+    expect("error" in library.installLibrarySkill({
+      name: "alpha-playbook",
+      instructions: SKILL("alpha-playbook", "Alpha"),
+      source: "library",
+      reviewState: "approved",
+    })).toBe(false);
+    let firstEmbed = true;
+    let openGate = (): void => {};
+    const gate = new Promise<void>((resolve) => { openGate = resolve; });
+    const embed: EmbeddingClient = {
+      model: "synthetic-1",
+      embed: async (texts) => {
+        if (firstEmbed) {
+          firstEmbed = false;
+          await gate;
+        }
+        return texts.map(() => at(0.9));
+      },
+    };
+    const service = router.createSkillRouter({ embed, enabled: true });
+    try {
+      // Build one captures only alpha, then parks inside its embed call.
+      const building = service.rebuild(bot, ["alpha-playbook"]);
+      await flush();
+      expect("error" in library.installLibrarySkill({
+        name: "beta-playbook",
+        instructions: SKILL("beta-playbook", "Beta"),
+        source: "library",
+        reviewState: "approved",
+      })).toBe(false);
+      // A select for the wider assignment queues behind the parked build.
+      // Unserialized, it would finish first and the stale alpha-only build
+      // would then overwrite both the held entry and the persisted shard.
+      const selecting = service.select({
+        botId: bot,
+        assignedLibrary: ["alpha-playbook", "beta-playbook"],
+        text: "a query",
+      });
+      openGate();
+      await building;
+      await selecting;
+      for (let i = 0; i < 20 && service.shard(bot)!.entries.length < 2; i += 1) await flush();
+      const names = ["alpha-playbook", "beta-playbook"];
+      expect(service.shard(bot)!.entries.map((skill) => skill.name)).toEqual(names);
+      expect(router.loadRouterShard(bot, "synthetic-1")!.entries.map((skill) => skill.name)).toEqual(names);
+    } finally {
+      service.close();
+    }
+  });
+
   it("runs nothing while the flag is off: empty selections, no embed calls, no state", async () => {
     const embed = countingEmbed();
     const service = router.createSkillRouter({ embed: embed.client, enabled: false });
