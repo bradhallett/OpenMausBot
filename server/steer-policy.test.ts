@@ -48,7 +48,7 @@ const run = (client: DecisionModelClient, preference: "steer" | "queue" = "steer
     preference,
     queueOverrideThreshold: 0.7,
     steerOverrideThreshold: 0.9,
-    budgetMs: 250,
+    budgetMs: 500,
     state,
   });
 
@@ -161,9 +161,9 @@ describe("steer-policy chooser", () => {
     expect(steerPrior({ ...state, reply_to_running_turn: true })).toBe(true);
   });
 
-  it("the abort budget clamps into the designed 250–1500ms window", () => {
+  it("the abort budget clamps into the designed 500–1500ms window", () => {
     expect(admissionBudgetMs(undefined)).toBe(1_000);
-    expect(admissionBudgetMs(50)).toBe(250);
+    expect(admissionBudgetMs(50)).toBe(500);
     expect(admissionBudgetMs(9_999)).toBe(1_500);
     expect(admissionBudgetMs(750)).toBe(750);
   });

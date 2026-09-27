@@ -33,7 +33,7 @@ export const DEFAULT_STEER_OVERRIDE_THRESHOLD = 0.9;
 /** The hot send path must never wait on a slow classifier. Tight budget,
  * abortable per call; a timeout is a preference fallback, never a delay. */
 export const DEFAULT_ADMISSION_BUDGET_MS = 1_000;
-export const MIN_ADMISSION_BUDGET_MS = 250;
+export const MIN_ADMISSION_BUDGET_MS = 500;
 export const MAX_ADMISSION_BUDGET_MS = 1_500;
 /** Same hard wire cap as the computer-use chooser's request. */
 export const MAX_ADMISSION_STATE_BYTES = 65_536;

@@ -7791,7 +7791,9 @@ async function startTurn(
   // Only an admitted turn may own the goal slot: recording before the busy
   // and capacity checks let a rejected call (a compact racing a live turn,
   // say) overwrite the active turn's decision-model context (#1630).
-  recordTurnGoal(threadId, text);
+  // Harness prompts (card continuations, compacts) carry control-plane
+  // context, never a new human ask, so they never own the goal slot.
+  if (!opts?.cardContinuation && !opts?.compactOnly) recordTurnGoal(threadId, text);
   // Steering is never a cancel. A message sent while teammates are working
   // runs now, with their assignments still attached: they keep running and
   // their results still return here (outstandingAssignmentsPrompt tells this
