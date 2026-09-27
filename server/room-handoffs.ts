@@ -191,7 +191,23 @@ export class RoomHandoffs {
    * execution never pauses long enough to age its lifetime budget. */
   private hardCapError(n: RoomHandoff): string {
     const root = this.root(n);
-    return `Room handoff hard cap exhausted: node was ${n.status} after ${duration(this.now() - root.createdAt)} of the ${duration(this.limits.hardCapMs)} wall-clock cap`;
+    const first = `Room handoff hard cap exhausted: node was ${n.status} after ${duration(this.now() - root.createdAt)} of the ${duration(this.limits.hardCapMs)} wall-clock cap`;
+    // Graceful expiry: settled children are real work the tree produced,
+    // so the expiry still carries a bounded digest of their results. A
+    // wide tree cannot turn the error into a dump: each result is tailed
+    // to 512 chars and the digest to 4 KiB, with the elided count named.
+    const settled = [...this.nodes.values()]
+      .filter(x => x.rootId === root.id && x.parentId && terminal(x))
+      .map(x => `${x.key} [${x.status}] ${x.result.slice(-512)}`);
+    if (!settled.length) return first;
+    const lines: string[] = [];
+    let used = 0;
+    for (const line of settled) {
+      if (used + line.length + 1 > 4096) break;
+      lines.push(line); used += line.length + 1;
+    }
+    const elided = settled.length - lines.length;
+    return `${first}\n${lines.join("\n")}${elided ? `\n(+${elided} elided)` : ""}`;
   }
 
   enqueue(source: RoomAddress, generation: string, parentId: string | undefined,

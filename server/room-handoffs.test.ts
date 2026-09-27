@@ -719,6 +719,79 @@ describe("room handoff hard cap renewal", () => {
   });
 });
 
+describe("hard cap expiry digest", () => {
+  it("carries a bounded digest of settled children on expiry", async () => {
+    let nowMs = 0;
+    await fixture(async (engine, hooks) => {
+      const finish: Record<string, (result: { ok: boolean; text: string }) => void> = {};
+      hooks.run = node => new Promise(resolve => { finish[node.key] = resolve; });
+      hooks.busy = n => n.id === "turn";
+      engine.enqueue(addr("A"), "turn", undefined, addr("B"), "work", "build");
+      engine.enqueue(addr("A"), "turn", undefined, addr("C"), "more", "build");
+      engine.sourceSettled("turn", true);
+      engine.tick(); await flush();
+      nowMs = 5 * 60_000;
+      finish.work({ ok: true, text: "alpha result TAIL-END" });
+      finish.more({ ok: true, text: "beta result TAIL-END" }); await flush();
+      engine.tick(); await flush();
+      const parent = engine.nodes.get("turn")!;
+      expect(parent.status).toBe("waiting");
+      engine.tick(); await flush();
+      expect(parent.status).toBe("resume");
+      // Both settlements at 5m renewed the window to 50m; the busy park
+      // expires at 51m and the error still names what the children produced.
+      nowMs = 51 * 60_000; engine.tick(); await flush();
+      expect(parent.status).toBe("failed");
+      expect(parent.result).toContain("Room handoff hard cap exhausted");
+      expect(parent.result).toContain("work [completed] alpha result TAIL-END");
+      expect(parent.result).toContain("more [completed] beta result TAIL-END");
+      expect(parent.result.length).toBeLessThan(5000);
+    }, () => nowMs, { hardCapMs: 45 * 60_000 });
+  });
+  it("elides digest entries beyond the budget", async () => {
+    let nowMs = 0;
+    await fixture(async (engine, hooks) => {
+      const finish: Record<string, (result: { ok: boolean; text: string }) => void> = {};
+      hooks.run = node => new Promise(resolve => { finish[node.key] = resolve; });
+      hooks.busy = n => n.id === "turn";
+      for (let i = 0; i < 12; i++) {
+        engine.enqueue(addr("A"), "turn", undefined, addr(`B${i}`), `work${i}`, "build");
+      }
+      engine.sourceSettled("turn", true);
+      engine.tick(); await flush();
+      nowMs = 5 * 60_000;
+      for (let i = 0; i < 12; i++) finish[`work${i}`]({ ok: true, text: "x".repeat(2048) });
+      await flush();
+      engine.tick(); await flush();
+      const parent = engine.nodes.get("turn")!;
+      expect(parent.status).toBe("waiting");
+      engine.tick(); await flush();
+      expect(parent.status).toBe("resume");
+      nowMs = 51 * 60_000; engine.tick(); await flush();
+      expect(parent.status).toBe("failed");
+      expect(parent.result).toContain("Room handoff hard cap exhausted");
+      expect(parent.result).toContain("elided)");
+      expect(parent.result.length).toBeLessThan(5000);
+    }, () => nowMs, { hardCapMs: 45 * 60_000 });
+  });
+  it("adds no digest when nothing settled", async () => {
+    let nowMs = 0;
+    await fixture(async (engine, hooks) => {
+      hooks.run = () => new Promise(() => {});
+      const { node } = engine.enqueue(addr("A"), "turn", undefined, addr("B"), "work", "build");
+      engine.sourceSettled("turn", true);
+      nowMs = 24 * 60_000; engine.tick(); await flush();
+      expect(node.status).toBe("running");
+      // The 24m dispatch renewed the window to 69m; the hanging child dies
+      // at the edge with the plain expiry line and nothing appended.
+      nowMs = 24 * 60_000 + 45 * 60_000 + 1_000; engine.tick(); await flush();
+      expect(node.status).toBe("failed");
+      expect(node.result).toContain("Room handoff hard cap exhausted");
+      expect(node.result).not.toContain("\n");
+    }, () => nowMs, { hardCapMs: 45 * 60_000 });
+  });
+});
+
 describe("shared room request display", () => {
   it("shares one identity across recipients and rejects late additions after real dispatch and restart", () => fixture(async (engine, hooks, file) => {
     const source = addr("A");
