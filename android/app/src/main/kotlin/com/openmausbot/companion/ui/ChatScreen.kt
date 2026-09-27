@@ -173,7 +173,14 @@ fun ChatScreen(
 /** The transcript is on its way. Leaving is still possible while it is. */
 @Composable
 private fun OpeningThread(onBack: () -> Unit) {
-    Column(modifier = Modifier.fillMaxSize()) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            // The wait answers the swipe too: the reader changed their mind
+            // about this thread, and should not have to wait for it to load
+            // to say so.
+            .horizontalBackSwipe(onBack = onBack),
+    ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -771,7 +778,22 @@ private fun LoadedChat(
     BackHandler(enabled = !showingPlus && hudOpen) { closeHud() }
     BackHandler(enabled = !showingPlus && !hudOpen) { leaveToRoster() }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    // A swipe across the conversation is the platform's back gesture carried
+    // to the body of the screen — one exit chain, so the pill, the system's
+    // back, and the swipe can never disagree about what leaving means.
+    fun backBySwipe() {
+        when {
+            showingPlus -> showingPlus = false
+            hudOpen -> closeHud()
+            else -> leaveToRoster()
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .horizontalBackSwipe(onBack = ::backBySwipe),
+    ) {
         Column(modifier = Modifier.fillMaxSize()) {
             Box(
                 modifier = Modifier
