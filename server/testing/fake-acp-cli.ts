@@ -878,7 +878,10 @@ function handle(msg: any) {
               if (id) return id;
             }
           }
-          return /id: ([\w-]+)/.exec(list)?.[1] ?? "";
+          // A named target must not silently fall back to the first peer:
+          // the fixture asked for a specific bot, and answering from the
+          // wrong one would pass tests for the wrong reason.
+          return targetName ? "" : /id: ([\w-]+)/.exec(list)?.[1] ?? "";
         };
         void driveMcp(agentsMcp, [
           { name: "list_bots", args: () => ({}) },

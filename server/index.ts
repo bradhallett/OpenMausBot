@@ -4185,6 +4185,15 @@ function cancelGroupTurnOperations(
 ) {
   cancelTeamSetupResumesForThread(threadId);
   roomHandoffs.cancelRoom(groupId, threadId);
+  // Stop owns this group conversation in both directions, exactly as
+  // interruptDirectThread does for 1:1: asides waiting FOR the stopped
+  // thread never get their degraded turn, and asides the thread queued
+  // FROM itself are withdrawn. Only the stopped outcome cancels; a
+  // limit-reached turn is paused, and its asides stay deliverable.
+  if (outcome.status === "stopped") {
+    cancelAsides(threadId);
+    cancelAsidesFromSource(threadId);
+  }
   for (const operation of groupTurnOperations.get(groupId) ?? []) {
     if (operation.threadId !== threadId) continue;
     operation.cancelled = true;
