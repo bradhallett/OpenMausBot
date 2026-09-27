@@ -25,6 +25,7 @@ import { customMcpServers,
   showToolCallsEnabled,
   saveConfig,
   skillAuthoringEnabled,
+  skillsLibraryEnabled,
   sharedComputersEnabled,
   builtInBrowserEnabled,
   browserProfilePartitionId,
@@ -545,6 +546,18 @@ describe("configuration boundaries", () => {
     expect(() => parseConfigPatch({ features: { sharedComputers: "yes" } })).toThrow(
       "features.sharedComputers",
     );
+  });
+
+  it("keeps the skills library opt-in through a stored-config parse", () => {
+    // featureConfigSchema is deliberately non-strict, so an undeclared key
+    // is stripped on load: the hand-edited opt-in must be declared here to
+    // survive parseStoredConfig and reach skillsLibraryEnabled.
+    expect(skillsLibraryEnabled(parseStoredConfig({ features: { skillsLibrary: true } }))).toBe(true);
+    expect(skillsLibraryEnabled(parseStoredConfig({ features: { skillsLibrary: false } }))).toBe(false);
+    expect(skillsLibraryEnabled(parseStoredConfig({}))).toBe(false);
+    expect(parseConfigPatch({ features: { skillsLibrary: true } })).toEqual({
+      features: { skillsLibrary: true },
+    });
   });
 
   it("keeps tool-call chips off by default and accepts an explicit opt-in", () => {

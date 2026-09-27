@@ -288,6 +288,10 @@ const featureConfigSchema = z.object({
    * enabled; a one-shot that fails or answers junk leaves the first-message
    * snippet in place — see llmThreadTitlesEnabled. */
   llmThreadTitles: z.boolean().optional(),
+  /** Opt-in shared skills library (skills lane S1/S2): one store bots
+   * reference by assignment instead of per-workspace copies. Off unless
+   * enabled by hand — see skillsLibraryEnabled. */
+  skillsLibrary: z.boolean().optional(),
 });
 /** First-run progress. Kept in the workspace config rather than a browser so
  * it survives cleared site data and is shared by every paired client. Hint
