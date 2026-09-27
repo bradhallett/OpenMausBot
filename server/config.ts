@@ -15,6 +15,7 @@ import { PROVIDER_ICON_PRESETS, providerIconError } from "../shared/provider-ico
 import type { McpServerSpec } from "./contracts.ts";
 import { isRemoteMcpServer, parseStoredMcpServer } from "./mcp-registry.ts";
 import { parseJson, schemaIssue, type JsonObject, type JsonValue } from "./schema.ts";
+import { CLOUD_SEAT_IDLE_STOP_MS } from "./cloud-overflow.ts";
 
 const optionalText = z.string().optional();
 const SSH_ALIAS = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
@@ -294,6 +295,11 @@ const featureConfigSchema = z.object({
    * for 10 minutes and yields to an occupied seat. Off until baked; see
    * computerClaimIdleReleaseEnabled for how to enable it by hand. */
   computerClaimIdleRelease: z.boolean().optional(),
+  /** Consented cloud overflow for local computer waits (#1655): a wait
+   * may offer a per-second-billed cloud seat, but only through an explicit
+   * consent card or a configured allowlist — never a silent Auto default.
+   * Off until baked; see cloudOverflowEnabled for how to enable it by hand. */
+  cloudOverflow: z.boolean().optional(),
 });
 /** First-run progress. Kept in the workspace config rather than a browser so
  * it survives cleared site data and is shared by every paired client. Hint
@@ -463,6 +469,15 @@ const appConfigSchema = z.object({
   /** The authorization decision log (server/decision-log.ts): days of month
    * files kept, at least; OMB_DECISION_RETENTION_DAYS wins when set. */
   decisions: z.object({ retentionDays: z.number().int().min(1).max(3650).optional() }).strict().optional(),
+  /** #1655 cloud-overflow settings. perSecondCostUsd is the operator's own
+   * verified rate: with no price configured the feature stays inert rather
+   * than show an invented one. allowlistedThreads carries standing consent
+   * for exact thread ids. */
+  cloudOverflow: z.object({
+    perSecondCostUsd: z.number().positive().max(10).optional(),
+    idleStopMs: z.number().int().positive().max(24 * 60 * 60_000).optional(),
+    allowlistedThreads: z.array(z.string().min(1)).max(1000).optional(),
+  }).strict().optional(),
   localVm: localVmConfigSchema.optional(),
   features: featureConfigSchema.optional(),
   onboarding: onboardingConfigSchema.optional(),
@@ -521,7 +536,10 @@ export interface AppConfig {
    * separate container, durable workspace, viewer and lease. */
   localVm?: { mode?: "shared" | "per-bot"; maxInstances?: number };
   /** Opt-in product experiments. Every flag defaults to disabled. */
-  features?: { skillAuthoring?: boolean; showToolCalls?: boolean; browser?: boolean; sharedComputers?: boolean; claudeUserMcp?: boolean; llmThreadTitles?: boolean; computerClaimIdleRelease?: boolean };
+  features?: { skillAuthoring?: boolean; showToolCalls?: boolean; browser?: boolean; sharedComputers?: boolean; claudeUserMcp?: boolean; llmThreadTitles?: boolean; computerClaimIdleRelease?: boolean; cloudOverflow?: boolean };
+  /** #1655: consented cloud overflow for local computer waits. The cost is
+   * the operator's own per-second rate; unset keeps the feature inert. */
+  cloudOverflow?: { perSecondCostUsd?: number; idleStopMs?: number; allowlistedThreads?: string[] };
   /** First-run progress; see onboardingConfigSchema. */
   onboarding?: { completedAt?: string; version?: number; reelSeen?: boolean; hintsSeen?: string[] };
   /** Named browser sessions any bot can be pointed at. */
@@ -757,6 +775,36 @@ export function computerClaimIdleReleaseEnabled(cfg: AppConfig): boolean {
   return cfg.features?.computerClaimIdleRelease === true;
 }
 
+/** Consented cloud overflow for local computer waits (#1655): while a turn
+ * waits for a local desktop, it may offer overflow to a per-second-billed
+ * cloud seat — never silently: the card names the cost, and only an
+ * explicit per-conversation consent or a configured allowlist thread may
+ * start the machine, which then hard-stops after an idle window. Off
+ * unless an explicit `true`, like computerClaimIdleRelease: enable by
+ * hand in ~/.openmausbot/config.json
+ * (`{"features": {"cloudOverflow": true}, "cloudOverflow": {"perSecondCostUsd": 0.0004}}`)
+ * and restart. */
+export function cloudOverflowEnabled(cfg: AppConfig): boolean {
+  return cfg.features?.cloudOverflow === true;
+}
+
+/** The per-second rate shown on the card, or null when the operator has
+ * not set one: the offer fails closed rather than guess a price. */
+export function cloudOverflowPerSecondCostUsd(cfg: AppConfig): number | null {
+  const cost = cfg.cloudOverflow?.perSecondCostUsd;
+  return typeof cost === "number" && Number.isFinite(cost) && cost > 0 ? cost : null;
+}
+
+/** How long a cloud seat may stay screen-quiet before it is stopped. */
+export function cloudOverflowIdleStopMs(cfg: AppConfig): number {
+  return cfg.cloudOverflow?.idleStopMs ?? CLOUD_SEAT_IDLE_STOP_MS;
+}
+
+/** Threads with standing consent, by exact thread id. */
+export function cloudOverflowAllowlistedThreads(cfg: AppConfig): Set<string> {
+  return new Set(cfg.cloudOverflow?.allowlistedThreads ?? []);
+}
+
 /** Config sections no provider driver reads. A write that touches only
  * these must not rebuild the fleet: rebuilding disposes every engine child
  * and reloads it, seconds of work that would also interrupt in-flight
@@ -773,6 +821,7 @@ export const FLEET_NEUTRAL_KEYS: ReadonlySet<string> = new Set([
   "context",
   "localVm",
   "features",
+  "cloudOverflow",
   "browserProfiles",
   "onboarding",
 ]);
@@ -1054,7 +1103,7 @@ export function saveConfig(
   // back after we have successfully recognized the legacy list.
   const storedProfiles = storedBrowserProfilesSchema.safeParse(disk.browserProfiles);
   if (storedProfiles.success) disk.browserProfiles = storedProfiles.data;
-  for (const key of ["xai", "anthropic", "mistral", "openaiCompat", "composio", "box", "opencodeGo", "tts", "imageGen", "profile", "rooms", "threads", "context", "localVm", "features", "budgets", "billing", "decisions", "onboarding", "browserEngine", "newBots"] as const) {
+  for (const key of ["xai", "anthropic", "mistral", "openaiCompat", "composio", "box", "opencodeGo", "tts", "imageGen", "profile", "rooms", "threads", "context", "localVm", "features", "cloudOverflow", "budgets", "billing", "decisions", "onboarding", "browserEngine", "newBots"] as const) {
     const section = checkedPatch[key];
     if (!section) continue;
     const current = jsonObjectSchema.safeParse(disk[key]);
