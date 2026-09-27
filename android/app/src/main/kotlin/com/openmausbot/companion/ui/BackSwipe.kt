@@ -32,7 +32,11 @@ import androidx.compose.ui.unit.dp
  * then left does not leave.
  */
 fun Modifier.horizontalBackSwipe(onBack: () -> Unit): Modifier =
-    this.pointerInput(onBack) {
+    // A constant key: keying on the callback would cancel an in-flight
+    // detector whenever recomposition produces a new lambda. Callers pass
+    // through rememberUpdatedState so the block still reads the latest
+    // exit decision at release.
+    this.pointerInput(Unit) {
         // Inside the pointer scope the density is fixed, so the threshold is
         // resolved once rather than recomputed on every event.
         val deliberateTravel = DeliberateBackSwipeDistance.toPx()
