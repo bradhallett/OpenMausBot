@@ -174,13 +174,14 @@ fun ChatScreen(
 /** The transcript is on its way. Leaving is still possible while it is. */
 @Composable
 private fun OpeningThread(onBack: () -> Unit) {
+    val latestOnBack by rememberUpdatedState(onBack)
     Column(
         modifier = Modifier
             .fillMaxSize()
             // The wait answers the swipe too: the reader changed their mind
             // about this thread, and should not have to wait for it to load
             // to say so.
-            .horizontalBackSwipe(onBack = onBack),
+            .horizontalBackSwipe(onBack = { latestOnBack() }),
     ) {
         Row(
             modifier = Modifier

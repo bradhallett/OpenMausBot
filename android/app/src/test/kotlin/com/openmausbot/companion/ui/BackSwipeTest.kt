@@ -12,6 +12,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.MotionDurationScale
 import androidx.compose.ui.geometry.Offset
@@ -19,10 +20,13 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.test.swipeUp
 import androidx.compose.ui.unit.dp
@@ -97,6 +101,36 @@ class BackSwipeTest {
         }
 
         dragRight()
+
+        assertEquals(1, backs.size)
+    }
+
+    @Test
+    fun `a recomposition mid-drag does not cancel the swipe`() {
+        val backs = mutableListOf<Unit>()
+        val ticks = mutableStateOf(0)
+        compose.setContent {
+            val tick by ticks
+            // The lambda is rebuilt every recomposition on purpose: a detector
+            // keyed on its identity would restart under it mid-gesture and
+            // lose the drag in progress.
+            Box(Modifier.fillMaxSize().horizontalBackSwipe { backs.add(Unit) }) {
+                Text("tick " + tick)
+            }
+        }
+
+        compose.onRoot().performTouchInput {
+            val far = 120.dp.toPx()
+            down(center)
+            moveTo(center + Offset(far / 2, 0f))
+        }
+        compose.runOnIdle { ticks.value += 1 }
+        compose.onNodeWithText("tick 1").assertIsDisplayed()
+        compose.onRoot().performTouchInput {
+            val far = 120.dp.toPx()
+            moveTo(center + Offset(far, 0f))
+            up()
+        }
 
         assertEquals(1, backs.size)
     }
@@ -209,6 +243,53 @@ class BackSwipeTest {
         compose.waitUntil(5_000) { navigator.current == Destination.Roster }
         compose.onNodeWithText("Fixture Home").assertIsDisplayed()
         assertNull(scene.environment.chatDrafts.get("thread-swipe"))
+    }
+
+    @Test
+    fun `the back pill closes an open command hud before it leaves`() {
+        val fixture = bot(id = "pill").copy(
+            threadId = "thread-pill",
+            messages = listOf(
+                Message("m1", Message.Role.USER, Message.Kind.TEXT, 1.0, text = "are you there"),
+                Message("m2", Message.Role.BOT, Message.Kind.TEXT, 2.0, text = "always"),
+            ),
+        )
+        val chat = Chat.BotChat(fixture).target
+        val navigator = CompanionNavigator(
+            listOf(Destination.Roster, Destination.Chat(chat)),
+        )
+        mount(fixture) {
+            when (val destination = navigator.current) {
+                is Destination.Conversation -> ChatScreen(
+                    destination = destination,
+                    onResolved = {},
+                    onBack = navigator::pop,
+                    onOpenComputer = {},
+                    onOpenOverview = {},
+                    retainsDraft = navigator::retainsChatDraft,
+                )
+                else -> Text("Fixture Home")
+            }
+        }
+
+        compose.onNodeWithText("always").assertIsDisplayed()
+        val hud = compose.onNodeWithContentDescription("Slash commands")
+        hud.performClick()
+        compose.waitForIdle()
+        assertEquals("Expanded", hud.fetchSemanticsNode().config[SemanticsProperties.StateDescription])
+
+        compose.onNodeWithContentDescription("Back").performClick()
+        compose.waitForIdle()
+
+        // The hud closed and the conversation is still here: the pill answers
+        // the panel-first decision, not a beeline for the roster.
+        assertEquals("Collapsed", hud.fetchSemanticsNode().config[SemanticsProperties.StateDescription])
+        compose.onNodeWithText("always").assertIsDisplayed()
+        assertEquals(Destination.Chat(chat), navigator.current)
+
+        compose.onNodeWithContentDescription("Back").performClick()
+        compose.waitUntil(5_000) { navigator.current == Destination.Roster }
+        compose.onNodeWithText("Fixture Home").assertIsDisplayed()
     }
 
     /** A hand crosses in steps, not one jump; inject the gesture the same way. */
