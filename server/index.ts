@@ -20756,8 +20756,9 @@ setInterval(sweepThreadEventLogsNow, THREAD_LOG_RETENTION_SWEEP_MS).unref();
 // delete — it is reversible and keeps resume cursors, instance state, cwd,
 // and handoff state (#1194). A thread qualifies only when it has been
 // closed longer than the window (global setting, per-bot override) and is
-// not busy, unread, snoozed, pinned, carrying queued work, or carrying an
-// open direct handoff; already-archived threads are never re-archived, and
+// not busy, unread, snoozed, pinned, carrying queued work, carrying an
+// open direct handoff, or a standing peer pair conversation a peer reopens
+// by sending again; already-archived threads are never re-archived, and
 // a thread explicitly restored after its close is exempt until closed
 // again. The initial run waits for the queues to restore below: queued
 // work must be visible before the first sweep files anything away.
@@ -20783,6 +20784,9 @@ function autoArchiveClosedThreadsNow(): void {
       snoozed: task.snoozedUntil === 0 || (task.snoozedUntil !== undefined && task.snoozedUntil > now),
       pinned: task.pinned === true,
       hasQueuedWork: hasQueuedSteeredMessages(bot.id, task.threadId),
+      // resolvePairConversation reuses this row when the peer writes again,
+      // and reuse does not unarchive — so the sweep must never file it away.
+      peerConversation: task.openedBy?.kind === "pair",
       openDirectHandoff: roomHandoffs.activeDirect(task.threadId),
     }));
     for (const threadId of selectAutoArchiveThreads(candidates, now)) {

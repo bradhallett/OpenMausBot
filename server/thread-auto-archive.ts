@@ -4,7 +4,8 @@
 // context — resume cursors, last instance state, cwd, and handoff state
 // (#1194). Only threads closed (close_thread) longer than the configured
 // window are eligible, and never one that is busy, unread, snoozed,
-// pinned, carrying queued work, or carrying an open direct handoff. The
+// pinned, carrying queued work, carrying an open direct handoff, or a
+// standing peer pair conversation a peer can reopen by sending again. The
 // window runs from the thread's most recent close; explicitly restoring an
 // archived thread exempts it until it is closed again. The window comes
 // from the global
@@ -34,6 +35,10 @@ export interface AutoArchiveCandidate {
   pinned: boolean;
   /** Sends still queued for this thread behind capacity or a running turn. */
   hasQueuedWork: boolean;
+  /** A standing peer pair conversation (openedBy.kind "pair"): the row is
+   * reused whenever its peer sends again (resolvePairConversation), so
+   * archiving it would hide the reopened conversation. */
+  peerConversation: boolean;
   openDirectHandoff: boolean;
 }
 
@@ -56,7 +61,7 @@ export function selectAutoArchiveThreads(
   for (const candidate of candidates) {
     if (candidate.autoArchiveDays < 1) continue;
     if (candidate.unread || candidate.busy || candidate.snoozed || candidate.pinned
-      || candidate.hasQueuedWork || candidate.openDirectHandoff) continue;
+      || candidate.hasQueuedWork || candidate.peerConversation || candidate.openDirectHandoff) continue;
     if (candidate.archivedAt !== null) continue;
     if (candidate.closedAt === null) continue;
     // Restore exemption: the newest explicit restore wins over the close

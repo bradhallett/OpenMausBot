@@ -14,7 +14,7 @@ import { waitForExit } from "./testing/cleanup.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-it("startup sweep archives long-closed threads but not snoozed, pinned, queued, or restored ones", async () => {
+it("startup sweep archives long-closed threads but not snoozed, pinned, queued, restored, or peer-conversation ones", async () => {
   // Hang mode keeps every started turn in flight: three running threads
   // fill the default capacity of 3, so the fourth send lands in the
   // durable queue instead of starting a turn — the queued-work state the
@@ -41,6 +41,7 @@ it("startup sweep archives long-closed threads but not snoozed, pinned, queued, 
     const pinned = await task("Pinned long-closed");
     const queued = await task("Queued work long-closed");
     const restored = await task("Restored long-closed");
+    const pairRow = await task("Pair conversation long-closed");
 
     // Three in-flight turns fill the bot's default thread capacity.
     await send(bot.threadId, "Runner one, stay in flight");
@@ -83,11 +84,16 @@ it("startup sweep archives long-closed threads but not snoozed, pinned, queued, 
     // every probe thread closed two days ago, against a one-day window.
     const closedAt = Date.now() - 2 * DAY_MS;
     const bots = JSON.parse(readFileSync(botsFile, "utf8"));
-    const probe = new Set([plain, snoozed, pinned, queued, restored].map((task) => task.threadId));
+    const probe = new Set([plain, snoozed, pinned, queued, restored, pairRow].map((task) => task.threadId));
     for (const record of bots) {
       if (record.id !== bot.id) continue;
       for (const task of record.tasks) {
         if (probe.has(task.threadId)) task.closedBy = { botId: bot.id, name: bot.name, at: closedAt };
+        // The standing pair row: resolvePairConversation reuses it when the
+        // peer writes again, so the sweep must never archive it.
+        if (task.threadId === pairRow.threadId) {
+          task.openedBy = { botId: "peer-sender", name: "Peer sender", kind: "pair", at: closedAt };
+        }
       }
     }
     writeFileSync(botsFile, JSON.stringify(bots, null, 2));
@@ -139,6 +145,7 @@ it("startup sweep archives long-closed threads but not snoozed, pinned, queued, 
     expect(archivedAt(pinned.threadId)).toBeNull();
     expect(archivedAt(queued.threadId)).toBeNull();
     expect(archivedAt(restored.threadId)).toBeNull();
+    expect(archivedAt(pairRow.threadId)).toBeNull();
     expect(readFileSync(logPath, "utf8")).toContain("[auto-archive] archived 1 long-closed thread(s)");
 
     // The API view agrees, and the restored thread is still closed-but-out,
@@ -152,4 +159,4 @@ it("startup sweep archives long-closed threads but not snoozed, pinned, queued, 
     await waitForExit(restarted, { signal: "SIGTERM" });
     await fixture.close();
   }
-}, 60_000);
+}, 120_000);

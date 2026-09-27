@@ -331,10 +331,10 @@ const threadsConfigSchema = z.object({
    * Absent keeps them forever. */
   eventLogRetentionDays: z.number().int().min(1).max(3650).optional(),
   /** Days a closed thread waits before auto-archive (#1280). The window
-   * runs from the thread's most recent close. Snoozed, pinned, and
-   * queued-work-carrying threads are never archived, and a thread
-   * explicitly restored after archiving is exempt until it is closed
-   * again. Absent keeps auto-archive off, the default. */
+   * runs from the thread's most recent close. Snoozed, pinned,
+   * queued-work-carrying, and standing peer-conversation threads are never
+   * archived, and a thread explicitly restored after archiving is exempt
+   * until it is closed again. Absent keeps auto-archive off, the default. */
   autoArchiveDays: z.number().int().min(1).max(3650).optional(),
 }).strict();
 /** Workspace-wide defaults every new bot starts with (Store.createBot). */
@@ -347,11 +347,13 @@ const newBotsPatchSchema = z.object({
   effort: newBotsConfigSchema.shape.effort.nullable(),
 }).strict();
 /** PATCH threads: every knob is independently patchable, and null clears an
- * event-log knob back to its absent (off) default. */
+ * optional knob (event-log or auto-archive) back to its absent (off)
+ * default. */
 const threadsPatchSchema = threadsConfigSchema.extend({
   maxConcurrentPerBot: threadsConfigSchema.shape.maxConcurrentPerBot.optional(),
   eventLogMaxBytes: threadsConfigSchema.shape.eventLogMaxBytes.nullable(),
   eventLogRetentionDays: threadsConfigSchema.shape.eventLogRetentionDays.nullable(),
+  autoArchiveDays: threadsConfigSchema.shape.autoArchiveDays.nullable(),
 });
 const appConfigSchema = z.object({
   /** Verified by the dedicated domain endpoint, never a generic config patch. */

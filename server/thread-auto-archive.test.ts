@@ -46,6 +46,7 @@ function candidate(overrides: Partial<AutoArchiveCandidate> & { threadId: string
     snoozed: false,
     pinned: false,
     hasQueuedWork: false,
+    peerConversation: false,
     openDirectHandoff: false,
     ...overrides,
   };
@@ -88,6 +89,16 @@ describe("auto-archive selection", () => {
       candidate({ threadId: "handoff", openDirectHandoff: true }),
     ];
     expect(selectAutoArchiveThreads(cases, now)).toEqual([]);
+  });
+
+  it("never selects a standing peer pair conversation; a finished peer work row stays eligible", () => {
+    // The pair row is the durable conversation resolvePairConversation
+    // reuses when the peer writes again — archiving it would hide the
+    // reopened thread. The one-off "work" rows have no such reuse.
+    expect(selectAutoArchiveThreads([
+      candidate({ threadId: "pair-row", peerConversation: true }),
+      candidate({ threadId: "work-row" }),
+    ], now)).toEqual(["work-row"]);
   });
 
   it("exempts a thread restored after its close until it is closed again", () => {
@@ -138,6 +149,7 @@ describe("auto-archive through the store", () => {
         snoozed: false,
         pinned: false,
         hasQueuedWork: false,
+        peerConversation: record.openedBy?.kind === "pair",
         openDirectHandoff: false,
       };
     };
@@ -184,6 +196,7 @@ describe("auto-archive through the store", () => {
       snoozed: false,
       pinned: false,
       hasQueuedWork: false,
+      peerConversation: record.openedBy?.kind === "pair",
       openDirectHandoff: false,
     }], Date.now())).toEqual([]);
   });
