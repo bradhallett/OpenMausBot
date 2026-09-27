@@ -1098,6 +1098,19 @@ public struct CompanionClient: Sendable {
         return data
     }
 
+    /// Fetch a parked voice note with the paired-device bearer token — the
+    /// same authenticated /api/attachments route avatar bytes ride, never a
+    /// bare URL a page could steer. The name follows the route's own
+    /// discipline (readAttachment in server/attachments.ts): one bare
+    /// generated mp3 filename.
+    public func voiceNote(path: String) async throws -> Data {
+        guard let name = Self.voiceNoteFileName(path) else { throw APIError.badURL }
+        let request = try makeRequest("GET", "/api/attachments/\(name)")
+        let (data, response) = try await perform(request)
+        try Self.check(response, data)
+        return data
+    }
+
     private static func validAvatarPath(_ path: String) -> Bool {
         let prefix = "/api/attachments/"
         guard path.hasPrefix(prefix) else { return false }
@@ -1114,6 +1127,30 @@ public struct CompanionClient: Sendable {
                 || byte == 45
         }
         return validStem && ["png", "jpg", "gif", "webp"].contains(String(ext))
+    }
+
+    /// The attachment route resolves exactly one bare `[A-Za-z0-9-]+.mp3`
+    /// filename; anything else must not become a request. Directory parts
+    /// are dropped the way the web bubble's attachmentBasename drops them,
+    /// and the full /api/attachments/ prefix is tolerated like avatar paths.
+    static func voiceNoteFileName(_ path: String) -> String? {
+        var name = path
+        if name.hasPrefix("/api/attachments/") {
+            name = String(name.dropFirst("/api/attachments/".count))
+        }
+        if let slash = name.lastIndex(of: "/") {
+            name = String(name[name.index(after: slash)...])
+        }
+        guard let dot = name.lastIndex(of: "."), dot != name.startIndex else { return nil }
+        let stem = name[..<dot]
+        let ext = name[name.index(after: dot)...]
+        let validStem = !stem.isEmpty && stem.utf8.allSatisfy { byte in
+            (48...57).contains(byte)
+                || (65...90).contains(byte)
+                || (97...122).contains(byte)
+                || byte == 45
+        }
+        return validStem && ext == "mp3" ? name : nil
     }
 
     public func voices() async throws -> [Voice] {
@@ -1436,7 +1473,10 @@ public struct CompanionClient: Sendable {
     /// too old to have this route answers 404 for it, and reading that as
     /// "already drained" would take the message off the phone while it is
     /// still queued on the computer, and it would then arrive anyway.
-    public func cancelQueued(queueId: String, to destination: MessageDestination) async throws {
+    /// Returns true only for a confirmed cancellation. A stale queue row can
+    /// be retired after a drained response, but its words must not be resent.
+    @discardableResult
+    public func cancelQueued(queueId: String, to destination: MessageDestination) async throws -> Bool {
         let route: String
         let body: [String: Any]?
         switch destination {
@@ -1453,6 +1493,7 @@ public struct CompanionClient: Sendable {
         }
         do {
             try await send(try makeRequest("DELETE", route, body: body))
+            return true
         } catch let APIError.status(code, message) where code == 404 {
             guard message?.localizedCaseInsensitiveContains(Self.alreadyDrainedQueueMessage) == true else {
                 throw APIError.status(
@@ -1460,7 +1501,39 @@ public struct CompanionClient: Sendable {
                     message: "This computer is too old to take back a queued message. Update OpenMausBot on it."
                 )
             }
+            return false
         }
+    }
+
+    /// Run Claude Code's own updater on the computer for one engine instance,
+    /// returning the version it now reports. The harness refuses while other
+    /// Claude turns are running; its error text is written for people and
+    /// comes through as the thrown `APIError`.
+    public func updateClaude(instanceId: String) async throws -> String {
+        guard Self.validInstanceID(instanceId) else { throw APIError.badURL }
+        var request = try makeRequest(
+            "POST",
+            "/api/instances/\(instanceId)/claude-update",
+            body: [:]
+        )
+        // The updater downloads and installs a new CLI; the server allows it
+        // up to three minutes. Leave room for its own timeout error rather
+        // than replacing it with the normal twenty-second transport timeout.
+        request.timeoutInterval = 200
+        return try await send(request, as: ClaudeUpdateResponse.self).version
+    }
+
+    private struct ClaudeUpdateResponse: Decodable {
+        let version: String
+    }
+
+    /// Matches the harness's `[\w.-]+` instance route component.
+    private static func validInstanceID(_ value: String) -> Bool {
+        !value.isEmpty && value != "." && value != ".."
+            && value.utf8.allSatisfy { byte in
+                (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
+                    || byte == 45 || byte == 95 || byte == 46
+            }
     }
 
     private static func validRouteID(_ value: String) -> Bool {

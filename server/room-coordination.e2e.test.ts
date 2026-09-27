@@ -47,6 +47,10 @@ async function addSupervisingChief(f: any, section = "") {
 it.each(["", "Leadership"])("lists and coordinates with a supervising Chief and same-section peer in the same room (Chief section %j)", section => withRooms(async f => {
   const chief = await addSupervisingChief(f, section);
   f.plan[f.sender.id].steps = [{ arguments: { bot_ids: [chief.id, f.target.id], request_key: "same-room", message: "Review the work here" } }];
+  // The fresh coordination brief carries the recipient's own live roster:
+  // dispatch-time data must ride the user turn, fenced with its own markers
+  // so it can never blend into the assignment text around it.
+  f.plan[f.target.id] = { reply: "Built CSV", expectContextIncludes: ["[LIVE TEAMMATES]", `[id: ${f.sender.id}]`] };
   await f.start(); expect((await f.wait()).status).toBe("settled");
   const discovery = JSON.parse(f.provider().find((turn: any) => turn.botId === f.sender.id).evidence[1].result.content[0].text);
   expect(discovery.rooms.find((room: any) => room.id === f.source.id).members.map((bot: any) => bot.id)).toEqual(expect.arrayContaining([chief.id, f.target.id]));
@@ -269,6 +273,28 @@ it("returns a provider failure to the sender and resumes it to handle the failur
   const source = await f.messages(f.source.activeTaskId);
   expect(source.some((m: any) => m.roomRequest?.phase === "result" && m.tool?.name.includes("failed"))).toBe(true);
   expect(source.some((m: any) => m.text === "Reviewed downstream outcome")).toBe(true);
+}), 45_000);
+
+// A duplicate request_key on a failed node used to be receipted "queued"
+// with a promise that its result would resume the sender — but a terminal
+// node never reruns and its report already fired, so the coordinator would
+// wait on an auto-resume that never comes. The receipt must say the earlier
+// assignment is dead and a retry needs a new request_key.
+it("receipts a retried duplicate of a failed hand-off as failed, not queued behind a resume that never comes", () => withRooms(async f => {
+  f.plan[f.target.id].fail = true;
+  f.plan[f.sender.id].resumeSteps = [{ arguments: f.plan[f.sender.id].steps[0].arguments }];
+  await f.start(); expect((await f.wait()).status).toBe("settled");
+  expect(f.provider().map((turn: any) => turn.botId)).toEqual([f.sender.id, f.target.id, f.sender.id]);
+  const [assigned, retried] = f.provider().filter((turn: any) => turn.botId === f.sender.id);
+  expect(assigned.resumed).toBe(false);
+  const first = JSON.parse(assigned.evidence.find((entry: any) => entry.step).response.result.content[0].text);
+  expect(first.receipts[0]).toMatchObject({ botId: f.target.id, outcome: "queued" });
+  expect(retried.resumed).toBe(true);
+  const retry = JSON.parse(retried.evidence.find((entry: any) => entry.step).response.result.content[0].text);
+  expect(retry.accepted[0]).toMatchObject({ botId: f.target.id, duplicate: true, status: "failed" });
+  expect(retry.receipts[0]).toMatchObject({ botId: f.target.id, outcome: "failed" });
+  expect(retry.receipts[0].detail).toContain("failed and will not rerun or resume you");
+  expect(f.nodes().filter((n: any) => n.parentId)).toHaveLength(1);
 }), 45_000);
 
 it("keeps a busy recipient queued and rejects revoked peer access before dispatch", () => withRooms(async f => {
