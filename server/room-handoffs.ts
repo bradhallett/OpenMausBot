@@ -131,7 +131,15 @@ export class RoomHandoffs {
     const ceiling = n.status === "queued" && n.executions === 0
       ? anchor + this.limits.queueMs
       : root.createdAt + this.limits.lifetimeMs + this.pausedMs(root);
-    return Math.min(Math.max(ceiling, anchor + this.limits.minRunwayMs), root.createdAt + this.limits.hardCapMs);
+    const normal = Math.min(Math.max(ceiling, anchor + this.limits.minRunwayMs), root.createdAt + this.limits.hardCapMs);
+    // An in-flight synthesis turn keeps at least the runway its dispatch
+    // promised even when the hard cap lands mid-run; the cap still clamps
+    // the deadline, so a hung synthesis dies at that edge instead of
+    // becoming immortal.
+    if (n.status === "running" && this.owesOnlySynthesis(n)) {
+      return Math.max(normal, anchor + this.limits.minRunwayMs);
+    }
+    return normal;
   }
   /** An ancestor past its ceiling is not failed while a descendant is still
    * running inside its own runway; cancelling would cascade into that work. */
@@ -147,6 +155,16 @@ export class RoomHandoffs {
     const children = this.children(n.id);
     return (children.length > 0 && children.every(c => terminal(c))) ||
       children.some(c => this.owesFollowUp(c) || (c.status === "queued" && c.executions === 0));
+  }
+  /** A node whose children have all settled owes only its own synthesis
+   * turn: the step that returns their results to the requester. The hard
+   * cap must not kill that turn mid-flight or starve it of its dispatch.
+   * A synthesis owed to a teammate who is permanently busy is a stall, not
+   * progress, and stays subject to the cap. */
+  private owesOnlySynthesis(n: RoomHandoff): boolean {
+    const children = this.children(n.id);
+    return children.length > 0 && children.every(c => terminal(c)) &&
+      (n.status === "running" || (n.status === "resume" && !this.hooks.busy(n)));
   }
   /** Names the budget, the node's status, and the elapsed time. Work that
    * never started reports the queue window it waited out, not the tree's. */
@@ -312,11 +330,13 @@ export class RoomHandoffs {
     // Validate and expire deepest nodes first so each one is failed with its
     // own status; an ancestor's cancellation then only sweeps what is left.
     // The hard cap overrides the runner and follow-up protections: it is the
-    // bound that stops a tree whose execution never pauses.
+    // bound that stops a tree whose execution never pauses. A tree whose only
+    // remaining obligation is its own synthesis turn is spared, so settled
+    // results are returned instead of dying inside a failed tree.
     for (const n of [...this.nodes.values()].reverse()) {
       if (terminal(n)) continue;
       const error = this.hooks.validate(n, n.parentId ? this.nodes.get(n.parentId) : undefined);
-      const hardCapped = this.now() >= this.root(n).createdAt + this.limits.hardCapMs;
+      const hardCapped = !this.owesOnlySynthesis(n) && this.now() >= this.root(n).createdAt + this.limits.hardCapMs;
       if (error || hardCapped || (this.now() > this.deadline(n) && !this.protectsRunner(n) && !this.owesFollowUp(n))) {
         this.cancelTree(n, error ?? (hardCapped ? this.hardCapError(n) : this.lifetimeError(n)), "failed");
       }
