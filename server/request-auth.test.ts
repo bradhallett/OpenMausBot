@@ -290,38 +290,6 @@ describe("resolveRequestAuth", () => {
     ).auth?.kind).toBe("loopback");
   });
 
-  it("marks the dev desktop capability without widening other loopback trust", () => {
-    const devToken = "d".repeat(43);
-    const options = (path: string) => ({
-      sessions,
-      cookieName,
-      streamPath: "/api/events",
-      url: new URL(path, "http://x"),
-      devDesktopCapabilityToken: devToken,
-    });
-    const marked = resolveRequestAuth(
-      request({ host: "127.0.0.1:8799", "x-openmausbot-desktop-owner": devToken }, "PUT"),
-      options("/api/bots/bot-1/pinned/pack-1"),
-    );
-    expect(marked.auth).toEqual({ kind: "loopback", scopes: ["admin", "client"], capability: "desktop-owner" });
-
-    // A bare loopback caller (any local shell) stays capability-less.
-    const unmarked = resolveRequestAuth(
-      request({ host: "127.0.0.1:8799", "x-openmausbot-desktop-owner": "wrong" }, "PUT"),
-      options("/api/bots/bot-1/pinned/pack-1"),
-    );
-    expect(unmarked.auth).toEqual({ kind: "loopback", scopes: ["admin", "client"] });
-
-    // The dev capability never gates general loopback mutations: with no
-    // packaged token configured, a wrong dev header still passes the
-    // public-route gate exactly as before.
-    const general = resolveRequestAuth(
-      request({ host: "127.0.0.1:8799", "x-openmausbot-desktop-owner": "wrong" }, "PUT"),
-      options("/api/config"),
-    );
-    expect(general.auth?.kind).toBe("loopback");
-  });
-
   it("never grants loopback trust to a request that came through a proxy, whatever Host it carries", () => {
     expect(isProxied(request({ host: "localhost", "x-forwarded-for": "203.0.113.9" }))).toBe(true);
     expect(isProxied(request({ host: "localhost", "x-forwarded-proto": "https" }))).toBe(true);

@@ -646,24 +646,6 @@ if (process.env.OMB_CLI_OWNER_STDIN === "1" && LOOPBACK.trust === "service" && p
   });
 }
 delete process.env.OMB_CLI_OWNER_STDIN;
-// Development capability handoff (#1669): `pnpm dev:desktop` runs the
-// server outside Electron's utility process, so the per-launch owner token
-// cannot ride the private port handoff. Electron writes it to this
-// owner-only file instead (electron/main.mjs), and the dev renderer sends
-// it as the same header the packaged app sends. It validates exactly like
-// the packaged token and marks the request person-capable for boundaries
-// like pinned packs; every other loopback trust rule is unchanged. A bare
-// file watcher server (no Electron) never creates it, and its loopback
-// callers stay capability-less, which is the point.
-let devDesktopCapabilityToken: string | undefined;
-if (!DESKTOP_MANAGED && LOOPBACK.trust === "owner") {
-  try {
-    const raw = readFileSync(join(DATA_DIR, "dev-desktop-capability"), "utf8").trim();
-    if (/^[A-Za-z0-9_-]{43}$/.test(raw)) devDesktopCapabilityToken = raw;
-  } catch {
-    // Absent: no dev desktop has run yet; nothing to hand out.
-  }
-}
 // Empty is deliberately a deny-all bootstrap state. Only Electron's private
 // utility-process port can replace it with the per-launch owner capability.
 let desktopMutationToken: string | undefined = DESKTOP_MANAGED ? "" : undefined;
@@ -13233,7 +13215,6 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       url,
       loopbackMutationToken: desktopMutationToken,
       companionMutationToken,
-      devDesktopCapabilityToken,
       features: { sharedComputers: sharedComputersEnabled(cfg) },
       loopbackTrust: LOOPBACK.trust,
       cliOwnerToken,

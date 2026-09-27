@@ -21,7 +21,7 @@
 // content hash), versioning (an integer that every replace bumps), and an
 // allowlist (the person's enabled flag in protected app state).
 import { createHash } from "node:crypto";
-import { lstatSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 
@@ -257,15 +257,42 @@ function packFilePath(botId: string, name: string): string {
   return join(pinnedDir(botId), name, "PACK.md");
 }
 
-function packContentMatches(botId: string, name: string, entry: PackManifestEntry): boolean {
+/** Read pack bytes through one descriptor that refuses to follow symlinks,
+ * never blocks opening a special file, and never reads past
+ * PACK_FILE_MAX_BYTES. A separate stat-then-read would still allow a
+ * replacement race; opening the final path without following symlinks and
+ * checking that same descriptor closes it. */
+function readPackFileBounded(path: string): string | null {
+  // O_NOFOLLOW/O_NONBLOCK are absent on some platforms (Windows); there the
+  // isFile + size checks on the descriptor still bound every read.
+  const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
+  let fd: number;
   try {
-    const path = packFilePath(botId, name);
-    const stat = lstatSync(path);
-    if (!stat.isFile() || stat.size > PACK_FILE_MAX_BYTES) return false;
-    return createHash("sha256").update(readFileSync(path)).digest("hex") === entry.sha256;
+    fd = openSync(path, flags);
   } catch {
-    return false;
+    return null;
   }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > PACK_FILE_MAX_BYTES) return null;
+    const buffer = Buffer.alloc(stat.size);
+    let read = 0;
+    while (read < buffer.length) {
+      const count = readSync(fd, buffer, read, buffer.length - read, read);
+      if (count === 0) return null;
+      read += count;
+    }
+    return buffer.toString("utf8");
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function packContentMatches(botId: string, name: string, entry: PackManifestEntry): boolean {
+  const text = readPackFileBounded(packFilePath(botId, name));
+  return text !== null && createHash("sha256").update(text).digest("hex") === entry.sha256;
 }
 
 export interface PinnedPackListing {
@@ -314,12 +341,8 @@ export function readPinnedPackFile(botId: string, name: string): string | null {
   if (!isSkillName(name)) return null;
   const entry = readManifest(botId)[name];
   if (!entry) return null;
-  try {
-    const text = readFileSync(packFilePath(botId, name), "utf8");
-    return createHash("sha256").update(text).digest("hex") === entry.sha256 ? text : null;
-  } catch {
-    return null;
-  }
+  const text = readPackFileBounded(packFilePath(botId, name));
+  return text !== null && createHash("sha256").update(text).digest("hex") === entry.sha256 ? text : null;
 }
 
 /** Create or replace a pack from person-reviewed bytes. A replace bumps the
@@ -352,14 +375,7 @@ export function putPinnedPack(botId: string, name: string, text: string): Pinned
     }
   }
   const previousPath = packFilePath(botId, name);
-  let previousText: string | null = null;
-  if (existing) {
-    try {
-      previousText = readFileSync(previousPath, "utf8");
-    } catch {
-      previousText = null;
-    }
-  }
+  const previousText = existing ? readPackFileBounded(previousPath) : null;
   const now = new Date().toISOString();
   const entry: PackManifestEntry = {
     description: parsed.description,

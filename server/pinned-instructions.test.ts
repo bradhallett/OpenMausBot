@@ -8,6 +8,7 @@ import { workspaceDir } from "./workspace.ts";
 import { DATA_DIR } from "./config.ts";
 import {
   listPinnedPacks,
+  PACK_FILE_MAX_BYTES,
   packMatches,
   parsePackMd,
   pinnedInstructionsPrompt,
@@ -222,5 +223,24 @@ describe("pack store", () => {
     const result = putPinnedPack(bot, "evil", pack("evil"));
     expect("error" in result).toBe(true);
     expect(putPinnedPack(bot, "fine", pack("fine"))).toMatchObject({ name: "fine" });
+  });
+
+  it("reads pack bytes without following symlinks or reading past the size cap", () => {
+    putPinnedPack(bot, "checklist", pack("checklist", { body: "reviewed body" }));
+    const file = join(workspaceDir(bot), "pinned", "checklist", "PACK.md");
+    // A symlink at the pack path is tampering, not the target's bytes, even
+    // when the target still matches the reviewed hash.
+    const target = join(scratch, "target.md");
+    writeFileSync(target, pack("checklist", { body: "reviewed body" }));
+    rmSync(file);
+    symlinkSync(target, file);
+    expect(readPinnedPackFile(bot, "checklist")).toBeNull();
+    expect(pinnedInstructionsPrompt(bot, {})).toBe("");
+    // A file past the cap is rejected from its descriptor before any read.
+    rmSync(file);
+    writeFileSync(file, "x".repeat(PACK_FILE_MAX_BYTES + 1));
+    expect(readPinnedPackFile(bot, "checklist")).toBeNull();
+    const listed = listPinnedPacks(bot).find((entry) => entry.name === "checklist");
+    expect(listed?.enabled).toBe(false);
   });
 });

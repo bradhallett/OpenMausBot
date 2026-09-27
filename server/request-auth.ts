@@ -395,14 +395,6 @@ export interface ResolveOptions {
   loopbackMutationToken?: string;
   /** Separate private capability held by the authenticated phone relay. */
   companionMutationToken?: string;
-  /** Development-only desktop capability (#1669): `pnpm dev:desktop` runs
-   * the server as its own process, so Electron cannot hand its per-launch
-   * owner token over the private utility port. Electron writes the token to
-   * the data directory instead (owner-only) and the dev renderer carries it
-   * through the dev proxy. Validating it marks the request as
-   * person-authored for boundaries like pinned packs; it never gates any
-   * other loopback mutation, which keep their existing trust rules. */
-  devDesktopCapabilityToken?: string;
   /** Feature gates that decide whether a client-scoped route exists at all.
    * Absent means off, so an ungated build refuses like one without it. */
   features?: { sharedComputers?: boolean };
@@ -508,8 +500,7 @@ export function resolveRequestAuth(req: IncomingMessage, options: ResolveOptions
     }
     const desktopOwnerHeader = headerValue(req.headers[DESKTOP_OWNER_HEADER]);
     const desktopOwnerCapability =
-      (options.loopbackMutationToken !== undefined && secureTokenMatch(desktopOwnerHeader, options.loopbackMutationToken)) ||
-      (options.devDesktopCapabilityToken !== undefined && secureTokenMatch(desktopOwnerHeader, options.devDesktopCapabilityToken));
+      options.loopbackMutationToken !== undefined && secureTokenMatch(desktopOwnerHeader, options.loopbackMutationToken);
     if (
       options.loopbackMutationToken !== undefined &&
       mutatingPublicRoute(method, path) &&

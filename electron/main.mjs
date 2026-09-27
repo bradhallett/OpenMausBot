@@ -2912,21 +2912,11 @@ app.whenReady().then(async () => {
     // can mutate the local harness while a Full-access shell using curl
     // cannot impersonate the person operating the desktop app.
     installDesktopMutationHeader();
-  } else {
-    // Dev handoff (#1669): the dev server runs as its own process, so the
-    // per-launch owner token cannot ride the private utility port. Write it
-    // to the owner-only data file the server reads, and stamp it on the dev
-    // renderer's requests through the same header hook. The file is written
-    // every launch, so a stale token from an earlier dev session is replaced
-    // before the server starts.
-    try {
-      fs.mkdirSync(desktopDataDir(), { recursive: true });
-      fs.writeFileSync(path.join(desktopDataDir(), "dev-desktop-capability"), desktopMutationToken + "\n", { mode: 0o600 });
-      installDesktopMutationHeader();
-    } catch (error) {
-      slog(`dev desktop capability handoff failed: ${error?.message ?? error}`);
-    }
   }
+  // Dev deliberately gets no desktop-owner capability (#1669): the dev
+  // server runs as this same OS user, so any token handoff on disk would be
+  // readable by a full-access bot shell. Dev pinned-pack mutations go
+  // through the paired web session instead.
   if (process.platform === "darwin") app.dock.setIcon(APP_ICON);
   secureCredentials = await loadSecureCredentials();
   // The AssemblyAI key only fed the removed Teach a skill recorder, and its
