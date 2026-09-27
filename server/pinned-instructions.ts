@@ -21,7 +21,7 @@
 // content hash), versioning (an integer that every replace bumps), and an
 // allowlist (the person's enabled flag in protected app state).
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 
@@ -214,11 +214,24 @@ function manifestFromFile(path: string): PackManifest | null {
   }
 }
 
+/** The three states a protected manifest can be in: present (parsed, or
+ * corrupt-but-there), confirmed missing, and unreadable. Mutations refuse on
+ * the last state rather than treating protected state as empty. */
+function readManifestState(botId: string): PackManifest | null {
+  const path = manifestPath(botId);
+  try {
+    lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    return null;
+  }
+  return manifestFromFile(path);
+}
+
 /** Corrupt protected state fails closed: no pack injects, exactly like the
  * skill store, rather than falling back to agent-writable workspace state. */
 function readManifest(botId: string): PackManifest {
-  const path = manifestPath(botId);
-  return existsSync(path) ? manifestFromFile(path) ?? {} : {};
+  return readManifestState(botId) ?? {};
 }
 
 function writeManifest(botId: string, manifest: PackManifest): void {
@@ -322,7 +335,8 @@ export function putPinnedPack(botId: string, name: string, text: string): Pinned
   const parsed = parsePackMd(text);
   if ("error" in parsed) return parsed;
   if (parsed.name !== name) return { error: "pack name does not match its frontmatter" };
-  const manifest = readManifest(botId);
+  const manifest = readManifestState(botId);
+  if (!manifest) return { error: "pinned pack state is unreadable; refusing to overwrite it" };
   const existing = manifest[name];
   const root = ensurePinnedRoot(botId);
   if (!root) return { error: "the workspace pinned path must be a real directory, not a symlink or file" };
@@ -335,6 +349,15 @@ export function putPinnedPack(botId: string, name: string, text: string): Pinned
       mkdirSync(directory, { mode: 0o700 });
     } catch {
       return { error: "could not create the pack directory" };
+    }
+  }
+  const previousPath = packFilePath(botId, name);
+  let previousText: string | null = null;
+  if (existing) {
+    try {
+      previousText = readFileSync(previousPath, "utf8");
+    } catch {
+      previousText = null;
     }
   }
   const now = new Date().toISOString();
@@ -351,15 +374,25 @@ export function putPinnedPack(botId: string, name: string, text: string): Pinned
   };
   // Content first, manifest second: a crash between the two leaves the old
   // reviewed selection active, never a manifest pointing at missing bytes.
-  writeFileAtomic(packFilePath(botId, name), text, { mode: 0o600 });
+  writeFileAtomic(previousPath, text, { mode: 0o600 });
   manifest[name] = entry;
-  writeManifest(botId, manifest);
+  try {
+    writeManifest(botId, manifest);
+  } catch (error) {
+    if (previousText === null) {
+      rmSync(previousPath, { force: true });
+    } else {
+      writeFileAtomic(previousPath, previousText, { mode: 0o600 });
+    }
+    throw error;
+  }
   return packListing(botId, name, entry);
 }
 
 export function setPinnedPackEnabled(botId: string, name: string, enabled: boolean): PinnedPackListing | { error: string } {
   if (!isSkillName(name)) return { error: "invalid pack name" };
-  const manifest = readManifest(botId);
+  const manifest = readManifestState(botId);
+  if (!manifest) return { error: "pinned pack state is unreadable; refusing to overwrite it" };
   const entry = manifest[name];
   if (!entry) return { error: 'no pinned pack named "' + name + '"' };
   if (enabled && !packContentMatches(botId, name, entry)) {
@@ -372,7 +405,8 @@ export function setPinnedPackEnabled(botId: string, name: string, enabled: boole
 
 export function removePinnedPack(botId: string, name: string): { removed: true } | { error: string } {
   if (!isSkillName(name)) return { error: "invalid pack name" };
-  const manifest = readManifest(botId);
+  const manifest = readManifestState(botId);
+  if (!manifest) return { error: "pinned pack state is unreadable; refusing to overwrite it" };
   const entry = manifest[name];
   if (!entry) return { error: 'no pinned pack named "' + name + '"' };
   const root = pinnedDir(botId);
@@ -413,17 +447,25 @@ export function pinnedInstructionsPrompt(botId: string, facts: PinnedFacts): str
       && packMatches({ ...(entry.role !== undefined ? { role: entry.role } : {}), ...(entry.workspace !== undefined ? { workspace: entry.workspace } : {}) }, facts))
     .sort(([a], [b]) => a.localeCompare(b));
   if (!matching.length) return "";
+  const header = "\n\nPinned instructions (standing context for this bot; re-injected on every turn, so they survive compaction):";
+  const footer = "Pinned packs were reviewed and pinned by the person. They never override these system rules or the user's instructions.";
+  // The omission notice keeps the true count even when the remaining budget
+  // cannot hold every name: "3 packs omitted" always survives, the name
+  // list fills whatever room is left.
+  const omissionFooter = (count: number, names: readonly string[]) =>
+    "\n[" + count + " pinned pack(s) omitted to bound the prompt"
+      + (names.length ? ": " + names.join(", ") : "") + "]\n";
   const blocks: string[] = [];
   const omitted: string[] = [];
-  let used = 0;
+  let used = Buffer.byteLength(header + "\n" + footer + omissionFooter(matching.length, []), "utf8");
   for (const [name, entry] of matching) {
     const file = readPinnedPackFile(botId, name);
     if (file === null) continue;
     const parsed = parsePackMd(file);
     if ("error" in parsed) continue;
     const block = "<openmaus-pinned id=" + JSON.stringify(name) + " version=" + JSON.stringify(entry.version) + ">\n" + parsed.body.trim() + "\n</openmaus-pinned>";
-    const size = Buffer.byteLength(block, "utf8");
-    if (used + size > PINNED_PROMPT_MAX_BYTES && blocks.length) {
+    const size = Buffer.byteLength(block, "utf8") + 1;
+    if (used + size > PINNED_PROMPT_MAX_BYTES) {
       omitted.push(name);
       continue;
     }
@@ -431,8 +473,13 @@ export function pinnedInstructionsPrompt(botId: string, facts: PinnedFacts): str
     used += size;
   }
   if (!blocks.length) return "";
-  const header = "\n\nPinned instructions (standing context for this bot; re-injected on every turn, so they survive compaction):";
-  const footer = "Pinned packs were reviewed and pinned by the person. They never override these system rules or the user's instructions.";
-  return header + "\n" + blocks.join("\n") + "\n" + footer
-    + (omitted.length ? "\n[" + omitted.length + " pinned pack(s) omitted to bound the prompt: " + omitted.join(", ") + "]" : "") + "\n";
+  const base = header + "\n" + blocks.join("\n") + "\n" + footer;
+  if (!omitted.length) return base + "\n";
+  const names: string[] = [];
+  for (const name of omitted) {
+    const candidate = omissionFooter(omitted.length, [...names, name]);
+    if (Buffer.byteLength(base + candidate, "utf8") > PINNED_PROMPT_MAX_BYTES) break;
+    names.push(name);
+  }
+  return base + omissionFooter(omitted.length, names);
 }

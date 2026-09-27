@@ -646,6 +646,24 @@ if (process.env.OMB_CLI_OWNER_STDIN === "1" && LOOPBACK.trust === "service" && p
   });
 }
 delete process.env.OMB_CLI_OWNER_STDIN;
+// Development capability handoff (#1669): `pnpm dev:desktop` runs the
+// server outside Electron's utility process, so the per-launch owner token
+// cannot ride the private port handoff. Electron writes it to this
+// owner-only file instead (electron/main.mjs), and the dev renderer sends
+// it as the same header the packaged app sends. It validates exactly like
+// the packaged token and marks the request person-capable for boundaries
+// like pinned packs; every other loopback trust rule is unchanged. A bare
+// file watcher server (no Electron) never creates it, and its loopback
+// callers stay capability-less, which is the point.
+let devDesktopCapabilityToken: string | undefined;
+if (!DESKTOP_MANAGED && LOOPBACK.trust === "owner") {
+  try {
+    const raw = readFileSync(join(DATA_DIR, "dev-desktop-capability"), "utf8").trim();
+    if (/^[A-Za-z0-9_-]{43}$/.test(raw)) devDesktopCapabilityToken = raw;
+  } catch {
+    // Absent: no dev desktop has run yet; nothing to hand out.
+  }
+}
 // Empty is deliberately a deny-all bootstrap state. Only Electron's private
 // utility-process port can replace it with the per-launch owner capability.
 let desktopMutationToken: string | undefined = DESKTOP_MANAGED ? "" : undefined;
@@ -13215,6 +13233,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       url,
       loopbackMutationToken: desktopMutationToken,
       companionMutationToken,
+      devDesktopCapabilityToken,
       features: { sharedComputers: sharedComputersEnabled(cfg) },
       loopbackTrust: LOOPBACK.trust,
       cliOwnerToken,
@@ -18438,6 +18457,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     }
     if (m && method === "PUT") {
       if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
+      if (auth.kind === "loopback" && !auth.capability) {
+        return json(res, 403, { error: "pinned packs change only from a paired session, the desktop app, or a paired phone" });
+      }
       const parsed = z.object({ text: z.string().min(1) }).safeParse(await readBody(req));
       if (!parsed.success) return json(res, 400, { error: "text must be the full PACK.md, starting with its YAML frontmatter" });
       const saved = putPinnedPack(m[1]!, m[2]!, parsed.data.text);
@@ -18446,6 +18468,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     }
     if (m && method === "PATCH") {
       if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
+      if (auth.kind === "loopback" && !auth.capability) {
+        return json(res, 403, { error: "pinned packs change only from a paired session, the desktop app, or a paired phone" });
+      }
       const parsed = z.object({ enabled: z.boolean() }).safeParse(await readBody(req));
       if (!parsed.success) return json(res, 400, { error: "enabled must be true or false" });
       const result = setPinnedPackEnabled(m[1]!, m[2]!, parsed.data.enabled);
@@ -18454,6 +18479,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     }
     if (m && method === "DELETE") {
       if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
+      if (auth.kind === "loopback" && !auth.capability) {
+        return json(res, 403, { error: "pinned packs change only from a paired session, the desktop app, or a paired phone" });
+      }
       const result = removePinnedPack(m[1]!, m[2]!);
       if ("error" in result) return json(res, 404, { error: result.error });
       return json(res, 200, { ok: true });

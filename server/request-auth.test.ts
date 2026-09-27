@@ -180,6 +180,10 @@ describe("resolveRequestAuth", () => {
       ["POST", "/api/internal/anything"], ["GET", "/api/auth/sessions"],
       ["POST", "/api/not-yet-supported"],
     ]) expect(check(method, path).auth, path).toBeNull();
+    // A validated relay request carries the companion capability: person-
+    // owned boundaries (pinned packs) accept it while it still never grants
+    // the desktop owner header's reach.
+    expect(check("POST", "/api/bots/b/read").auth).toMatchObject({ kind: "loopback", capability: "companion" });
   });
 
   function pairedToken(scopes: Array<"admin" | "client"> = ["admin", "client"]): string {
@@ -284,6 +288,38 @@ describe("resolveRequestAuth", () => {
       request({ host: "127.0.0.1:8799" }, "POST"),
       options("/api/internal/ask-bot"),
     ).auth?.kind).toBe("loopback");
+  });
+
+  it("marks the dev desktop capability without widening other loopback trust", () => {
+    const devToken = "d".repeat(43);
+    const options = (path: string) => ({
+      sessions,
+      cookieName,
+      streamPath: "/api/events",
+      url: new URL(path, "http://x"),
+      devDesktopCapabilityToken: devToken,
+    });
+    const marked = resolveRequestAuth(
+      request({ host: "127.0.0.1:8799", "x-openmausbot-desktop-owner": devToken }, "PUT"),
+      options("/api/bots/bot-1/pinned/pack-1"),
+    );
+    expect(marked.auth).toEqual({ kind: "loopback", scopes: ["admin", "client"], capability: "desktop-owner" });
+
+    // A bare loopback caller (any local shell) stays capability-less.
+    const unmarked = resolveRequestAuth(
+      request({ host: "127.0.0.1:8799", "x-openmausbot-desktop-owner": "wrong" }, "PUT"),
+      options("/api/bots/bot-1/pinned/pack-1"),
+    );
+    expect(unmarked.auth).toEqual({ kind: "loopback", scopes: ["admin", "client"] });
+
+    // The dev capability never gates general loopback mutations: with no
+    // packaged token configured, a wrong dev header still passes the
+    // public-route gate exactly as before.
+    const general = resolveRequestAuth(
+      request({ host: "127.0.0.1:8799", "x-openmausbot-desktop-owner": "wrong" }, "PUT"),
+      options("/api/config"),
+    );
+    expect(general.auth?.kind).toBe("loopback");
   });
 
   it("never grants loopback trust to a request that came through a proxy, whatever Host it carries", () => {
@@ -511,7 +547,7 @@ describe("loopback trust: owner on one person's machine, service on a shared wor
 
   it("ignores service trust while the desktop capability is in force", () => {
     expect(check("PUT", "/api/config", { trust: "service", desktopToken: "owner-token", headers: { "x-openmausbot-desktop-owner": "owner-token" } }).auth)
-      .toEqual({ kind: "loopback", scopes: ["admin", "client"] });
+      .toEqual({ kind: "loopback", scopes: ["admin", "client"], capability: "desktop-owner" });
   });
 
   it("defaults to service on a hosted workspace, owner elsewhere, and lets the operator choose", () => {

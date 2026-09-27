@@ -1,10 +1,11 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { removeTempDir } from "./testing/cleanup.ts";
 import { workspaceDir } from "./workspace.ts";
+import { DATA_DIR } from "./config.ts";
 import {
   listPinnedPacks,
   packMatches,
@@ -34,6 +35,9 @@ const pack = (name: string, options: { role?: string; workspace?: string; body?:
 
 let bot: string;
 let scratch: string;
+// A chmod-based failure test cannot rely on permissions when running as root.
+const itUnlessRoot = (process.getuid?.() ?? 0) === 0 ? it.skip : it;
+const manifestPath = (botId: string) => join(DATA_DIR, "pinned-state", botId, "pinned.json");
 
 beforeEach(() => {
   scratch = mkdtempSync(join(tmpdir(), "omb-pinned-"));
@@ -152,6 +156,54 @@ describe("pack store", () => {
     expect(prompt).toContain("A_START");
     expect(prompt).not.toContain("B_START");
     expect(prompt).toContain("1 pinned pack(s) omitted to bound the prompt: b-second");
+  });
+
+  it("bounds the whole section, header, footer and omission names included", () => {
+    putPinnedPack(bot, "big", pack("big", { body: "BIG_START " + "y".repeat(11_000) }));
+    const names: string[] = [];
+    for (let index = 0; index < 58; index += 1) {
+      const name = "omit-" + "x".repeat(50) + "-" + String(index).padStart(2, "0");
+      names.push(name);
+      putPinnedPack(bot, name, pack(name, { body: "OMIT_START " + "z".repeat(2_000) }));
+    }
+    const prompt = pinnedInstructionsPrompt(bot, {});
+    expect(Buffer.byteLength(prompt, "utf8")).toBeLessThanOrEqual(PINNED_PROMPT_MAX_BYTES);
+    expect(prompt).toContain("pinned pack(s) omitted to bound the prompt");
+    // The count survives; the name list gives up names it cannot afford.
+    expect(prompt).not.toContain(names[names.length - 1]!);
+  });
+
+  it("refuses mutations when the protected manifest is unreadable", () => {
+    putPinnedPack(bot, "checklist", pack("checklist"));
+    // A directory at the manifest path is a deterministic "present but
+    // unreadable": lstat succeeds, the read inside cannot.
+    rmSync(manifestPath(bot));
+    mkdirSync(manifestPath(bot));
+    expect(putPinnedPack(bot, "checklist", pack("checklist", { body: "changed" }))).toEqual({
+      error: "pinned pack state is unreadable; refusing to overwrite it",
+    });
+    expect(setPinnedPackEnabled(bot, "checklist", false)).toEqual({
+      error: "pinned pack state is unreadable; refusing to overwrite it",
+    });
+    expect(removePinnedPack(bot, "checklist")).toEqual({
+      error: "pinned pack state is unreadable; refusing to overwrite it",
+    });
+    // Reads still fail closed: nothing injects from unreadable state.
+    expect(pinnedInstructionsPrompt(bot, {})).toBe("");
+  });
+
+  itUnlessRoot("restores the previous PACK.md when the manifest write fails", () => {
+    putPinnedPack(bot, "checklist", pack("checklist", { body: "v1 body" }));
+    const stateDir = join(DATA_DIR, "pinned-state", bot);
+    chmodSync(stateDir, 0o500);
+    try {
+      expect(() => putPinnedPack(bot, "checklist", pack("checklist", { body: "v2 body" }))).toThrow();
+    } finally {
+      chmodSync(stateDir, 0o700);
+    }
+    // The old manifest still selects the old bytes, so the pack keeps injecting.
+    expect(readPinnedPackFile(bot, "checklist")).toBe(pack("checklist", { body: "v1 body" }));
+    expect(pinnedInstructionsPrompt(bot, {})).toContain("v1 body");
   });
 
   it("removes a pack from listing, file and prompt", () => {

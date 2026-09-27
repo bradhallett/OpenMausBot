@@ -1219,13 +1219,21 @@ function syncDesktopMutationToken(proc) {
 }
 
 function installDesktopMutationHeader() {
+  // In dev the renderer is served from the Vite dev server, which proxies
+  // API calls to the real server port; stamp that origin too so the dev
+  // renderer carries the same person-capability the packaged app has.
+  const devOrigin = app.isPackaged ? null : new URL(DEV_URL);
   session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
     let ownsTarget = false;
     try {
       const target = new URL(details.url);
-      ownsTarget = serverReady && target.protocol === "http:" &&
+      const serverTarget = target.protocol === "http:" &&
         target.hostname === "127.0.0.1" &&
         Number(target.port || 80) === SERVER_PORT;
+      const devTarget = devOrigin !== null && target.protocol === devOrigin.protocol &&
+        (target.hostname === "127.0.0.1" || target.hostname === "localhost") &&
+        Number(target.port || 80) === Number(devOrigin.port || 80);
+      ownsTarget = serverReady && (serverTarget || devTarget);
     } catch {}
     if (!ownsTarget) {
       callback({ requestHeaders: details.requestHeaders });
@@ -2904,6 +2912,20 @@ app.whenReady().then(async () => {
     // can mutate the local harness while a Full-access shell using curl
     // cannot impersonate the person operating the desktop app.
     installDesktopMutationHeader();
+  } else {
+    // Dev handoff (#1669): the dev server runs as its own process, so the
+    // per-launch owner token cannot ride the private utility port. Write it
+    // to the owner-only data file the server reads, and stamp it on the dev
+    // renderer's requests through the same header hook. The file is written
+    // every launch, so a stale token from an earlier dev session is replaced
+    // before the server starts.
+    try {
+      fs.mkdirSync(desktopDataDir(), { recursive: true });
+      fs.writeFileSync(path.join(desktopDataDir(), "dev-desktop-capability"), desktopMutationToken + "\n", { mode: 0o600 });
+      installDesktopMutationHeader();
+    } catch (error) {
+      slog(`dev desktop capability handoff failed: ${error?.message ?? error}`);
+    }
   }
   if (process.platform === "darwin") app.dock.setIcon(APP_ICON);
   secureCredentials = await loadSecureCredentials();
