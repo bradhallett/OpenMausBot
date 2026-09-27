@@ -13,7 +13,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoatWithConstraints
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -1259,7 +1259,7 @@ private fun ScreenShot(threadId: String, message: Message) {
     var attempt by remember(message.id) { mutableStateOf(0) }
     var state by remember(message.id) { mutableStateOf<ScreenShotState>(ScreenShotState.Loading) }
 
-    BoatWithConstraints(modifier = Modifier.fillMaxWidth()) {
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
         val renderedWidthPixels = with(LocalDensity.current) { maxWidth.toPx().toInt().coerceAtLeast(1) }
         LaunchedEffect(threadId, message.id, attempt, renderedWidthPixels) {
             state = ScreenShotState.Loading

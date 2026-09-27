@@ -3,7 +3,7 @@ package com.openmausbot.companion.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoatScope
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -176,7 +176,7 @@ internal fun TouchTarget(
     size: Dp = MIN_TOUCH_TARGET,
     enabled: Boolean = true,
     contentDescription: String? = null,
-    content: @Composable BoatScope.() -> Unit,
+    content: @Composable BoxScope.() -> Unit,
 ) {
     Box(
         modifier = modifier

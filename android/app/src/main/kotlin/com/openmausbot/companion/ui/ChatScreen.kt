@@ -21,7 +21,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoatScope
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -1276,7 +1276,7 @@ private fun NamePill(chat: Chat, onOpen: () -> Unit) {
  * gesture, or the × the + became, puts it away.
  */
 @Composable
-private fun BoatScope.PlusSheet(
+private fun BoxScope.PlusSheet(
     open: Boolean,
     actions: List<ChatAction>,
     onDismiss: () -> Unit,
