@@ -1221,21 +1221,13 @@ function syncDesktopMutationToken(proc) {
 }
 
 function installDesktopMutationHeader() {
-  // In dev the renderer is served from the Vite dev server, which proxies
-  // API calls to the real server port; stamp that origin too so the dev
-  // renderer carries the same person-capability the packaged app has.
-  const devOrigin = app.isPackaged ? null : new URL(DEV_URL);
   session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
     let ownsTarget = false;
     try {
       const target = new URL(details.url);
-      const serverTarget = target.protocol === "http:" &&
+      ownsTarget = serverReady && target.protocol === "http:" &&
         target.hostname === "127.0.0.1" &&
         Number(target.port || 80) === SERVER_PORT;
-      const devTarget = devOrigin !== null && target.protocol === devOrigin.protocol &&
-        (target.hostname === "127.0.0.1" || target.hostname === "localhost") &&
-        Number(target.port || 80) === Number(devOrigin.port || 80);
-      ownsTarget = serverReady && (serverTarget || devTarget);
     } catch {}
     if (!ownsTarget) {
       callback({ requestHeaders: details.requestHeaders });
