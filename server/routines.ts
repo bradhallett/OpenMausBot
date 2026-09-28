@@ -1492,6 +1492,7 @@ export class RoutineManager {
         const detail = `Stopped after reaching the ${run.timeoutMinutes}-minute run limit`;
         if (run.target === "room-goal") run.goalStatus = "limit-reached";
         this.failRun(run, detail);
+        this.scriptedInFlight.get(run.id)?.abort("run_limit");
         if (!threadId) continue;
         if (run.target === "room-goal" && run.groupId) {
           await this.options.interruptGoal?.(run.groupId, threadId, {
