@@ -25,6 +25,22 @@ public struct ChatUpdate: Identifiable, Hashable, Codable {
     public let card: OptionCard?
 
     public var id: String { chat.conversationID }
+
+    /// The options a compact surface may offer as one-tap answers: a live
+    /// ask with a real card, minus SKILL.md requests, which must be read in
+    /// the chat before they enable anything. The Updates sheet's pills and
+    /// the widgets' buttons share this one rule, so they can never disagree
+    /// about what is answerable.
+    public var answerOptions: [String] {
+        Self.answerOptions(kind: kind, card: card)
+    }
+
+    /// The rule behind `answerOptions`, in the form a snapshot row can also
+    /// reach: it sees the kind and the card, nothing else.
+    public static func answerOptions(kind: Kind, card: OptionCard?) -> [String] {
+        guard kind == .needsYou, let card, card.isPending, card.skillRequest == nil else { return [] }
+        return card.options
+    }
 }
 
 extension CompanionState {
