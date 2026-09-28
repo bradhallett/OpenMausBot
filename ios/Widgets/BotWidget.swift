@@ -103,7 +103,10 @@ struct ChatEntity: AppEntity, Codable, Equatable {
 struct ChatEntityQuery: EntityQuery {
     func entities(for identifiers: [String]) async throws -> [ChatEntity] {
         let present = await current()
-        var known = Dictionary(uniqueKeysWithValues: present.map { ($0.id, $0) })
+        // The snapshot does not promise one row per thread, and a trap
+        // here would crash the extension mid-resolution; duplicates
+        // resolve to whichever row the snapshot ranks first.
+        var known = Dictionary(present.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         // Refresh the persisted identity of every chat asked for that
         // the snapshot still mentions, so a pick carries its current
         // name and face into the next quiet spell.
@@ -152,7 +155,7 @@ enum ChatIdentityStore {
             forSecurityApplicationGroupIdentifier: OpenMausSharedConfiguration.appGroupIdentifier
         ), let data = try? Data(contentsOf: directory.appendingPathComponent(fileName)) else { return [:] }
         let identities = (try? JSONDecoder().decode([ChatEntity].self, from: data)) ?? []
-        return Dictionary(uniqueKeysWithValues: identities.map { ($0.id, $0) })
+        return Dictionary(identities.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
 }
 
