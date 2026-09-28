@@ -146,6 +146,10 @@ export class TurnResources {
    * could not finish. The owner's other claims stand until settle. */
   releaseOne(resource: string, owner: TurnOwner, now = Date.now()): void {
     if (this.owns(resource, owner, now)) this.owners.delete(resource);
+    // owns() may have just expired a quiet claim into a reclaim record
+    // for this same owner: an early release keeps no reclaim priority.
+    const reclaimed = this.reclaims.get(resource);
+    if (reclaimed && sameOwner(reclaimed.owner, owner)) this.reclaims.delete(resource);
   }
 
   /** Quiet-window expiry (#1653), evaluated when the claim is touched: a

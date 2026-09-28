@@ -139,6 +139,16 @@ describe("computer claim idle release (#1653)", () => {
     expect(leases.blocker(seat, b, 150_000)).toBeUndefined();
   });
 
+  it("an early releaseOne keeps no reclaim priority, even at the deadline", () => {
+    const leases = new TurnResources();
+    expect(leases.claim(seat, a, { now: 0, idle: policy })).toBe(true);
+    leases.activity(seat, a, 60_000);
+    // At the quiet boundary owns() expires the claim into a reclaim
+    // record; releaseOne must clear that priority too, not just the seat.
+    leases.releaseOne(seat, a, 150_000);
+    expect(leases.reclaimHolder(seat, 150_000)).toBeUndefined();
+  });
+
   it("releases with no screen activity — poller frames never count", () => {
     const leases = new TurnResources();
     expect(leases.claim(seat, a, { now: 0, idle: policy })).toBe(true);
