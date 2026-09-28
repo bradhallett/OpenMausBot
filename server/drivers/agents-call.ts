@@ -1019,6 +1019,13 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
       || (args.speakReplies !== undefined && typeof args.speakReplies !== "boolean")) {
       return { text: "propose_profile notifications and speakReplies must be true or false.", isError: true };
     }
+    // A whitespace-only avatar_url would trim to an empty string that reads
+    // as an intentional clear, removing the avatar on a malformed proposal.
+    // Reject the whole call instead; an explicit empty string stays the clear
+    // command.
+    if (typeof args.avatar_url === "string" && args.avatar_url !== "" && !args.avatar_url.trim()) {
+      return { text: "propose_profile avatar_url must be a URL, or an empty string to clear it.", isError: true };
+    }
     const changes: Json = {};
     if (typeof args.name === "string") changes.name = args.name.trim();
     if (typeof args.title === "string") changes.title = args.title.trim();

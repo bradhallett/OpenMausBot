@@ -1959,6 +1959,14 @@ describe("agents-proxy MCP surface", () => {
     expect(lastProfileRequestBody).toBeNull();
   });
 
+  it("propose_profile rejects a whitespace-only avatar_url without clearing the avatar", async () => {
+    lastProfileRequestBody = null;
+    const res = await callTool("propose_profile", { avatar_url: "   ", reason: "asked" });
+    expect(res.result.isError).toBe(true);
+    expect(res.result.content[0].text).toContain("propose_profile avatar_url must be a URL, or an empty string to clear it.");
+    expect(lastProfileRequestBody).toBeNull();
+  });
+
   it("propose_model posts the trimmed selection and reason to the internal route", async () => {
     lastModelRequestBody = null;
     const res = await callTool("propose_model", {
