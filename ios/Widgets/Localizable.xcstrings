@@ -16,7 +16,16 @@
     "As of %@" : {
       "extractionState" : "manual"
     },
+    "Bot" : {
+      "extractionState" : "manual"
+    },
     "Bots waiting on your answer, replyable right from the home screen." : {
+      "extractionState" : "manual"
+    },
+    "Chat" : {
+      "extractionState" : "manual"
+    },
+    "Choose the chat this widget watches." : {
       "extractionState" : "manual"
     },
     "Everything the Updates pill shows, with the chats that need you first." : {
@@ -26,6 +35,12 @@
       "extractionState" : "manual"
     },
     "Needs you" : {
+      "extractionState" : "manual"
+    },
+    "One chat's status at a glance — pick which one on the widget's settings." : {
+      "extractionState" : "manual"
+    },
+    "Open MausBot first" : {
       "extractionState" : "manual"
     },
     "Open MausBot to answer" : {

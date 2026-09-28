@@ -164,7 +164,7 @@ struct Placeholder: View {
 /// The ask's options, as one-tap answers — the same options the Updates
 /// sheet's pills offer. A refusal renders as a quiet capsule rather than
 /// the bot's colour: "Stop" is not a brand moment.
-private struct AnswerPills: View {
+struct AnswerPills: View {
     let row: WidgetSnapshot.Row
     let compact: Bool
     let answerable: Bool
