@@ -4,27 +4,31 @@
 // stopped and needs an answer, a bot mid-turn, and a bot that finished with
 // something you have not read. A bot that is idle and read is not an update
 // and never appears here; that is what the roster below is for.
+//
+// The computation lives in Core rather than the app target so the Updates
+// sheet, the Live Activity, and home-screen widgets all consume one
+// definition of "what needs you" and can never disagree; ChatUpdate is
+// Codable so the same value can serialize into a widget snapshot.
 import Foundation
-import CompanionCore
 
-struct ChatUpdate: Identifiable, Hashable {
-    enum Kind: Int, Comparable {
+public struct ChatUpdate: Identifiable, Hashable, Codable {
+    public enum Kind: Int, Comparable, Codable {
         case needsYou = 0, working, toReview
-        static func < (a: Kind, b: Kind) -> Bool { a.rawValue < b.rawValue }
+        public static func < (a: Kind, b: Kind) -> Bool { a.rawValue < b.rawValue }
     }
 
-    let chat: Chat
-    let kind: Kind
+    public let chat: Chat
+    public let kind: Kind
     /// One line under the name — the question, what it is doing, or what it said.
-    let line: String
+    public let line: String
     /// The card to answer, when `kind == .needsYou`.
-    let card: OptionCard?
+    public let card: OptionCard?
 
-    var id: String { chat.conversationID }
+    public var id: String { chat.conversationID }
 }
 
 extension CompanionState {
-    var updates: [ChatUpdate] {
+    public var updates: [ChatUpdate] {
         var out: [ChatUpdate] = []
         var seen = Set<String>()
 
@@ -69,7 +73,7 @@ extension CompanionState {
         return out.sorted { $0.kind < $1.kind }
     }
 
-    func chat(forThread threadId: String) -> Chat? {
+    public func chat(forThread threadId: String) -> Chat? {
         if let bot = bot(forThread: threadId) { return .bot(bot) }
         if let room = room(forThread: threadId) { return .room(room) }
         return nil
