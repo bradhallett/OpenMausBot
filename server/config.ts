@@ -110,7 +110,9 @@ const roomConfigSchema = z.object({
 /** Isolation for bot desktops. Migration note (issue #1654): switching
  * modes changes lease keys and vm-home directories, so desktops cold-start
  * under the new mode — a pool seat lives in vm-homes/pool-N — while the old
- * mode's workspaces stay on disk until removed. Default stays "shared". */
+ * mode's workspaces stay on disk until removed. maxInstances caps per-bot
+ * desktops in per-bot mode, or the pool's seat count in pool mode; it is
+ * not a total across modes. Default stays "shared". */
 const localVmConfigSchema = z.object({
   mode: z.enum(["shared", "per-bot", "pool"]).optional(),
   maxInstances: z

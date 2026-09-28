@@ -12945,7 +12945,11 @@ async function readyLocalVmForTurn(botId: string, target: LocalVmTarget, isCurre
   // before the first await — the same synchronous-fence-then-count shape
   // the panel route uses — so two concurrent turns cannot both pass the
   // per-bot limit between count and create.
-  const ownsProvision = !localVmProvisionBusy;
+  // Pool capacity is bounded by its seat indices. Each seat already has
+  // its own lease/lifecycle fence, so independent cold seats can start
+  // together without competing for the per-bot inventory's capacity gate.
+  const pooled = target.key.startsWith("pool:");
+  const ownsProvision = !pooled && !localVmProvisionBusy;
   if (ownsProvision) localVmProvisionBusy = true;
   let status: ContainerComputerStatus;
   try {
@@ -12956,9 +12960,9 @@ async function readyLocalVmForTurn(botId: string, target: LocalVmTarget, isCurre
     // Another creation is already mid-flight and its container is not yet
     // visible to a count, so the safe answer is the inspected status —
     // exactly what the over-cap path below returns.
-    if (!ownsProvision) return status;
+    if (!pooled && !ownsProvision) return status;
 
-    if (target.key !== SHARED_LOCAL_VM_TARGET.key) {
+    if (target.key.startsWith("bot:")) {
       const count = await existingPerBotLocalVmCount(status.runtime);
       if (!isCurrent() || count >= localVmMaxInstances(cfg)) return status;
     }
