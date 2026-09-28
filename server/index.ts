@@ -22070,6 +22070,17 @@ const THREAD_AUTO_ARCHIVE_SWEEP_MS = 24 * 60 * 60 * 1000;
 
 function autoArchiveClosedThreadsNow(): void {
   const globalDays = threadAutoArchiveDays(cfg);
+  // Pending delegations pin both ends of the handoff: the source thread
+  // (pendingThreads / wakes / watch source) and the target thread the
+  // delegation will land in (queue targetThreadId, resolved to the
+  // recipient's default thread when absent, plus the watch map key).
+  // Archiving the target mid-delegation hides the drained result because
+  // startTurn clears closedBy but never resets archivedAt (#1194).
+  const pendingDelegationTargetThreads = new Set(
+    pendingDelegationSnapshot()
+      .map((pending) => pending.targetThreadId ?? store.bot(pending.toBotId)?.threadId)
+      .filter((threadId): threadId is string => threadId !== undefined),
+  );
   let archived = 0;
   for (const bot of store.bots) {
     const days = effectiveAutoArchiveDays(globalDays, bot.autoArchiveDays);
@@ -22087,7 +22098,13 @@ function autoArchiveClosedThreadsNow(): void {
       // wake time still in the future.
       snoozed: task.snoozedUntil === 0 || (task.snoozedUntil !== undefined && task.snoozedUntil > now),
       pinned: task.pinned === true,
-      hasQueuedWork: hasQueuedSteeredMessages(bot.id, task.threadId),
+      hasQueuedWork:
+        hasQueuedSteeredMessages(bot.id, task.threadId) ||
+        pendingThreads().includes(task.threadId) ||
+        pendingDelegationTargetThreads.has(task.threadId) ||
+        [...delegationWatch.values()].some((watch) => watch.sourceThreadId === task.threadId) ||
+        delegationWatch.has(task.threadId) ||
+        pendingDelegationWakes.has(task.threadId),
       // resolvePairConversation reuses this row when the peer writes again,
       // and reuse does not unarchive — so the sweep must never file it away.
       peerConversation: task.openedBy?.kind === "pair",
