@@ -33,16 +33,24 @@ export const skillBenchSchema = z.object({
   /** Bots the with-skill arm may dispatch to; they replay their scripted
    * turns only when something actually dispatches to them. */
   targets: z.array(scenarioBotSchema).default([]),
+  /** A fixture must measure something: at least one prompt, at least one
+   * assertion per prompt, and unique prompt ids — duplicate ids would
+   * fold two prompts' runs into one scored bucket, and empty arrays
+   * would let a run that checked nothing report success. */
   prompts: z.array(
     z.object({
       id: z.string(),
       text: z.string(),
       /** Checked against BOTH arms' frozen evidence; the delta is the point. */
-      assertions: z.array(assertionSchema),
+      assertions: z.array(assertionSchema).min(1),
       withSkill: z.object({ turns: z.array(scriptedTurnSchema) }),
       withoutSkill: z.object({ turns: z.array(scriptedTurnSchema) }),
     }),
-  ),
+  )
+    .min(1)
+    .refine((prompts) => new Set(prompts.map((prompt) => prompt.id)).size === prompts.length, {
+      message: "prompt ids must be unique",
+    }),
   replicates: z.number().int().min(1).default(1),
 });
 
@@ -123,6 +131,17 @@ export function loadSkillBenches(): SkillBenchFixture[] {
     .map((name) => skillBenchSchema.parse(JSON.parse(readFileSync(join(BENCHES_DIR, name), "utf8"))));
 }
 
+/** Target keys this prompt's with-arm actually dispatches to: the scripted
+ * steps' coordinate_bots calls name their targets as "@key" in bot_ids, so
+ * the bench waits only where the prompt's own script sends work. */
+function dispatchedTargetKeys(prompt: SkillBenchFixture["prompts"][number]): Set<string> {
+  const ids = prompt.withSkill.turns.flatMap((turn) => turn.steps ?? []).flatMap((step) => {
+    const value = step.arguments.bot_ids;
+    return Array.isArray(value) && value.every((id) => typeof id === "string") ? value : [];
+  });
+  return new Set(ids.map((id) => id.replace(/^@/, "")));
+}
+
 export function buildArmScenario(
   bench: SkillBenchFixture,
   prompt: SkillBenchFixture["prompts"][number],
@@ -130,6 +149,7 @@ export function buildArmScenario(
   replicate: number,
 ): Scenario {
   const turns = arm === "with" ? prompt.withSkill.turns : prompt.withoutSkill.turns;
+  const dispatchedKeys = dispatchedTargetKeys(prompt);
   return scenarioSchema.parse({
     id: bench.id + "/" + prompt.id + "/" + arm + "#" + replicate,
     title: bench.title,
@@ -143,12 +163,15 @@ export function buildArmScenario(
       ...(arm === "with" ? [{ kind: "installSkill", skill: bench.skill }] : []),
       { kind: "send", bot: bench.subject.key, text: prompt.text },
       { kind: "waitForTurns", bot: bench.subject.key, count: turns.length, timeoutMs: 20_000 },
-      // Targets only turn when the subject dispatched to them, which in the
-      // bench's contract happens in the with-arm; waiting on them without
-      // one would time out.
+      // Targets only turn when this prompt's with-arm actually dispatched
+      // to them. The scripted steps carry the dispatches as coordinate_bots
+      // bot_ids ("@key"), so the waits follow the prompt's own script
+      // rather than assuming every configured target turns — a with-arm
+      // that correctly dispatches to nobody proceeds straight to its
+      // assertions instead of timing out.
       ...(arm === "with"
         ? bench.targets
-            .filter((target) => target.turns.length > 0)
+            .filter((target) => target.turns.length > 0 && dispatchedKeys.has(target.key))
             .map((target) => ({ kind: "waitForTurns", bot: target.key, count: target.turns.length, timeoutMs: 20_000 }))
         : []),
     ],

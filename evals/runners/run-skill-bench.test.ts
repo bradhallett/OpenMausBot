@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildArmScenario, DEFAULT_OUT, loadSkillBenches, parseSkillBenchArgs, runSkillBench } from "./run-skill-bench.ts";
+import { buildArmScenario, DEFAULT_OUT, loadSkillBenches, parseSkillBenchArgs, runSkillBench, skillBenchSchema } from "./run-skill-bench.ts";
 
 // The bench is tested by a fixture skill with known outcomes: three
 // prompts where the with-skill arm must pass every assertion and the
@@ -101,5 +101,87 @@ describe("parseSkillBenchArgs", () => {
       ok: false,
       error: "--out requires a value",
     });
+  });
+});
+
+describe("skillBenchSchema", () => {
+  const bench = loadSkillBenches().find((entry) => entry.id === "bench-triage-handoff")!;
+
+  it("accepts the founding fixture", () => {
+    expect(skillBenchSchema.safeParse(bench).success).toBe(true);
+  });
+
+  it("rejects a fixture with no prompts to measure", () => {
+    const parsed = skillBenchSchema.safeParse({ ...bench, prompts: [] });
+    expect(parsed.success).toBe(false);
+  });
+
+  it("rejects a prompt whose assertions check nothing", () => {
+    const parsed = skillBenchSchema.safeParse({
+      ...bench,
+      prompts: [{ ...bench.prompts[0]!, assertions: [] }],
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it("rejects duplicate prompt ids instead of folding their runs together", () => {
+    const parsed = skillBenchSchema.safeParse({
+      ...bench,
+      prompts: [bench.prompts[0]!, { ...bench.prompts[1]!, id: bench.prompts[0]!.id }],
+    });
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((issue) => issue.message === "prompt ids must be unique")).toBe(true);
+    }
+  });
+});
+
+describe("buildArmScenario target waits", () => {
+  const bench = loadSkillBenches().find((entry) => entry.id === "bench-triage-handoff")!;
+  const subjectKey = bench.subject.key;
+
+  const waitedBots = (scenario: ReturnType<typeof buildArmScenario>): string[] =>
+    scenario.steps.flatMap((step) => (step.kind === "waitForTurns" ? [step.bot] : []));
+
+  it("keeps the founding fixture's duty wait: the script dispatches to @duty", () => {
+    const scenario = buildArmScenario(bench, bench.prompts[0]!, "with", 1);
+    expect(waitedBots(scenario)).toEqual([subjectKey, "duty"]);
+  });
+
+  it("never waits on targets in the without arm", () => {
+    const scenario = buildArmScenario(bench, bench.prompts[0]!, "without", 1);
+    expect(waitedBots(scenario)).toEqual([subjectKey]);
+  });
+
+  it("skips target waits when the with-arm script dispatches to nobody", () => {
+    const prompt = { ...bench.prompts[0]!, withSkill: { turns: [{ reply: "Handled inline; nobody dispatched." }] } };
+    const scenario = buildArmScenario(bench, prompt, "with", 1);
+    expect(waitedBots(scenario)).toEqual([subjectKey]);
+  });
+
+  it("waits only for the targets this prompt's script names", () => {
+    const secondTarget = { key: "ops", name: "Ops runner", turns: [{ reply: "Ops handled." }] };
+    const prompt = {
+      ...bench.prompts[0]!,
+      withSkill: {
+        turns: [
+          {
+            steps: [{ arguments: { bot_ids: ["@ops"], request_key: "triage", message: "Handle this." } }],
+            reply: "Assigned to ops.",
+          },
+        ],
+      },
+    };
+    const scenario = buildArmScenario({ ...bench, targets: [...bench.targets, secondTarget] }, prompt, "with", 1);
+    expect(waitedBots(scenario)).toEqual([subjectKey, "ops"]);
+  });
+
+  it("ignores malformed bot_ids instead of treating them as a dispatch", () => {
+    const prompt = {
+      ...bench.prompts[0]!,
+      withSkill: { turns: [{ steps: [{ arguments: { bot_ids: "duty" } }], reply: "Assigned, probably." }] },
+    };
+    const scenario = buildArmScenario(bench, prompt, "with", 1);
+    expect(waitedBots(scenario)).toEqual([subjectKey]);
   });
 });
