@@ -7,6 +7,9 @@
     "%lld need you" : {
       "extractionState" : "manual"
     },
+    "%lld working" : {
+      "extractionState" : "manual"
+    },
     "All quiet" : {
       "extractionState" : "manual"
     },
@@ -37,6 +40,9 @@
     "Needs you" : {
       "extractionState" : "manual"
     },
+    "Nothing working" : {
+      "extractionState" : "manual"
+    },
     "One chat's status at a glance — pick which one on the widget's settings." : {
       "extractionState" : "manual"
     },
@@ -47,6 +53,9 @@
       "extractionState" : "manual"
     },
     "Open MausBot to pair" : {
+      "extractionState" : "manual"
+    },
+    "The bots working right now and how long each has been at it — even when the app is closed." : {
       "extractionState" : "manual"
     },
     "This request has changed. Open the chat to review it." : {
