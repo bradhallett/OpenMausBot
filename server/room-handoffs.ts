@@ -411,7 +411,14 @@ export class RoomHandoffs {
       // into its own work row beats an hour in a queue the label exists to
       // skip. Only fresh work re-routes; an owed resume belongs to the row
       // it was owed in.
-      if (n.status === "queued" && this.hooks.reroute?.(n)) this.publish(n);
+      if (n.status === "queued") {
+        try {
+          if (this.hooks.reroute?.(n)) this.publish(n);
+        } catch (error) {
+          console.error("room handoff reroute:", error);
+          continue;
+        }
+      }
       if (this.hooks.busy(n)) continue;
       const root = this.root(n);
       const executionCost = 1;

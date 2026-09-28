@@ -59,6 +59,26 @@ describe("addressed room request tree", () => {
     expect(hooks.run).toHaveBeenCalledTimes(1);
     expect(vi.mocked(hooks.run).mock.calls[0]![0]!.threadId).toBe("work-row");
   }));
+  it("isolates a failing reroute so later queued nodes still dispatch", () => fixture(async (engine, hooks) => {
+    const source = { botId: "chief", threadId: "chief-chat" };
+    const first = engine.enqueue(source, "turn", undefined,
+      { botId: "builder", threadId: "pair-row", pairThreadId: "pair-row", label: "Audit" }, "build", "Broken reroute").node;
+    const second = engine.enqueue(source, "turn2", undefined, { botId: "builder2", threadId: "free-row" }, "review", "Still runs").node;
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    hooks.reroute = n => {
+      if (n.id === first.id) throw new Error("reroute lookup failed");
+      return false;
+    };
+    try {
+      engine.tick(); await flush();
+      expect(second.status).toBe("completed");
+      expect(hooks.run).toHaveBeenCalledTimes(1);
+      expect(first.status).toBe("queued");
+      expect(error).toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+    }
+  }));
   it("never re-routes an owed resume, and persists a re-route across restart", () => fixture((engine, hooks, file) => {
     const reroute = vi.fn((n: { threadId: string; pairThreadId?: string }) => {
       if (n.threadId !== n.pairThreadId) return false;
