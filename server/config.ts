@@ -1044,6 +1044,10 @@ export function syncCredentialEnv(patch: Partial<Omit<AppConfig, "threads" | "ne
     if (value) process.env[name] = value;
     else delete process.env[name];
   }
+  // The threshold is env-preferred too (loadConfig clamps the env value), so
+  // a saved threshold must win immediately rather than on the next restart.
+  const threshold = patch.decisionModel?.threshold;
+  if (threshold !== undefined) process.env.DECISION_MODEL_THRESHOLD = String(threshold);
 }
 
 /** Env names of every workspace credential this process may be holding —
@@ -1062,6 +1066,8 @@ export const WORKSPACE_CREDENTIAL_ENV = [
   "OPENAI_COMPAT_URL",
   "BOX_TOKEN",
   "OPENCODE_API_KEY",
+  "DECISION_MODEL_API_KEY",
+  "DECISION_MODEL_URL",
   "OMB_TTS_KEY",
   "OMB_FISH_AUDIO_API_KEY",
   "OMB_OPENAI_IMAGE_KEY",
