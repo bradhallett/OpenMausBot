@@ -68,11 +68,15 @@ struct WorkingMonitorProvider: TimelineProvider {
 
     private func timeline(now: Date) async -> Timeline<WorkingMonitorEntry> {
         var state = current(now: now)
-        // Stale means the app has been gone fifteen minutes — ask the
-        // computer ourselves, then read once more. Best effort by
-        // design: a refresh that cannot reach the computer leaves the
-        // aged snapshot standing, and the view says how old it is.
-        if case .stale = state {
+        // The app has been gone fifteen minutes — ask the computer
+        // ourselves, then read once more. The trigger is the written
+        // age, not the rendered case: an empty write classifies quiet
+        // before its age is ever consulted, and work that started after
+        // the app left would otherwise stay invisible until the next
+        // app write. Best effort by design: a refresh that cannot reach
+        // the computer leaves the aged snapshot standing, and the view
+        // says how old it is.
+        if isAged(now: now) {
             await refreshFromNetwork()
             state = current(now: now)
         }
@@ -90,6 +94,14 @@ struct WorkingMonitorProvider: TimelineProvider {
 
     private func current(now: Date) -> WidgetSnapshotState {
         WidgetSnapshotState.classify(WidgetSnapshotStore.makeAppGroupStore()?.read(), now: now)
+    }
+
+    /// Whether the published snapshot has crossed the freshness line —
+    /// read from the file rather than the classified state, because the
+    /// quiet case carries no age with it.
+    private func isAged(now: Date) -> Bool {
+        guard let snapshot = WidgetSnapshotStore.makeAppGroupStore()?.read() else { return false }
+        return now.timeIntervalSince(snapshot.writtenAt) >= WidgetSnapshotState.freshnessInterval
     }
 
     /// The Share extension's reach in miniature — registry, shared

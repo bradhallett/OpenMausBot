@@ -95,7 +95,10 @@ struct ChatEntity: AppEntity, Codable {
 @available(iOS 17.0, *)
 struct ChatEntityQuery: EntityQuery {
     func entities(for identifiers: [String]) async throws -> [ChatEntity] {
-        let known = Dictionary(uniqueKeysWithValues: (await current()).map { ($0.id, $0) })
+        // The snapshot does not promise one row per thread, and a trap
+        // here would crash the extension mid-resolution; duplicates
+        // resolve to whichever row the snapshot ranks first.
+        let known = Dictionary((await current()).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         // Chats the snapshot no longer mentions resolve to nothing here;
         // their persisted entities stand as picked, so the widget keeps
         // rendering them rather than forgetting the user's choice.
