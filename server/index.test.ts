@@ -3282,6 +3282,23 @@ describe("harness HTTP API", () => {
         return task ? task.busy : "";
       }, { timeout: 5_000 }).toBe(true);
 
+      // Explicit Stop cancels parked work too, before the occupied seat is
+      // released. Neither the direct task nor the room may wake afterwards.
+      expect((await isolatedApi("POST", `/api/bots/${botId}/messages`, { text: "park direct work then stop it", threadId: holderThreadId })).status).toBe(202);
+      expect((await isolatedApi("POST", `/api/groups/${roomId}/messages`, { text: "park room work then stop it" })).status).toBe(202);
+      for (const [threadId, text] of [[holderThreadId, "park direct work then stop it"], [room.threadId, "park room work then stop it"]]) {
+        await expect.poll(async () => JSON.stringify((await isolatedApi("GET", `/api/threads/${threadId}/messages`)).body),
+          { timeout: 8_000 }).toMatch(new RegExp(`${text}[\\s\\S]*Parked — it continues automatically`));
+      }
+      expect((await isolatedApi("POST", `/api/bots/${botId}/interrupt`, { threadId: holderThreadId })).status).toBe(200);
+      expect((await isolatedApi("POST", `/api/groups/${roomId}/interrupt`, { threadId: room.threadId })).status).toBe(200);
+      expect((await isolatedApi("POST", `/api/bots/${botId}/interrupt`, { threadId: siblingThreadId })).status).toBe(200);
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      expect(promptsOnParkBox()).toBe(4);
+      const stoppedTask = (await isolatedApi("GET", "/api/bots?messages=0")).body.bots
+        .find((entry: any) => entry.id === botId)?.tasks.find((task: any) => task.threadId === holderThreadId);
+      expect(stoppedTask).toMatchObject({ busy: false, activity: "idle" });
+
     } finally {
       await isolatedApi("POST", `/api/groups/${roomId}/interrupt`, {}).catch(() => undefined);
       await isolatedApi("POST", `/api/bots/${roomBotId}/interrupt`, {}).catch(() => undefined);

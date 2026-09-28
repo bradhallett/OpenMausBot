@@ -23,6 +23,7 @@ function section(start: string, end: string) {
   return source.slice(from, to);
 }
 const code = ts.transpileModule([
+  section("function cancelComputerResume(", "function registerComputerResume("),
   section("async function interruptDirectThread(", "/** Stop left teammates"),
   section("function releaseTurnResources(", "async function bindTurnComputer("),
   section("async function stopCompanyInstances(", "async function persistProviderInstance("),

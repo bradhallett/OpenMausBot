@@ -2164,7 +2164,8 @@ function requestedTaskBot(botId: string, rawThreadId: unknown): BotRecord {
   return task;
 }
 
-async function interruptDirectThread(botId: string, threadId: string): Promise<void> {
+async function interruptDirectThread(botId: string, threadId: string, preserveComputerResume = false): Promise<void> {
+  if (!preserveComputerResume) cancelComputerResume(threadId);
   const requestOwner = directRequestOwners.get(threadId);
   if (requestOwner) {
     requestOwner.stopped = true;
@@ -2205,7 +2206,7 @@ function noteTeammatesLeftRunning(botId: string, threadId: string, running: Room
 }
 
 async function interruptAllDirectThreads(botId: string): Promise<void> {
-  const threads = store.tasks(botId).filter((task) => task.busy || directTurnDispatchClaims.has(task.threadId) || roomHandoffs.activeDirect(task.threadId));
+  const threads = store.tasks(botId).filter((task) => task.busy || directTurnDispatchClaims.has(task.threadId) || roomHandoffs.activeDirect(task.threadId) || pendingComputerResumes.has(task.threadId));
   // Revoke every sibling before yielding to any provider teardown.
   for (const task of threads) {
     cancelDirectTurnDispatch(botId, task.threadId);
@@ -4384,6 +4385,7 @@ function cancelGroupTurnOperations(
   },
 ) {
   cancelTeamSetupResumesForThread(threadId);
+  cancelComputerResume(threadId);
   roomHandoffs.cancelRoom(groupId, threadId);
   for (const operation of groupTurnOperations.get(groupId) ?? []) {
     if (operation.threadId !== threadId) continue;
@@ -8445,7 +8447,7 @@ async function startTurn(
             generation: resourceOwner.generation,
             afterMessageId: store.activePath(threadId).findLast((entry) => entry.role === "user")?.id,
           });
-          void interruptDirectThread(bot.id, threadId).catch(() => {});
+          void interruptDirectThread(bot.id, threadId, true).catch(() => {});
           return;
         }
         const message = `computer unavailable — ${label} could not be claimed for this turn (${failure})`;
@@ -12623,6 +12625,18 @@ type ComputerResumeEntry = {
   afterMessageId?: string;
 };
 const pendingComputerResumes = new Map<string, ComputerResumeEntry>();
+
+function cancelComputerResume(threadId: string): void {
+  const entry = pendingComputerResumes.get(threadId);
+  pendingComputerResumes.delete(threadId);
+  // Stop may arrive while the parked provider is still settling. Clear its
+  // marker too, so completion cannot put the canceled task back in parked.
+  const owner = turnResourceOwners.get(threadId);
+  if (owner) delete owner.computerParkedOn;
+  if (entry && store.taskByThread(entry.botId, threadId)?.activity === "parked.computer") {
+    store.setTaskActivity(entry.botId, threadId, "idle");
+  }
+}
 
 function registerComputerResume(entry: ComputerResumeEntry): void {
   // One per thread: the newest park replaces an older one.
