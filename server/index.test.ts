@@ -3316,6 +3316,140 @@ describe("harness HTTP API", () => {
     expectStoppedTestServerCleanly(isolatedChild, isolatedStderr);
   }, 75_000);
 
+  it("keeps a parked direct resume waiting behind a live room turn without a dispatch loop", async () => {
+    const requestId = randomUUID();
+    const section = `Admission storm ${requestId.slice(0, 8)}`;
+    // Regression (#1887 review): a room turn for the same bot is live while
+    // the bot's sibling task sits parked at the computer wait ceiling. When
+    // the seat frees, the parked DIRECT resume must not dispatch — startTurn
+    // refuses it (the room owns the bot) and the old rejection handler
+    // re-registered through a microtask, looping the drain forever and
+    // starving timers and I/O. The resume waits behind the room turn and
+    // continues on its own once the room settles.
+    const isolatedHome = mkdtempSync(join(tmpdir(), "omb-computer-admission-storm-"));
+    const isolatedData = join(isolatedHome, ".openmausbot");
+    const isolatedStatic = join(isolatedHome, "static");
+    const isolatedPort = await freePortBlock([0, 1]);
+    mkdirSync(join(isolatedStatic, "assets"), { recursive: true });
+    mkdirSync(join(isolatedData), { recursive: true });
+    writeFileSync(join(isolatedStatic, "index.html"), "<!doctype html><title>Computer admission storm test</title>");
+    writeFileSync(join(isolatedStatic, "assets", "smoke.css"), "body{}");
+    writeFileSync(join(isolatedData, "config.json"), JSON.stringify({
+      instances: {
+        claude: { driver: "claudeAgent", displayName: "Fixture Claude", config: { cli: FAKE_CLAUDE_CLI } },
+        computer: { driver: "boxAgent", displayName: "Computer" },
+      },
+    }));
+    let isolatedStderr = "";
+    const isolatedChild = spawn(process.execPath, [join(SERVER_DIR, "index.ts")], {
+      cwd: ROOT,
+      env: {
+        ...(process.env.PATH ? { PATH: process.env.PATH } : {}),
+        ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+        HOME: isolatedHome,
+        USERPROFILE: isolatedHome,
+        OMB_PORT: String(isolatedPort),
+        OMB_WEBHOOK_PORT: String(isolatedPort + 1),
+        OMB_STATIC_DIR: isolatedStatic,
+        OMB_BOX_API: `http://127.0.0.1:${boatStubPort}`,
+        FAKE_CLAUDE_MODE: "hang",
+        OMB_COMPUTER_WAIT_MAX_MS: "4000",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    isolatedChild.stderr!.on("data", (chunk) => (isolatedStderr += chunk));
+    const isolatedApi = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+      const response = await fetch(`http://127.0.0.1:${isolatedPort}${path}`, {
+        method,
+        headers: body ? { "content-type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      return { status: response.status, body: await response.json() };
+    };
+    const promptsOnStormBox = () => boatRouteCalls.filter((call) => call.method === "POST" && call.path === "/boxes/bx_parkdsk2/prompt").length;
+    let botId = "";
+    let holderBotId = "";
+    let holderBotThreadId = "";
+    let holderThreadId = "";
+    let siblingThreadId = "";
+    let roomId = "";
+    try {
+      await waitForIsolatedServer(isolatedChild, isolatedPort, () => isolatedStderr);
+      managedBoatCreateMode = "success";
+      managedBoatCreateId = "bx_parkdsk2";
+      expect((await isolatedApi("PUT", "/api/config", { box: { token: "box_route" } })).status).toBe(200);
+      const bot = (await isolatedApi("POST", "/api/bots", {
+        name: "Admission shared", section,
+        modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
+      })).body.bot;
+      botId = bot.id;
+      holderThreadId = bot.threadId;
+      expect((await isolatedApi("POST", "/api/team-computers", { requestId, name: "Admission desktop", acknowledgeCost: true })).status).toBe(201);
+      expect((await isolatedApi("PATCH", `/api/team-computers/${requestId}`, { section, acknowledgeSharedAccess: true })).status).toBe(200);
+      // A SEPARATE holder bot occupies the desktop; the sibling task parks at
+      // the ceiling; the room (this bot as its responder, still idle) then
+      // waits on the same desktop with its group operation live.
+      const holderBot = (await isolatedApi("POST", "/api/bots", {
+        name: "Admission holder", section,
+        modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
+      })).body.bot;
+      holderBotId = holderBot.id;
+      holderBotThreadId = holderBot.threadId;
+      expect((await isolatedApi("POST", `/api/bots/${holderBot.id}/messages`, { text: "hold the desktop" })).status).toBe(202);
+      await expect.poll(promptsOnStormBox, { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
+      const sibling = (await isolatedApi("POST", `/api/bots/${botId}/tasks`, { title: "Parked sibling" })).body.task;
+      siblingThreadId = sibling.threadId;
+      expect((await isolatedApi("POST", `/api/bots/${botId}/messages`, { text: "wait past the ceiling", threadId: sibling.threadId })).status).toBe(202);
+      await expect.poll(async () => JSON.stringify((await isolatedApi("GET", `/api/threads/${sibling.threadId}/messages`)).body),
+        { timeout: 8_000 }).toMatch(/Parked — it continues automatically when the computer is free/);
+      const room = (await isolatedApi("POST", "/api/groups", {
+        name: "Admission room", memberIds: [botId],
+        setup: { bulletin: "", defaultResponder: { kind: "member", botId } },
+      })).body.group;
+      roomId = room.id;
+      expect((await isolatedApi("POST", `/api/groups/${room.id}/messages`, { text: "wait for the shared desktop" })).status).toBe(202);
+      await expect.poll(async () => JSON.stringify((await isolatedApi("GET", `/api/threads/${room.threadId}/events`)).body),
+        { timeout: 3_000 }).toMatch(/turn\.wait_started/);
+      // The seat frees while the room turn is still waiting on it. The room
+      // member must take the seat: the parked sibling's resume stays parked
+      // behind the live room turn instead of bouncing through startTurn
+      // refusals. On the old code the dispatch loop starved the server, so
+      // this poll never observed a second prompt.
+      expect((await isolatedApi("POST", `/api/bots/${holderBot.id}/interrupt`, { threadId: holderBot.threadId })).status).toBe(200);
+      await expect.poll(promptsOnStormBox, { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
+      await expect.poll(async () => {
+        const task = (await isolatedApi("GET", "/api/bots?messages=0")).body.bots
+          .find((entry: any) => entry.id === botId)?.tasks.find((task: any) => task.threadId === siblingThreadId);
+        return task ? `${task.busy}:${task.activity}` : "";
+      }, { timeout: 5_000 }).toBe("false:parked.computer");
+      const parkedMessages = (await isolatedApi("GET", `/api/threads/${siblingThreadId}/messages`)).body.messages;
+      expect(parkedMessages.filter((message: any) => message.tool?.ok === false && /could not continue/.test(message.tool.name))).toHaveLength(0);
+      // Once the room turn ends, the parked sibling continues on its own.
+      expect((await isolatedApi("POST", `/api/groups/${roomId}/interrupt`, {})).status).toBe(200);
+      await expect.poll(promptsOnStormBox, { timeout: 10_000 }).toBeGreaterThanOrEqual(3);
+      await expect.poll(async () => {
+        const task = (await isolatedApi("GET", "/api/bots?messages=0")).body.bots
+          .find((entry: any) => entry.id === botId)?.tasks.find((task: any) => task.threadId === siblingThreadId);
+        return task ? task.busy : "";
+      }, { timeout: 5_000 }).toBe(true);
+    } finally {
+      await isolatedApi("POST", `/api/groups/${roomId}/interrupt`, {}).catch(() => undefined);
+      await isolatedApi("POST", `/api/bots/${holderBotId}/interrupt`, { threadId: holderBotThreadId }).catch(() => undefined);
+      await isolatedApi("DELETE", `/api/bots/${holderBotId}`).catch(() => undefined);
+      await isolatedApi("POST", `/api/bots/${botId}/interrupt`, { threadId: holderThreadId }).catch(() => undefined);
+      await isolatedApi("POST", `/api/bots/${botId}/interrupt`, { threadId: siblingThreadId }).catch(() => undefined);
+      await isolatedApi("DELETE", `/api/bots/${botId}`).catch(() => undefined);
+      await isolatedApi("PUT", "/api/config", { box: { token: "" } }).catch(() => undefined);
+      managedBoatRows = [];
+      managedBoatCreatedIds.clear();
+      managedBoatCreateMode = "refuse";
+      managedBoatCreateId = "bx_cdefghjk";
+      await waitForExit(isolatedChild, { signal: "SIGTERM" });
+      await removeTempDir(isolatedHome);
+    }
+    expectStoppedTestServerCleanly(isolatedChild, isolatedStderr);
+  }, 75_000);
+
   it("routes a goal run around a member parked at the computer wait ceiling, then resumes it", async () => {
     const requestId = randomUUID();
     const section = `Park goal machine ${requestId.slice(0, 8)}`;

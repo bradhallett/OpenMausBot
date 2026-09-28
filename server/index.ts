@@ -4408,10 +4408,15 @@ function groupProviderHandshakeSettled(operation: GroupTurnOperation): void {
   clearCancelledProviderHandshake(operation.threadId, `group:${operation.id}`);
 }
 
-function activeGroupTurnForBot(botId: string): { group: GroupRecord; threadId: string } | null {
+function activeGroupTurnForBot(
+  botId: string,
+  // The computer-resume callback's own operation is registered before it
+  // runs; without this exclusion that operation would block its own resume.
+  except?: GroupTurnOperation,
+): { group: GroupRecord; threadId: string } | null {
   for (const group of store.groups) {
     for (const operation of groupTurnOperations.get(group.id) ?? []) {
-      if (!operation.cancelled && operation.botIds.has(botId)) {
+      if (operation !== except && !operation.cancelled && operation.botIds.has(botId)) {
         return { group, threadId: operation.threadId };
       }
     }
@@ -12640,12 +12645,21 @@ function cancelComputerResume(threadId: string): void {
   }
 }
 
-function registerComputerResume(entry: ComputerResumeEntry): void {
+function registerComputerResume(entry: ComputerResumeEntry, drainNow = true): void {
   // One per thread: the newest park replaces an older one.
   pendingComputerResumes.set(entry.threadId, entry);
-  // The seat may already be free (it freed before this park registered):
-  // an idle install would otherwise never drain. #1651.
-  queueMicrotask(drainComputerResumes);
+  if (drainNow) {
+    // The seat may already be free (it freed before this park registered):
+    // an idle install would otherwise never drain. #1651.
+    queueMicrotask(drainComputerResumes);
+    return;
+  }
+  // A blocked retry re-reads the same admission state until it changes, so
+  // it belongs on the one-second timer; a microtask here would spin.
+  if (!computerResumeTimer) {
+    computerResumeTimer = setTimeout(drainComputerResumes, 1_000);
+    computerResumeTimer.unref();
+  }
 }
 
 function markComputerResumeFailed(entry: ComputerResumeEntry, message: string): void {
@@ -12670,8 +12684,12 @@ function dispatchComputerResume(entry: ComputerResumeEntry): void {
       if (operation.cancelled) return;
       const current = connectorThread(entry.botId, entry.threadId);
       if (!current?.group) return;
-      if (current.bot.busy) {
-        registerComputerResume(entry);
+      // Only ANOTHER live group turn for this bot blocks the resume. The
+      // whole-bot busy flag is true whenever the bot's 1:1 thread runs and
+      // must not park a room resume; this callback's own operation is
+      // registered already and is excluded above.
+      if (activeGroupTurnForBot(entry.botId, operation)) {
+        registerComputerResume(entry, false);
         return;
       }
       await runGroupMemberTurn(
@@ -12702,7 +12720,7 @@ function dispatchComputerResume(entry: ComputerResumeEntry): void {
     onDispatchError: (message) => markComputerResumeFailed(entry, message),
   }).catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
-    if (isTurnAdmissionBlocked(error)) registerComputerResume(entry);
+    if (isTurnAdmissionBlocked(error)) registerComputerResume(entry, false);
     else markComputerResumeFailed(entry, message);
   });
 }
@@ -12711,7 +12729,8 @@ function drainComputerResumes(): void {
   clearTimeout(computerResumeTimer);
   computerResumeTimer = undefined;
   for (const [key, entry] of pendingComputerResumes) {
-    if (!connectorThread(entry.botId, entry.threadId)) {
+    const owner = connectorThread(entry.botId, entry.threadId);
+    if (!owner) {
       pendingComputerResumes.delete(key);
       continue;
     }
@@ -12734,6 +12753,11 @@ function drainComputerResumes(): void {
     // Busy under the parked generation: the turn is still settling. Keep the
     // entry; the next drain (its completion, the next release) dispatches.
     if (threadBusy(entry.botId, entry.threadId)) continue;
+    // Admission before dispatch: a resume startTurn would refuse must wait
+    // on the timer, not bounce through the rejection handler back into a
+    // drain microtask. Direct resumes share startTurn's own test; a room
+    // resume only waits behind another live group turn for the bot.
+    if (owner.group ? Boolean(activeGroupTurnForBot(entry.botId)) : !canAdmitDirectTurn(entry.botId, entry.threadId)) continue;
     if (!turnResources.free(entry.resource)) continue;
     pendingComputerResumes.delete(key);
     dispatchComputerResume(entry);
