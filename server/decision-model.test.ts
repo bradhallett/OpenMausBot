@@ -41,6 +41,11 @@ describe("decision model configuration", () => {
     expect(decisionModelBaseUrl({ provider: "openrouter", model: "m" })).toBe("https://openrouter.ai/api/v1");
     expect(decisionModelBaseUrl({ provider: "custom", model: "m" })).toBe(null);
     expect(decisionModelBaseUrl({ provider: "custom", model: "m", url: "http://127.0.0.1:8787/v1/" })).toBe("http://127.0.0.1:8787/v1");
+    // the transport rule holds at the point of use, where env and stored
+    // values arrive without the patch schema's check: https anywhere, http
+    // only on a loopback host — keyless or not
+    expect(decisionModelBaseUrl({ provider: "custom", model: "m", url: "https://decision.example.test/v1" })).toBe("https://decision.example.test/v1");
+    expect(decisionModelBaseUrl({ provider: "custom", model: "m", url: "http://decision.example.test:8787/v1" })).toBe(null);
     expect(decisionModelBaseUrl({ provider: "custom", model: "m", url: "ftp://example.test" })).toBe(null);
   });
 

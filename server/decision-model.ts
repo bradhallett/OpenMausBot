@@ -7,7 +7,7 @@
 // and is never logged.
 import { createHash } from "node:crypto";
 import { TypeSafeClient, choice as choiceQuestion, type EntryType } from "@typesafe-ai/sdk";
-import { DECISION_MODEL_PROVIDERS, type AppConfig } from "./config.ts";
+import { DECISION_MODEL_PROVIDERS, isDecisionUrlTransportSecure, type AppConfig } from "./config.ts";
 
 export type DecisionModelProvider = (typeof DECISION_MODEL_PROVIDERS)[number];
 
@@ -33,15 +33,18 @@ export function decisionModelProvider(value: unknown): DecisionModelProvider | n
 }
 
 /** The lane's API root. The custom lane has no default: a user-run
- * endpoint is the whole point of it. */
+ * endpoint is the whole point of it. The transport rule is enforced here,
+ * at the point of use: https anywhere, http only on a loopback host, so
+ * env and stored values — which skip the patch schema's check — can never
+ * open a cleartext lane to a remote host for state or keys. */
 export function decisionModelBaseUrl(config: DecisionModelConfig): string | null {
   const provider = decisionModelProvider(config.provider);
   if (!provider) return null;
   const url = (config.url ?? "").trim() || DEFAULT_URLS[provider];
   if (!url) return null;
+  if (!isDecisionUrlTransportSecure(url)) return null;
   try {
     const parsed = new URL(url);
-    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
     return parsed.origin + parsed.pathname.replace(/\/+$/, "");
   } catch {
     return null;

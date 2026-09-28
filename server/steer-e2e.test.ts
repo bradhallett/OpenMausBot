@@ -193,7 +193,7 @@ posixOnly("mid-turn steering e2e", () => {
           url: `http://127.0.0.1:${decisionPort}/v1`,
           model: "fake-admission",
           uses: { steerPolicy: true },
-          steerPolicy: { queueOverrideThreshold: 0.7, steerOverrideThreshold: 0.9, budgetMs: 250 },
+          steerPolicy: { queueOverrideThreshold: 0.7, steerOverrideThreshold: 0.9, budgetMs: 500 },
         },
         instances: {
           claude: { driver: "claudeAgent", environment: { FAKE_CLAUDE_MODE: "slow" }, config: { cli: FAKE_CLAUDE, permissionMode: "bypassPermissions" } },
@@ -800,14 +800,15 @@ posixOnly("mid-turn steering e2e", () => {
   it("a decision slower than the hot-path budget times out to the preference without delaying the send", async () => {
     const created = await busyAdmissionTurn("audit the config loader");
     const stream = await admissionStream();
-    admissionOutcome = { choice: "steer", confidence: 0.99, delayMs: 800 };
+    admissionOutcome = { choice: "steer", confidence: 0.99, delayMs: 1500 };
     try {
       const startedAt = Date.now();
       const second = await api("POST", `/api/bots/${created.id}/messages`, { text: "start with the tests" });
       expect(second.status).toBe(202);
       expect(second.body.steered).toBe(true);
-      // the 250ms budget fired well before the 800ms answer landed
-      expect(Date.now() - startedAt).toBeLessThan(800);
+      // admissionBudgetMs floors any configured budget at 500ms, and the
+      // 500ms budget fired well before the 1500ms answer landed
+      expect(Date.now() - startedAt).toBeLessThan(1500);
       await stream.matching(
         (event) => event.layer === "preference-default" && event.decision === "steer" && event.preference === "steer" && event.detail === "timeout",
         "the timeout-fallback event",

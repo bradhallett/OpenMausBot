@@ -989,6 +989,11 @@ describe("credential env preference", () => {
     "OMB_FISH_AUDIO_API_KEY",
     "OMB_OPENAI_IMAGE_KEY",
     "COMPOSIO_API_KEY",
+    "DECISION_MODEL_API_KEY",
+    "DECISION_MODEL_URL",
+    "DECISION_MODEL_MODEL",
+    "DECISION_MODEL_PROVIDER",
+    "DECISION_MODEL_THRESHOLD",
   ] as const;
   let saved: Record<string, string | undefined>;
 
@@ -1053,6 +1058,28 @@ describe("credential env preference", () => {
     });
     expect(() => parseConfigPatch({ onboarding: { hintsSeen: ["x".repeat(61)] } })).toThrow();
     expect(() => parseConfigPatch({ onboarding: { unknown: true } })).toThrow();
+  });
+
+  it("merges decisionModel nested groups instead of dropping their siblings", () => {
+    saveConfig({
+      decisionModel: {
+        provider: "custom",
+        url: "http://127.0.0.1:8787/v1",
+        model: "jev-local",
+        uses: { steerPolicy: true },
+        steerPolicy: { queueOverrideThreshold: 0.7, steerOverrideThreshold: 0.9, budgetMs: 250 },
+      },
+    });
+    // the steer panel saves one knob at a time; a partial steerPolicy
+    // patch must merge into the stored group, not replace it
+    saveConfig({ decisionModel: { steerPolicy: { budgetMs: 500 } } });
+    expect(loadConfig().decisionModel).toEqual({
+      provider: "custom",
+      url: "http://127.0.0.1:8787/v1",
+      model: "jev-local",
+      uses: { steerPolicy: true },
+      steerPolicy: { queueOverrideThreshold: 0.7, steerOverrideThreshold: 0.9, budgetMs: 500 },
+    });
   });
 
   it("replaces automatic recovery atomically, clears an omitted backup and keeps unrelated settings", () => {
@@ -1326,6 +1353,15 @@ describe("credential env preference", () => {
     syncCredentialEnv({ openaiCompat: { key: "just-saved" } });
     expect(process.env.OPENAI_COMPAT_MODEL).toBe("boot-model");
     expect(process.env.OPENAI_COMPAT_PROVIDER).toBe("boot-provider");
+  });
+
+  it("syncCredentialEnv keeps the decision threshold in step with a save", () => {
+    // loadConfig() prefers DECISION_MODEL_THRESHOLD over the file, so a
+    // mid-session save must update it like url/model/provider or the
+    // boot-injected value shadows the save until relaunch
+    process.env.DECISION_MODEL_THRESHOLD = "0.9";
+    syncCredentialEnv({ decisionModel: { threshold: 0.75 } });
+    expect(process.env.DECISION_MODEL_THRESHOLD).toBe("0.75");
   });
 });
 

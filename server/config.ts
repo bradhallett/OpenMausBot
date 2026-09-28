@@ -533,8 +533,11 @@ const storedAppConfigSchema = appConfigSchema.extend({
 });
 /** Plain HTTP for the decision endpoint is reserved for the operator's
  * own machine: the requests carry accessibility text and, when one is
- * configured, the key. Empty clears the endpoint and stays allowed. */
-function isDecisionUrlTransportSecure(value: string): boolean {
+ * configured, the key. Empty clears the endpoint and stays allowed.
+ * decision-model.ts enforces the same rule at the point of use, so env
+ * and stored values — which skip this patch schema — cannot reopen a
+ * cleartext lane to a remote host. */
+export function isDecisionUrlTransportSecure(value: string): boolean {
   let parsed: URL;
   try {
     parsed = new URL(value);
@@ -1091,6 +1094,12 @@ export function syncCredentialEnv(patch: Partial<Omit<AppConfig, "threads" | "ne
     if (value) process.env[name] = value;
     else delete process.env[name];
   }
+  // The threshold rides the same env-first overlay as url/model/provider:
+  // without this, a saved threshold writes the file while loadConfig()
+  // keeps answering with the boot-injected value until relaunch.
+  if (patch.decisionModel?.threshold !== undefined) {
+    process.env.DECISION_MODEL_THRESHOLD = String(patch.decisionModel.threshold);
+  }
 }
 
 /** Env names of every workspace credential this process may be holding —
@@ -1209,6 +1218,10 @@ export function saveConfig(
     if (!section) continue;
     const current = jsonObjectSchema.safeParse(disk[key]);
     const merged: JsonObject = current.success ? { ...current.data } : {};
+    // decisionModel's nested groups (uses, steerPolicy) must keep their
+    // disk-stored siblings; capture them before Object.assign overwrites
+    // the section copy below.
+    const storedDecisionModel = key === "decisionModel" && current.success ? current.data : undefined;
     // parseStoredConfig requires threads.maxConcurrentPerBot, so creating
     // the section with only an event-log knob must still persist a valid
     // concurrency default.
@@ -1219,6 +1232,19 @@ export function saveConfig(
     // keeps its value.
     for (const [sectionKey, sectionValue] of Object.entries(section as Record<string, unknown>)) {
       if (sectionValue === null) delete merged[sectionKey];
+    }
+    // decisionModel carries two nested groups (uses, steerPolicy) whose
+    // knobs are saved one at a time: a partial patch must merge into the
+    // stored group, not replace it and silently drop its siblings.
+    if (key === "decisionModel") {
+      for (const nested of ["uses", "steerPolicy"] as const) {
+        const incoming = (section as Record<string, unknown>)[nested];
+        if (!incoming || typeof incoming !== "object") continue;
+        const stored = storedDecisionModel?.[nested];
+        merged[nested] = (stored && typeof stored === "object"
+          ? { ...(stored as Record<string, unknown>), ...(incoming as Record<string, unknown>) }
+          : incoming) as JsonObject;
+      }
     }
     disk[key] = merged;
   }
