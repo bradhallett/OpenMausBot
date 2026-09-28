@@ -12625,6 +12625,7 @@ type ComputerResumeEntry = {
   afterMessageId?: string;
 };
 const pendingComputerResumes = new Map<string, ComputerResumeEntry>();
+let computerResumeTimer: ReturnType<typeof setTimeout> | undefined;
 
 function cancelComputerResume(threadId: string): void {
   const entry = pendingComputerResumes.get(threadId);
@@ -12669,7 +12670,7 @@ function dispatchComputerResume(entry: ComputerResumeEntry): void {
       const current = connectorThread(entry.botId, entry.threadId);
       if (!current?.group) return;
       if (current.bot.busy) {
-        pendingComputerResumes.set(entry.threadId, entry);
+        registerComputerResume(entry);
         return;
       }
       await runGroupMemberTurn(
@@ -12700,12 +12701,14 @@ function dispatchComputerResume(entry: ComputerResumeEntry): void {
     onDispatchError: (message) => markComputerResumeFailed(entry, message),
   }).catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
-    if (isTurnAdmissionBlocked(error)) pendingComputerResumes.set(entry.threadId, entry);
+    if (isTurnAdmissionBlocked(error)) registerComputerResume(entry);
     else markComputerResumeFailed(entry, message);
   });
 }
 
 function drainComputerResumes(): void {
+  clearTimeout(computerResumeTimer);
+  computerResumeTimer = undefined;
   for (const [key, entry] of pendingComputerResumes) {
     if (!connectorThread(entry.botId, entry.threadId)) {
       pendingComputerResumes.delete(key);
@@ -12733,6 +12736,12 @@ function drainComputerResumes(): void {
     if (!turnResources.free(entry.resource)) continue;
     pendingComputerResumes.delete(key);
     dispatchComputerResume(entry);
+  }
+  // ponytail: one wake-up per second only while work is parked; use exact
+  // claim-deadline scheduling if sub-second resume latency becomes necessary.
+  if (pendingComputerResumes.size) {
+    computerResumeTimer = setTimeout(drainComputerResumes, 1_000);
+    computerResumeTimer.unref();
   }
 }
 

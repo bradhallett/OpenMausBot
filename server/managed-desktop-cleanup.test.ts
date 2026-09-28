@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
+import { IdleReleasePolicy } from "./claim-idle.ts";
+import { TurnResources } from "./turn-resources.ts";
 
 // Execute the actual cleanup functions without importing index.ts, which would
 // start a server. State and adapters are synthetic; this is an ownership-race
@@ -239,15 +241,16 @@ const resumeDrainCode = ts.transpileModule([
   section("function drainComputerResumes(", "type SecretResumeEntry"),
 ].join("\n"), { compilerOptions: { target: ts.ScriptTarget.ESNext } }).outputText;
 
-function resumeDrainFixture() {
+function resumeDrainFixture(resources?: TurnResources) {
   const dispatched: string[] = [];
   const state = { threadExists: true, busy: false, seatFree: true, latestUser: "u1" };
   const activeInternalGenerationByThread = new Map<string, string>([["t", "g1"]]);
   const context = vm.createContext({
+    setTimeout, clearTimeout,
     connectorThread: () => (state.threadExists ? { bot: { id: "b" } } : null),
     store: { activePath: () => [{ role: "user", id: state.latestUser }] },
     threadBusy: () => state.busy,
-    turnResources: { free: () => state.seatFree },
+    turnResources: resources ?? { free: () => state.seatFree },
     activeInternalGenerationByThread,
     dispatchComputerResume: (entry: { threadId: string }) => { dispatched.push(entry.threadId); },
     queueMicrotask: (run: () => void) => { run(); },
@@ -267,6 +270,26 @@ it("dispatches a parked resume immediately when the seat is already free at regi
   const f = resumeDrainFixture();
   f.register();
   expect(f.dispatched).toEqual(["t"]);
+});
+
+it("wakes parked work after an idle claim expires without another claim or release", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(0);
+  try {
+    const resources = new TurnResources();
+    const holder = { threadId: "holder", generation: "h" };
+    resources.claim("computer:host", holder, { idle: new IdleReleasePolicy(2_000, 10_000) });
+    const f = resumeDrainFixture(resources);
+    f.register();
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(f.dispatched).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(f.dispatched).toEqual(["t"]);
+    expect(resources.reclaimHolder("computer:host")).toEqual(holder);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it("keeps a parked resume through its own busy settle window and dispatches on the next drain", () => {
