@@ -108,10 +108,11 @@ struct ChatEntityQuery: EntityQuery {
         // resolve to whichever row the snapshot ranks first.
         var known = Dictionary(present.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         // Refresh the persisted identity of every chat asked for that
-        // the snapshot still mentions, so a pick carries its current
-        // name and face into the next quiet spell.
+        // the snapshot still mentions — from the deduplicated map, so
+        // a duplicate row cannot displace the first-ranked pick — and
+        // a pick carries its current name and face forward.
         let requested = Set(identifiers)
-        for entity in present where requested.contains(entity.id) {
+        for (id, entity) in known where requested.contains(id) {
             ChatIdentityStore.save(entity)
         }
         // A chat that has gone quiet resolves from the identity saved at
