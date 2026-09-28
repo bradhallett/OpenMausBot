@@ -55,7 +55,7 @@ struct WorkingMonitorEntry: TimelineEntry {
 /// that outlives the app, which is exactly what the reach is for.
 struct WorkingMonitorProvider: TimelineProvider {
     func placeholder(in context: Context) -> WorkingMonitorEntry {
-        WorkingMonitorEntry(date: Date(), state: .quiet)
+        WorkingMonitorEntry(date: Date(), state: .quiet(WidgetSnapshot.empty()))
     }
 
     func getSnapshot(in context: Context, completion: @escaping (WorkingMonitorEntry) -> Void) {
@@ -70,10 +70,10 @@ struct WorkingMonitorProvider: TimelineProvider {
         var state = current(now: now)
         // The app has been gone fifteen minutes — ask the computer
         // ourselves, then read once more. The trigger is the written
-        // age, not the rendered case: an empty write classifies quiet
-        // before its age is ever consulted, and work that started after
-        // the app left would otherwise stay invisible until the next
-        // app write. Best effort by design: a refresh that cannot reach
+        // age, not the rendered case — classification only relabels
+        // what was written, and work that started after the app left
+        // would otherwise stay invisible until the next app write.
+        // Best effort by design: a refresh that cannot reach
         // the computer leaves the aged snapshot standing, and the view
         // says how old it is.
         if isAged(now: now) {
