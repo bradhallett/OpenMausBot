@@ -43,7 +43,7 @@ struct CompanionApp: App {
                     session.connect()
                     liveActivities.attach(to: session)
                 }
-                .onOpenURL { session.receivePairingURL($0) }
+                .onOpenURL { session.receiveURL($0) }
                 .onValueChange(of: scenePhase) { phase in
                     switch phase {
                     case .active:
