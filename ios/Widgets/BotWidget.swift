@@ -19,6 +19,7 @@
 // below 17.
 import AppIntents
 import CompanionCore
+import Foundation
 import SwiftUI
 import WidgetKit
 
@@ -56,7 +57,7 @@ struct SelectChatIntent: WidgetConfigurationIntent {
 /// name and face in the widget instead of orphaning it, and the query
 /// refreshes the identity whenever the chat reappears in a snapshot.
 @available(iOS 17.0, *)
-struct ChatEntity: AppEntity, Codable {
+struct ChatEntity: AppEntity, Codable, Equatable {
     let id: String
     let name: String
     let color: String
@@ -92,13 +93,29 @@ struct ChatEntity: AppEntity, Codable {
 /// the extension, and the App Group file needs no credentials — the
 /// picker never reaches for the network or the keychain. An empty
 /// snapshot offers no chats; the widget says what to do instead.
+///
+/// Resolution survives a quiet spell by design: WidgetKit re-resolves a
+/// saved identifier through `entities(for:)`, and a chat absent from
+/// the rows would read as no pick at all — the widget would demand
+/// configuration again instead of saying all quiet. The identity saved
+/// at pick time stands in until the chat reappears.
 @available(iOS 17.0, *)
 struct ChatEntityQuery: EntityQuery {
     func entities(for identifiers: [String]) async throws -> [ChatEntity] {
-        let known = Dictionary(uniqueKeysWithValues: (await current()).map { ($0.id, $0) })
-        // Chats the snapshot no longer mentions resolve to nothing here;
-        // their persisted entities stand as picked, so the widget keeps
-        // rendering them rather than forgetting the user's choice.
+        let present = await current()
+        var known = Dictionary(uniqueKeysWithValues: present.map { ($0.id, $0) })
+        // Refresh the persisted identity of every chat asked for that
+        // the snapshot still mentions, so a pick carries its current
+        // name and face into the next quiet spell.
+        let requested = Set(identifiers)
+        for entity in present where requested.contains(entity.id) {
+            ChatIdentityStore.save(entity)
+        }
+        // A chat that has gone quiet resolves from the identity saved at
+        // pick time rather than dropping out of the configuration.
+        for identifier in identifiers where known[identifier] == nil {
+            known[identifier] = ChatIdentityStore.saved()[identifier]
+        }
         return identifiers.compactMap { known[$0] }
     }
 
@@ -109,6 +126,33 @@ struct ChatEntityQuery: EntityQuery {
     private func current() async -> [ChatEntity] {
         guard let snapshot = WidgetSnapshotStore.makeAppGroupStore()?.read() else { return [] }
         return snapshot.rows.map(ChatEntity.init(row:))
+    }
+}
+
+/// The identities a picker has chosen, kept in the App Group beside the
+/// snapshot. The snapshot only carries active rows, so without this file
+/// a quiet chat is unresolvable exactly when the widget most needs its
+/// identity to keep saying "all quiet" for the chat that was picked.
+@available(iOS 17.0, *)
+enum ChatIdentityStore {
+    static let fileName = "widget-chat-identities.json"
+
+    static func save(_ entity: ChatEntity) {
+        var all = saved()
+        guard all[entity.id] != entity else { return }
+        all[entity.id] = entity
+        guard let directory = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: OpenMausSharedConfiguration.appGroupIdentifier
+        ), let data = try? JSONEncoder().encode(Array(all.values)) else { return }
+        try? data.write(to: directory.appendingPathComponent(fileName), options: .atomic)
+    }
+
+    static func saved() -> [String: ChatEntity] {
+        guard let directory = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: OpenMausSharedConfiguration.appGroupIdentifier
+        ), let data = try? Data(contentsOf: directory.appendingPathComponent(fileName)) else { return [:] }
+        let identities = (try? JSONDecoder().decode([ChatEntity].self, from: data)) ?? []
+        return Dictionary(uniqueKeysWithValues: identities.map { ($0.id, $0) })
     }
 }
 
@@ -143,7 +187,7 @@ struct BotTimelineProvider: AppIntentTimelineProvider {
     func placeholder(in context: Context) -> BotEntry {
         BotEntry(
             date: Date(),
-            state: .quiet,
+            state: .quiet(WidgetSnapshot.empty()),
             entity: ChatEntity(id: "demo", name: "Maus", color: "", face: MausState.idle.rawValue)
         )
     }
@@ -169,8 +213,11 @@ struct BotTimelineProvider: AppIntentTimelineProvider {
         }
         // The one flip the widget can perform on its own: fresh to stale
         // at the fifteen-minute mark, the same honesty line every widget
-        // in this extension keeps.
-        if case let .fresh(snapshot) = entry.state {
+        // in this extension keeps — an empty write crosses it too, so a
+        // quiet chat stops claiming an unqualified all-clear once the
+        // picture behind it has aged.
+        switch entry.state {
+        case let .fresh(snapshot), let .quiet(snapshot):
             entries.append(
                 BotEntry(
                     date: snapshot.writtenAt.addingTimeInterval(WidgetSnapshotState.freshnessInterval),
@@ -178,6 +225,8 @@ struct BotTimelineProvider: AppIntentTimelineProvider {
                     entity: entry.entity
                 )
             )
+        default:
+            break
         }
         return Timeline(entries: entries, policy: .after(now.addingTimeInterval(30 * 60)))
     }

@@ -47,6 +47,13 @@ public struct WidgetSnapshot: Codable, Equatable, Sendable {
 }
 
 extension WidgetSnapshot {
+    /// An empty write from "now" — what a placeholder renders, so a
+    /// preview crosses the same fresh-to-stale line a real quiet
+    /// snapshot does instead of occupying a state nothing produces.
+    public static func empty(connectionID: String = "", now: Date = Date()) -> WidgetSnapshot {
+        WidgetSnapshot(writtenAt: now, connectionID: connectionID, rows: [])
+    }
+
     /// How long after `writtenAt` a rendered pill may still be tapped:
     /// the ten-minute trust window `answerableCard` enforces at tap time.
     /// The widget timeline and pill view share it so the buttons
