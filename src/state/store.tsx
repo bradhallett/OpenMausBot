@@ -597,6 +597,8 @@ export interface ConfigStatus {
    * key is write-only like every other credential. */
   decisionModel?: {
     configured: boolean;
+    /** a key is saved, even before the lane and model make it usable */
+    keyPresent: boolean;
     provider?: "typesafe" | "vercel" | "openrouter" | "custom";
     url: string;
     model: string;

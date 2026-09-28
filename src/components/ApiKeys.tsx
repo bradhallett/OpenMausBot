@@ -24,7 +24,11 @@ const SECTIONS: Record<
   opencodeGo: { body: (v) => ({ opencodeGo: { apiKey: v } }), flag: (c) => c.opencodeGo?.configured ?? false },
   anthropic: { body: (v) => ({ anthropic: { key: v } }), flag: (c) => c.anthropic?.configured ?? false },
   openaiCompat: { body: (v) => ({ openaiCompat: { key: v } }), flag: (c) => c.openaiCompat?.configured ?? false },
-  decisionModel: { body: (v) => ({ decisionModel: { apiKey: v } }), flag: (c) => c.decisionModel?.configured ?? false },
+  // this row tracks the saved key, not chooser readiness: a key saved
+  // before a lane and model are picked must still show as saved and stay
+  // clearable, while `configured` (used by the routing panel) stays
+  // false until the route is complete
+  decisionModel: { body: (v) => ({ decisionModel: { apiKey: v } }), flag: (c) => c.decisionModel?.keyPresent ?? false },
   mistral: { body: (v) => ({ mistral: { key: v } }), flag: (c) => c.mistral?.configured ?? false },
   xai: { body: (v) => ({ xai: { key: v } }), flag: (c) => c.xai?.configured ?? false },
 };
@@ -528,7 +532,13 @@ export function DecisionModelRouting() {
           <span className="text-[12px] text-ink-secondary">{t("keys.decisionModel.lane")}</span>
           <select
             value={provider}
-            onChange={(e) => setProvider(e.target.value as typeof provider)}
+            onChange={(e) => {
+              setProvider(e.target.value as typeof provider);
+              // the saved URL belongs to the lane it was entered for: the
+              // server prefers a nonempty saved URL over the new lane's
+              // default, so switching lanes resets it
+              setUrl("");
+            }}
             aria-label={t("keys.decisionModel.lane")}
             className="w-full rounded-lg border border-hairline/40 bg-inset px-3 py-2 text-[13px] text-ink focus:border-hairline focus:outline-none"
           >

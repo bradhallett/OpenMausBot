@@ -59,7 +59,8 @@ describe("provider key rows", () => {
   it("renders the decision-model key write-only like every other provider key", () => {
     vi.spyOn(store, "useStore").mockReturnValue({
       state: { ...store.initialState, config: {
-        ...store.initialState.config, decisionModel: { configured: true, url: "", model: "jev-latest", threshold: 0.9 },
+        ...store.initialState.config,
+        decisionModel: { configured: true, keyPresent: true, url: "", model: "jev-latest", threshold: 0.9 },
       } as store.ConfigStatus },
       dispatch: vi.fn(),
       flushBotPatches: vi.fn(),
@@ -72,6 +73,27 @@ describe("provider key rows", () => {
     expect(html).toContain('value=""');
     expect(html).not.toContain("Connected");
     expect(html).toContain(">Test<");
+  });
+
+  it("keeps a key saved before the route is complete clearable", () => {
+    // keyPresent, not configured, drives this row: a key saved before a
+    // lane and model are picked is still stored, so it must show as saved
+    // and stay clearable instead of vanishing behind an unusable route
+    vi.spyOn(store, "useStore").mockReturnValue({
+      state: { ...store.initialState, config: {
+        ...store.initialState.config,
+        decisionModel: { configured: false, keyPresent: true, provider: "typesafe", url: "", model: "", threshold: 0.9 },
+      } as store.ConfigStatus },
+      dispatch: vi.fn(),
+      flushBotPatches: vi.fn(),
+      refreshInstances: vi.fn(),
+      refreshModels: vi.fn(),
+    });
+    const html = render(createElement(ApiKeyRow, { section: "decisionModel", testProvider: "decisionModel" }));
+    expect(html).toContain("Configured");
+    expect(html).toContain("paste to replace");
+    expect(html).toContain("Remove the saved key");
+    expect(html).toContain(">Clear<");
   });
 });
 
@@ -105,7 +127,7 @@ describe("decision model routing", () => {
   });
 
   it("echoes a saved connection and points at the calibration probe", () => {
-    mockStore({ configured: true, provider: "custom", url: "http://127.0.0.1:8787/v1", model: "local", threshold: 0.75 });
+    mockStore({ configured: true, keyPresent: true, provider: "custom", url: "http://127.0.0.1:8787/v1", model: "local", threshold: 0.75 });
     const html = render(createElement(DecisionModelRouting));
     expect(html).toContain('value="local"');
     expect(html).toContain('value="http://127.0.0.1:8787/v1"');
@@ -114,7 +136,7 @@ describe("decision model routing", () => {
   });
 
   it("offers Not configured only before a lane is saved, so a saved route has no dead-end selection", () => {
-    mockStore({ configured: true, provider: "typesafe", url: "", model: "jev-latest", threshold: 0.9 });
+    mockStore({ configured: true, keyPresent: true, provider: "typesafe", url: "", model: "jev-latest", threshold: 0.9 });
     const html = render(createElement(DecisionModelRouting));
     expect(html).not.toContain('<option value="">');
     expect(html).toContain('value="typesafe"');

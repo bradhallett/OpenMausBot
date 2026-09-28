@@ -7931,8 +7931,11 @@ async function startTurn(
   }
   // Only an admitted turn may own the goal slot: recording before the busy
   // and capacity checks let a rejected call (a compact racing a live turn,
-  // say) overwrite the active turn's decision-model context (#1630).
-  recordTurnGoal(threadId, text);
+  // say) overwrite the active turn's decision-model context (#1630). Card
+  // continuations resume an already-admitted turn with a resume prompt, so
+  // the original request stays the decision goal; the prompt is for the
+  // agent turn only.
+  if (!opts?.cardContinuation) recordTurnGoal(threadId, text);
   // Steering is never a cancel. A message sent while teammates are working
   // runs now, with their assignments still attached: they keep running and
   // their results still return here (outstandingAssignmentsPrompt tells this
@@ -13071,6 +13074,10 @@ function configStatus() {
     // the key; incomplete = the chooser stays off
     decisionModel: {
       configured: decisionModelConfigured(cfg.decisionModel),
+      // key presence is separate from readiness: a key saved before the
+      // lane and model are picked must still show as saved and stay
+      // clearable from the settings row
+      keyPresent: Boolean(cfg.decisionModel?.apiKey?.trim()),
       ...(cfg.decisionModel?.provider ? { provider: cfg.decisionModel.provider } : {}),
       url: decisionModelBaseUrl(cfg.decisionModel ?? {}) ?? "",
       model: cfg.decisionModel?.model ?? "",

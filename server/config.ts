@@ -1044,6 +1044,11 @@ export function syncCredentialEnv(patch: Partial<Omit<AppConfig, "threads" | "ne
     if (value) process.env[name] = value;
     else delete process.env[name];
   }
+  // The threshold rides the same env-preferred load path (loadConfig reads
+  // DECISION_MODEL_THRESHOLD), so a saved change must take effect at once
+  // like the other decision-model settings.
+  const threshold = patch.decisionModel?.threshold;
+  if (typeof threshold === "number") process.env.DECISION_MODEL_THRESHOLD = String(threshold);
 }
 
 /** Env names of every workspace credential this process may be holding —
