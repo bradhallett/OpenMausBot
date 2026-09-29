@@ -259,22 +259,25 @@ function packFilePath(botId: string, name: string): string {
 
 /** Read pack bytes through one descriptor that refuses to follow symlinks,
  * never blocks opening a special file, and never reads past
- * PACK_FILE_MAX_BYTES. A separate stat-then-read would still allow a
- * replacement race; opening the final path without following symlinks and
- * checking that same descriptor closes it. */
+ * PACK_FILE_MAX_BYTES. O_NOFOLLOW/O_NONBLOCK are absent on Windows, so the
+ * org-library.ts readBlob pattern covers every platform: lstat refuses the
+ * link before the open, and the opened descriptor's inode must still be the
+ * one lstat saw, which also closes the replacement race. */
 function readPackFileBounded(path: string): string | null {
-  // O_NOFOLLOW/O_NONBLOCK are absent on some platforms (Windows); there the
-  // isFile + size checks on the descriptor still bound every read.
-  const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
+  const flags =
+    fsConstants.O_RDONLY | (process.platform === "win32" ? 0 : (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
   let fd: number;
+  let before: ReturnType<typeof lstatSync>;
   try {
+    before = lstatSync(path);
+    if (!before.isFile() || before.size > PACK_FILE_MAX_BYTES) return null;
     fd = openSync(path, flags);
   } catch {
     return null;
   }
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.size > PACK_FILE_MAX_BYTES) return null;
+    if (!stat.isFile() || stat.size > PACK_FILE_MAX_BYTES || stat.ino !== before.ino) return null;
     const buffer = Buffer.alloc(stat.size);
     let read = 0;
     while (read < buffer.length) {

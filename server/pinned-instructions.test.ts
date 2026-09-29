@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { removeTempDir } from "./testing/cleanup.ts";
 import { workspaceDir } from "./workspace.ts";
@@ -54,7 +54,7 @@ describe("parsePackMd", () => {
     const parsed = parsePackMd(pack("release-checklist", { role: "Rust Engineer", workspace: "/tmp/proj" }));
     expect(parsed).toMatchObject({
       name: "release-checklist",
-      conditions: { role: "Rust Engineer", workspace: "/tmp/proj" },
+      conditions: { role: "Rust Engineer", workspace: resolve("/tmp/proj") },
     });
     if (!("error" in parsed)) expect(parsed.body).toContain("ALWAYS_RUN_GATE");
   });
