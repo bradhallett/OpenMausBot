@@ -250,6 +250,11 @@ function resumeDrainFixture(resources?: TurnResources) {
     connectorThread: () => (state.threadExists ? { bot: { id: "b" } } : null),
     store: { activePath: () => [{ role: "user", id: state.latestUser }] },
     threadBusy: () => state.busy,
+    // The drain's admission precheck calls these on the real path. The
+    // fixture models one direct thread with no group turn, so admission
+    // reduces to the same thread-busy fact the drain already reads above.
+    canAdmitDirectTurn: () => !state.busy,
+    activeGroupTurnForBot: () => false,
     turnResources: resources ?? { free: () => state.seatFree },
     activeInternalGenerationByThread,
     dispatchComputerResume: (entry: { threadId: string }) => { dispatched.push(entry.threadId); },
